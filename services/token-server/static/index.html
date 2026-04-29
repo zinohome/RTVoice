@@ -2,59 +2,76 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<title>RTVoice — LiveKit 链路测试</title>
+<title>RTVoice — Voice Agent 测试</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <!--RTVOICE_DEV_INJECT-->
 <style>
   body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
          max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; }
   h1 { font-size: 1.2rem; }
+  h2 { font-size: 1rem; margin-top: 1.5rem; }
   label { display: block; margin: 0.5rem 0 0.2rem; font-size: 0.9rem; color: #555; }
   input { width: 100%; padding: 0.5rem; font: inherit; box-sizing: border-box; }
-  button { margin-top: 1rem; padding: 0.6rem 1rem; font: inherit; cursor: pointer; }
+  button { margin-top: 0.5rem; padding: 0.6rem 1rem; font: inherit; cursor: pointer; }
   button[disabled] { opacity: 0.5; cursor: not-allowed; }
   pre { background: #f4f4f4; padding: 0.75rem; overflow-x: auto;
         font-size: 0.85rem; border-radius: 4px; max-height: 280px; }
-  .row { display: flex; gap: 0.5rem; }
-  .row > * { flex: 1; }
+  .row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 8rem; }
   .ok { color: #0a7d31; }
   .err { color: #b10000; }
+  .info { color: #555; }
   .hint { font-size: 0.8rem; color: #777; margin-top: 0.2rem; }
+  .badges { display: flex; gap: 0.5rem; margin-top: 1rem; }
+  .badge { padding: 0.25rem 0.5rem; border: 1px solid #aaa; border-radius: 4px; font-size: 0.8rem; }
+  .badge.on { border-color: #0a7d31; color: #0a7d31; }
+  .badge.warn { border-color: #b10000; color: #b10000; }
 </style>
 </head>
 <body>
-<h1>RTVoice — LiveKit 链路测试 (v0.1)</h1>
-<p>验证浏览器能否通过 token-server 取 token，再用 WebRTC 加入 LiveKit 房间。</p>
+<h1>RTVoice — Voice Agent 测试 (v0.2)</h1>
+<p>本页验证浏览器与 agent-worker 的双向音频：你说话 → agent VAD 检测 → mock pipeline → agent 回放 sine wave。</p>
 
 <label>API Key（来自 .env 的 APP_API_KEY）</label>
 <input id="apikey" type="password" placeholder="paste your APP_API_KEY here" autocomplete="off" />
-<div class="hint">key 仅保存在浏览器 localStorage；DEV_AUTO_INJECT_KEY=true 时已自动填充。</div>
+<div class="hint">DEV_AUTO_INJECT_KEY=true 时已自动填充。</div>
 
 <label>Room</label>
 <input id="room" value="rtvoice-test" />
+<div class="hint">必须与 agent-worker 的 AGENT_ROOM 一致（默认 rtvoice-test）。</div>
 
 <label>Identity</label>
 <input id="identity" value="user-1" />
 
 <div class="row">
-  <button id="connect">1. 申请 token + 加入房间</button>
-  <button id="disconnect" disabled>2. 离开</button>
+  <button id="connect">1. 加入房间</button>
+  <button id="mic" disabled>2. 开麦克风</button>
+  <button id="disconnect" disabled>3. 离开</button>
 </div>
 
-<h2 style="font-size:1rem;margin-top:1.5rem">日志</h2>
+<div class="badges">
+  <div id="badge-conn" class="badge">连接: ❌</div>
+  <div id="badge-agent" class="badge">agent: ❌</div>
+  <div id="badge-mic" class="badge">麦克风: ❌</div>
+  <div id="badge-remote" class="badge">远端音频: ❌</div>
+</div>
+
+<h2>日志</h2>
 <pre id="log">（等待操作）</pre>
 
-<!-- LiveKit JS SDK；CDN pin 版本，与 livekit-server v1.11.x 兼容 -->
+<!-- 远端音频通过隐藏 audio 元素播放 -->
+<audio id="remote-audio" autoplay></audio>
+
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.18.7/dist/livekit-client.umd.min.js"></script>
 <script>
   const $ = (id) => document.getElementById(id);
   const logEl = $("log");
   const apikeyInput = $("apikey");
   let room = null;
+  let micTrack = null;
 
-  // --- API key 注入：dev 模式自动填充，prod 模式从 localStorage 读 ---
+  // --- API key 注入 ---
   const devKeyMeta = document.querySelector('meta[name="rtvoice-dev-api-key"]');
-  const isDev = document.querySelector('meta[name="rtvoice-dev-mode"]')?.content === "true";
   if (devKeyMeta && devKeyMeta.content) {
     apikeyInput.value = devKeyMeta.content;
     apikeyInput.placeholder = "(dev 模式已自动注入)";
@@ -73,28 +90,28 @@
     logEl.appendChild(line);
     logEl.scrollTop = logEl.scrollHeight;
   }
+  function setBadge(id, on, label) {
+    const el = $(id);
+    el.textContent = label;
+    el.classList.toggle("on", on);
+  }
 
   async function fetchToken(roomName, identity, apiKey) {
     const res = await fetch("/token", {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "authorization": `Bearer ${apiKey}`,
-      },
+      headers: { "content-type": "application/json", "authorization": `Bearer ${apiKey}` },
       body: JSON.stringify({ room: roomName, identity }),
     });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`token-server ${res.status}: ${body}`);
-    }
+    if (!res.ok) throw new Error(`token-server ${res.status}: ${await res.text()}`);
     return res.json();
   }
 
+  // ---------- 1. Connect ----------
   $("connect").onclick = async () => {
     $("connect").disabled = true;
     try {
       const apiKey = apikeyInput.value.trim();
-      if (!apiKey) throw new Error("缺少 API Key（看 .env 的 APP_API_KEY）");
+      if (!apiKey) throw new Error("缺少 API Key");
       const roomName = $("room").value.trim();
       const identity = $("identity").value.trim();
       log(`请求 token room=${roomName} identity=${identity}...`);
@@ -102,29 +119,95 @@
       log(`token OK，连接 ${url} ...`);
 
       room = new LivekitClient.Room({ adaptiveStream: true, dynacast: true });
+
       room.on(LivekitClient.RoomEvent.Connected, () => {
         log("✅ 已加入房间", "ok");
+        setBadge("badge-conn", true, "连接: ✅");
+        $("mic").disabled = false;
         $("disconnect").disabled = false;
+        // 检查 agent 是否已在房间内
+        const agents = [...room.remoteParticipants.values()].filter(p => /agent/i.test(p.identity));
+        if (agents.length) {
+          log(`agent 在房间: ${agents.map(p=>p.identity).join(',')}`);
+          setBadge("badge-agent", true, "agent: ✅");
+        } else {
+          log("等待 agent 加入...");
+        }
       });
       room.on(LivekitClient.RoomEvent.Disconnected, (reason) => {
         log(`已断开：${reason}`, "err");
+        setBadge("badge-conn", false, "连接: ❌");
+        setBadge("badge-agent", false, "agent: ❌");
+        setBadge("badge-mic", false, "麦克风: ❌");
+        setBadge("badge-remote", false, "远端音频: ❌");
         $("connect").disabled = false;
+        $("mic").disabled = true;
         $("disconnect").disabled = true;
+        room = null;
       });
       room.on(LivekitClient.RoomEvent.ParticipantConnected, (p) => {
         log(`参与者加入：${p.identity}`);
+        if (/agent/i.test(p.identity)) setBadge("badge-agent", true, "agent: ✅");
+      });
+      room.on(LivekitClient.RoomEvent.ParticipantDisconnected, (p) => {
+        log(`参与者离开：${p.identity}`);
+        if (/agent/i.test(p.identity)) setBadge("badge-agent", false, "agent: ❌");
+      });
+      room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, pub, p) => {
+        log(`订阅 ${track.kind} from ${p.identity}`);
+        if (track.kind === "audio") {
+          track.attach($("remote-audio"));
+          setBadge("badge-remote", true, "远端音频: ✅");
+        }
+      });
+      room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track, pub, p) => {
+        log(`取消订阅 ${track.kind} from ${p.identity}`, "info");
+        if (track.kind === "audio") {
+          track.detach();
+          setBadge("badge-remote", false, "远端音频: ❌");
+        }
       });
 
       await room.connect(url, token);
-      // v0.1 不发布媒体；仅验证 WebRTC 握手
     } catch (e) {
       log(`❌ ${e.message}`, "err");
       $("connect").disabled = false;
     }
   };
 
+  // ---------- 2. Mic ----------
+  $("mic").onclick = async () => {
+    if (!room) return;
+    if (micTrack) {
+      // 关麦
+      try { await room.localParticipant.unpublishTrack(micTrack); } catch (e) {}
+      try { micTrack.stop(); } catch (e) {}
+      micTrack = null;
+      setBadge("badge-mic", false, "麦克风: ❌");
+      $("mic").textContent = "2. 开麦克风";
+      log("麦克风已关闭");
+      return;
+    }
+    try {
+      micTrack = await LivekitClient.createLocalAudioTrack({
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      });
+      await room.localParticipant.publishTrack(micTrack);
+      setBadge("badge-mic", true, "麦克风: ✅");
+      $("mic").textContent = "2. 关麦克风";
+      log("✅ 麦克风开启并已发布", "ok");
+    } catch (e) {
+      log(`❌ 麦克风失败：${e.message}`, "err");
+    }
+  };
+
+  // ---------- 3. Disconnect ----------
   $("disconnect").onclick = async () => {
     if (room) {
+      try { if (micTrack) micTrack.stop(); } catch (e) {}
+      micTrack = null;
       await room.disconnect();
       room = null;
     }

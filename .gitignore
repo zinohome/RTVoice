@@ -68,6 +68,7 @@ Thumbs.db
 # --- AI 助手会话痕迹 ---
 .remember/
 .claude/
+.playwright-mcp/
 
 # --- 临时文件 ---
 *.tmp
