@@ -20,6 +20,7 @@
 | [SECURITY.md](./SECURITY.md) | 安全契约：禁止行为、生产迁移协议、回滚策略 |
 | [DEPLOY.md](./DEPLOY.md) | 部署手册：开发机 / 生产机流程、备份、故障排查 |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | 系统设计：组件、数据流、状态机、性能预算、ADR |
+| [ENGINES.md](./ENGINES.md) | 引擎选型：STT/TTS/LLM 候选对比、选型理由、降级策略 |
 
 ---
 
