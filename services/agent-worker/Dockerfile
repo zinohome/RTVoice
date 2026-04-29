@@ -37,7 +37,9 @@ COPY app ./app
 RUN useradd -u 1000 -m appuser && chown -R appuser:appuser /app
 USER appuser
 
-HEALTHCHECK --interval=15s --timeout=3s --retries=3 --start-period=10s \
-  CMD pgrep -f "app.main" > /dev/null || exit 1
+# 健康检查：v0.3+ 改为读 /tmp/agent-heartbeat 文件 mtime（agent 加入 room 后定期 touch）。
+# v0.2 暂时禁用——agent 退出会被 restart: unless-stopped 兜底。
+# （python:3.11-slim 不带 procps，原 pgrep 方案永远 unhealthy）
+HEALTHCHECK NONE
 
 CMD ["python", "-m", "app.main"]
