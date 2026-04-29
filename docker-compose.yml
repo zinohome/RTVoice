@@ -1,0 +1,98 @@
+# RTVoice 公共 compose 定义
+# 用法：
+#   开发：docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile dev up -d
+#   生产：docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod up -d
+# 安全：见 SECURITY.md
+#   - 端口默认绑 ${BIND_HOST}=127.0.0.1（dev），prod 由用户决策
+#   - 镜像 pin 具体版本，禁用 :latest
+#   - 不使用 --privileged / network=host
+
+name: rtvoice
+
+networks:
+  rtvoice_net:
+    driver: bridge
+
+services:
+  # ---------------------------------------------------------------
+  # LiveKit WebRTC SFU
+  # ---------------------------------------------------------------
+  livekit-server:
+    # 升级前请先到 https://github.com/livekit/livekit/releases 验证版本
+    image: livekit/livekit-server:v1.11.0
+    container_name: rtvoice-livekit
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    networks: [rtvoice_net]
+    # LiveKit 接受 LIVEKIT_KEYS 环境变量，格式 "key: secret"
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    # 配置文件由 dev/prod override 挂载
+    command: ["--config", "/etc/livekit.yaml"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:7880/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------
+  # Token Server (FastAPI) — 给客户端发 LiveKit JWT
+  # ---------------------------------------------------------------
+  token-server:
+    build:
+      context: ./services/token-server
+      dockerfile: Dockerfile
+    image: rtvoice/token-server:v0.1.0
+    container_name: rtvoice-token
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    networks: [rtvoice_net]
+    depends_on:
+      livekit-server:
+        condition: service_healthy
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      # /token 端点的访问 key（客户端 Bearer header）。必须 ≥ 32 字符。
+      APP_API_KEY: ${APP_API_KEY}
+      # 浏览器侧用的 ws URL（公网或本地）；dev override 会注入正确值
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL:-ws://127.0.0.1:7880}
+      # dev：把 APP_API_KEY 注入测试页（仅 127.0.0.1 可见时才安全）
+      # prod：默认 false，要求客户端手动配置
+      DEV_AUTO_INJECT_KEY: ${DEV_AUTO_INJECT_KEY:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------
+  # 后续版本占位（v0.2+ 启用）
+  # ---------------------------------------------------------------
+  # agent-worker:    # v0.1 暂不启动；livekit-agents Python worker
+  # stt-server:      # v0.3
+  # tts-server:      # v0.2 mock / v0.5 真
+  # llm-server:      # v0.4 ollama / v0.5 vLLM

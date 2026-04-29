@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>RTVoice — LiveKit 链路测试</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<!--RTVOICE_DEV_INJECT-->
+<style>
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+         max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.2rem; }
+  label { display: block; margin: 0.5rem 0 0.2rem; font-size: 0.9rem; color: #555; }
+  input { width: 100%; padding: 0.5rem; font: inherit; box-sizing: border-box; }
+  button { margin-top: 1rem; padding: 0.6rem 1rem; font: inherit; cursor: pointer; }
+  button[disabled] { opacity: 0.5; cursor: not-allowed; }
+  pre { background: #f4f4f4; padding: 0.75rem; overflow-x: auto;
+        font-size: 0.85rem; border-radius: 4px; max-height: 280px; }
+  .row { display: flex; gap: 0.5rem; }
+  .row > * { flex: 1; }
+  .ok { color: #0a7d31; }
+  .err { color: #b10000; }
+  .hint { font-size: 0.8rem; color: #777; margin-top: 0.2rem; }
+</style>
+</head>
+<body>
+<h1>RTVoice — LiveKit 链路测试 (v0.1)</h1>
+<p>验证浏览器能否通过 token-server 取 token，再用 WebRTC 加入 LiveKit 房间。</p>
+
+<label>API Key（来自 .env 的 APP_API_KEY）</label>
+<input id="apikey" type="password" placeholder="paste your APP_API_KEY here" autocomplete="off" />
+<div class="hint">key 仅保存在浏览器 localStorage；DEV_AUTO_INJECT_KEY=true 时已自动填充。</div>
+
+<label>Room</label>
+<input id="room" value="rtvoice-test" />
+
+<label>Identity</label>
+<input id="identity" value="user-1" />
+
+<div class="row">
+  <button id="connect">1. 申请 token + 加入房间</button>
+  <button id="disconnect" disabled>2. 离开</button>
+</div>
+
+<h2 style="font-size:1rem;margin-top:1.5rem">日志</h2>
+<pre id="log">（等待操作）</pre>
+
+<!-- LiveKit JS SDK；CDN pin 版本，与 livekit-server v1.11.x 兼容 -->
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.18.7/dist/livekit-client.umd.min.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const logEl = $("log");
+  const apikeyInput = $("apikey");
+  let room = null;
+
+  // --- API key 注入：dev 模式自动填充，prod 模式从 localStorage 读 ---
+  const devKeyMeta = document.querySelector('meta[name="rtvoice-dev-api-key"]');
+  const isDev = document.querySelector('meta[name="rtvoice-dev-mode"]')?.content === "true";
+  if (devKeyMeta && devKeyMeta.content) {
+    apikeyInput.value = devKeyMeta.content;
+    apikeyInput.placeholder = "(dev 模式已自动注入)";
+  } else {
+    apikeyInput.value = localStorage.getItem("rtvoice-api-key") || "";
+  }
+  apikeyInput.addEventListener("change", () => {
+    localStorage.setItem("rtvoice-api-key", apikeyInput.value);
+  });
+
+  function log(msg, cls = "") {
+    const line = document.createElement("div");
+    if (cls) line.className = cls;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    if (logEl.textContent === "（等待操作）") logEl.textContent = "";
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  async function fetchToken(roomName, identity, apiKey) {
+    const res = await fetch("/token", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ room: roomName, identity }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`token-server ${res.status}: ${body}`);
+    }
+    return res.json();
+  }
+
+  $("connect").onclick = async () => {
+    $("connect").disabled = true;
+    try {
+      const apiKey = apikeyInput.value.trim();
+      if (!apiKey) throw new Error("缺少 API Key（看 .env 的 APP_API_KEY）");
+      const roomName = $("room").value.trim();
+      const identity = $("identity").value.trim();
+      log(`请求 token room=${roomName} identity=${identity}...`);
+      const { token, url } = await fetchToken(roomName, identity, apiKey);
+      log(`token OK，连接 ${url} ...`);
+
+      room = new LivekitClient.Room({ adaptiveStream: true, dynacast: true });
+      room.on(LivekitClient.RoomEvent.Connected, () => {
+        log("✅ 已加入房间", "ok");
+        $("disconnect").disabled = false;
+      });
+      room.on(LivekitClient.RoomEvent.Disconnected, (reason) => {
+        log(`已断开：${reason}`, "err");
+        $("connect").disabled = false;
+        $("disconnect").disabled = true;
+      });
+      room.on(LivekitClient.RoomEvent.ParticipantConnected, (p) => {
+        log(`参与者加入：${p.identity}`);
+      });
+
+      await room.connect(url, token);
+      // v0.1 不发布媒体；仅验证 WebRTC 握手
+    } catch (e) {
+      log(`❌ ${e.message}`, "err");
+      $("connect").disabled = false;
+    }
+  };
+
+  $("disconnect").onclick = async () => {
+    if (room) {
+      await room.disconnect();
+      room = null;
+    }
+  };
+</script>
+</body>
+</html>

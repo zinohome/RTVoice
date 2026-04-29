@@ -1,0 +1,32 @@
+# LiveKit dev 配置
+# 容器内监听 0.0.0.0；docker-compose 的 ports 把宿主侧绑到 127.0.0.1
+# Keys 通过 LIVEKIT_KEYS 环境变量注入，不在本文件硬编码
+
+port: 7880
+
+# 容器内监听全部接口；外部隔离由 docker port mapping + .env 的 BIND_HOST 控制
+bind_addresses:
+  - ""
+
+rtc:
+  tcp_port: 7881
+  # dev 仅 10 个端口（LiveKit SRTP 多路复用，1 个端口能服务多人，10 个足够调试）
+  # 生产 livekit.prod.yaml 会改为 50099
+  port_range_start: 50000
+  port_range_end: 50009
+  # 开发环境不发现外部 IP；浏览器走 127.0.0.1 直连
+  use_external_ip: false
+
+# 日志（dev 详细）
+logging:
+  level: debug
+  json: false
+
+# 房间默认设置
+room:
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: video/vp8
+    - mime: video/h264
+  empty_timeout: 300       # 房间空闲 5 分钟后回收
+  max_participants: 4      # dev 限制，避免本机资源被占满

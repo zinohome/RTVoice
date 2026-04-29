@@ -1,0 +1,5 @@
+# Pin 主版本，允许小版本升级
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+livekit-api==0.8.2
+pydantic==2.10.4

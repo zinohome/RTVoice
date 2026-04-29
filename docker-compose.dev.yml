@@ -1,0 +1,44 @@
+# 开发覆盖：CPU only / mock 引擎 / 端口仅绑 127.0.0.1
+# 用法：与 docker-compose.yml 联合使用，见 docker-compose.yml 顶部说明
+#
+# 与生产的差异：
+#   - 端口绑 ${BIND_HOST}=127.0.0.1（不暴露公网）
+#   - 挂载源代码做 hot reload
+#   - 日志级别 DEBUG
+#   - LiveKit dev 配置（无 TLS，简单 keys）
+#   - 镜像 tag 用 :dev（便于区分）
+
+services:
+  livekit-server:
+    image: livekit/livekit-server:v1.11.0
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${LIVEKIT_PORT:-7880}:7880"
+      - "${BIND_HOST:-127.0.0.1}:${LIVEKIT_RTC_TCP_PORT:-7881}:7881"
+      # UDP 媒体端口；dev 仅 10 个就够。生产 prod override 会用 50000-50099。
+      - "${BIND_HOST:-127.0.0.1}:${LIVEKIT_RTC_UDP_PORT_START:-50000}-${LIVEKIT_RTC_UDP_PORT_END:-50009}:50000-50009/udp"
+    volumes:
+      - ./livekit/livekit.dev.yaml:/etc/livekit.yaml:ro
+
+  token-server:
+    image: rtvoice/token-server:dev
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${TOKEN_SERVER_PORT:-8000}:8000"
+    environment:
+      LOG_LEVEL: DEBUG
+      LIVEKIT_PUBLIC_URL: ws://${BIND_HOST:-127.0.0.1}:${LIVEKIT_PORT:-7880}
+      # dev 默认开启把 API key 注入测试页（因为绑 127.0.0.1）。
+      # 改成 false 可强制手动粘贴 key，模拟生产体验。
+      DEV_AUTO_INJECT_KEY: "true"
+    # 源代码热加载（开发体验）
+    volumes:
+      - ./services/token-server/app:/app/app:ro
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --log-level
+      - debug
