@@ -1,0 +1,76 @@
+# --- 凭证与本地配置（绝不提交） ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+credentials/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# --- Node / 前端构建产物 ---
+node_modules/
+.next/
+.nuxt/
+.cache/
+dist/
+*.tsbuildinfo
+
+# --- 模型文件（很大，不进 git） ---
+models/
+*.onnx
+*.bin
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.gguf
+
+# --- 数据与备份 ---
+data/
+backups/
+*.tar
+*.tar.gz
+*.zip
+
+# --- 日志 ---
+logs/
+*.log
+
+# --- Docker 本地状态 ---
+.docker-compose.override.yml
+docker-data/
+
+# --- 编辑器 / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- AI 助手会话痕迹 ---
+.remember/
+.claude/
+
+# --- 临时文件 ---
+*.tmp
+*.bak
+*.old
+scratch/
