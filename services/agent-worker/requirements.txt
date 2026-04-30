@@ -15,5 +15,8 @@ openai==1.59.7
 # HTTP 异步客户端（连 tts-server 的流式 chunked endpoint；OpenAI SDK 也用 httpx）
 httpx==0.27.2
 
+# Prometheus 指标（独立 :9100/metrics 端口）
+prometheus-client==0.21.1
+
 # 音频处理
 numpy==2.2.1

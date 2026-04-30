@@ -46,9 +46,13 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import time
+
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from prometheus_client import Counter, Histogram
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -112,6 +116,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RTVoice TTS Server", version="0.5.0", lifespan=lifespan)
 
+# --- Prometheus metrics ---
+SYNTH_PHRASES = Counter("rtvoice_tts_phrases_total", "Phrases synthesized")
+SYNTH_FAILS = Counter("rtvoice_tts_failures_total", "Phrase synth failures")
+TTFB = Histogram(
+    "rtvoice_tts_ttfb_seconds",
+    "Time to first PCM byte after request",
+    buckets=(0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0),
+)
+PHRASE_RTF = Histogram(
+    "rtvoice_tts_phrase_rtf",
+    "Per-phrase real-time factor (audio_seconds / synth_seconds)",
+    buckets=(0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0),
+)
+Instrumentator(excluded_handlers=["/health", "/metrics", "/tts/stream"]).instrument(app).expose(app)
+
 
 class TTSRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=2000)
@@ -163,22 +182,33 @@ async def _synthesize_stream(req: TTSRequest, request: Request) -> AsyncIterator
     log.info("[TTS] voice=%s lang=%s speed=%.2f text_len=%d phrases=%d",
              voice, lang, req.speed, len(req.text), len(phrases))
 
+    t_request_start = time.time()
+    first_yielded = False
     for i, phrase in enumerate(phrases):
         if await request.is_disconnected():
             log.info("[TTS] client disconnected, stop at phrase %d/%d", i, len(phrases))
             return
         try:
-            # Kokoro.create 是 sync CPU 密集，丢线程池
+            t0 = time.time()
             samples, sr = await asyncio.to_thread(
                 _kokoro.create, phrase, voice=voice, speed=req.speed, lang=lang
             )
             assert sr == SAMPLE_RATE, f"unexpected sr {sr}"
+            synth_s = time.time() - t0
+            audio_s = len(samples) / sr
+            if synth_s > 0:
+                PHRASE_RTF.observe(audio_s / synth_s)
             pcm = _to_pcm_int16(samples)
-            log.debug("[TTS] phrase %d/%d %r → %d bytes", i + 1, len(phrases), phrase[:20], len(pcm))
+            log.debug("[TTS] phrase %d/%d %r → %d bytes (synth %.0fms, audio %.2fs)",
+                      i + 1, len(phrases), phrase[:20], len(pcm), synth_s * 1000, audio_s)
+            SYNTH_PHRASES.inc()
+            if not first_yielded:
+                TTFB.observe(time.time() - t_request_start)
+                first_yielded = True
             yield pcm
         except Exception as e:
             log.exception("[TTS] phrase %d 合成失败: %s", i, e)
-            # 跳过失败的句子，继续下一句（不破坏整段流）
+            SYNTH_FAILS.inc()
             continue
 
 

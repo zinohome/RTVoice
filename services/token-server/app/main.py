@@ -32,6 +32,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from livekit import api
 from pydantic import BaseModel, Field
+from prometheus_client import Counter
+from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -72,6 +74,15 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Prometheus：自动 http_request_duration / http_requests_total + 自定义 counter
+TOKENS_ISSUED = Counter("rtvoice_tokens_issued_total", "Total LiveKit JWTs issued",
+                        ["room"])
+AUTH_FAILURES = Counter("rtvoice_token_auth_failures_total", "401 responses on /token",
+                        ["reason"])
+Instrumentator(
+    excluded_handlers=["/health", "/metrics"],
+).instrument(app).expose(app)
+
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -84,6 +95,7 @@ def require_api_key(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> None:
     if creds is None or creds.scheme.lower() != "bearer":
+        AUTH_FAILURES.labels(reason="missing").inc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization: Bearer header",
@@ -91,6 +103,7 @@ def require_api_key(
         )
     # 常量时间比较，防 timing attack
     if not hmac.compare_digest(creds.credentials, APP_API_KEY):
+        AUTH_FAILURES.labels(reason="invalid").inc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
@@ -169,6 +182,7 @@ def issue_token(req: TokenRequest, request: Request) -> TokenResponse:
         .to_jwt()
     )
 
+    TOKENS_ISSUED.labels(room=req.room).inc()
     log.info(
         "token issued: room=%s identity=%s client=%s",
         req.room,

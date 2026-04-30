@@ -47,6 +47,32 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 - CONTRIBUTING.md 贡献指南
 - .env.example 大改：分节 [必改] / dev / prod 注释清晰
 
+### Phase D — Prometheus 指标
+所有 4 个 service 暴露 `/metrics`（agent-worker 在独立端口 :9100），
+Prometheus 文本格式，可直接对接 Grafana/Alertmanager。
+
+- token-server (`/metrics`)
+  - `http_request_duration_seconds`（自动）
+  - `rtvoice_tokens_issued_total{room}`
+  - `rtvoice_token_auth_failures_total{reason}` (missing / invalid)
+- stt-server (`/metrics`)
+  - `rtvoice_stt_ws_connections_active|total`
+  - `rtvoice_stt_events_total{type}` (partial / final_eos / final_endpoint)
+  - `rtvoice_stt_decode_seconds` (sherpa-onnx decode_stream 延迟直方图)
+- tts-server (`/metrics`)
+  - `rtvoice_tts_phrases_total / failures_total`
+  - `rtvoice_tts_ttfb_seconds` (首包延迟)
+  - `rtvoice_tts_phrase_rtf` (per-phrase real-time factor)
+- agent-worker (`:9100/metrics`)
+  - `rtvoice_agent_state{state}` (idle / listening / thinking / speaking / interrupted Gauge)
+  - `rtvoice_agent_rounds_total / barge_ins_total / pipeline_errors_total`
+  - `rtvoice_agent_round_seconds / round_phrases / first_audio_seconds` (Histograms)
+  - `rtvoice_agent_stt_finals_total / stt_partials_total`
+
+新增依赖：`prometheus-client==0.21.1` / `prometheus-fastapi-instrumentator==7.0.2`
+
+新增模块：`services/agent-worker/app/metrics.py`
+
 ### Phase C — `260ebed` 测试 + CI
 - 集成测试脚本：`scripts/test-stt.sh` `test-llm.sh` `test-tts.sh`
 - pytest 单元测试：

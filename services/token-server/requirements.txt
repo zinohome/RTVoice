@@ -6,3 +6,7 @@ pydantic==2.10.4
 
 # 限流：每 IP/分钟阈值（防 API key 泄露后被刷）
 slowapi==0.1.9
+
+# Prometheus 指标（GET /metrics）
+prometheus-client==0.21.1
+prometheus-fastapi-instrumentator==7.0.2

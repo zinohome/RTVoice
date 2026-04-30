@@ -33,6 +33,8 @@ from pathlib import Path
 import numpy as np
 import sherpa_onnx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from prometheus_client import Counter, Gauge, Histogram
+from prometheus_fastapi_instrumentator import Instrumentator
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -114,7 +116,18 @@ async def lifespan(app: FastAPI):
     log.info("shutdown")
 
 
-app = FastAPI(title="RTVoice STT Server", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="RTVoice STT Server", version="0.5.0", lifespan=lifespan)
+
+# --- Prometheus metrics ---
+WS_ACTIVE = Gauge("rtvoice_stt_ws_connections_active", "Currently open /asr WS connections")
+WS_TOTAL = Counter("rtvoice_stt_ws_connections_total", "Total /asr WS connections accepted")
+EVENTS_TOTAL = Counter("rtvoice_stt_events_total", "Events emitted to client", ["type"])
+DECODE_LATENCY = Histogram(
+    "rtvoice_stt_decode_seconds",
+    "sherpa-onnx decode_stream() per-call wall time",
+    buckets=(0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0),
+)
+Instrumentator(excluded_handlers=["/health", "/metrics", "/asr"]).instrument(app).expose(app)
 
 
 @app.get("/health")
@@ -137,29 +150,27 @@ async def info() -> dict:
 
 
 async def _decode_loop(ws: WebSocket, stream, last_partial: list[str]) -> None:
-    """异步循环：从 stream 拉 partial/final 事件推给客户端。
-
-    last_partial 是单元素列表（用于在外部协程间共享状态，避免 nonlocal 闭包问题）。
-    """
+    """异步循环：从 stream 拉 partial/final 事件推给客户端。"""
     assert _recognizer is not None
     while True:
         await asyncio.sleep(0.05)  # decode 节奏 50ms
         if not _recognizer.is_ready(stream):
             continue
-        # decode 是 CPU 密集，丢线程池避免阻塞 event loop
-        await asyncio.to_thread(_recognizer.decode_stream, stream)
+        with DECODE_LATENCY.time():
+            await asyncio.to_thread(_recognizer.decode_stream, stream)
         text = _get_text(stream)
         if text != last_partial[0]:
             last_partial[0] = text
             try:
                 await ws.send_json({"type": "partial", "text": text})
+                EVENTS_TOTAL.labels(type="partial").inc()
             except Exception:
                 return
-        # 端点检测自然 final（兜底；正常路径靠客户端 EOS）
         if _recognizer.is_endpoint(stream):
             log.info("endpoint detected, text=%r", text)
             try:
                 await ws.send_json({"type": "final", "text": text})
+                EVENTS_TOTAL.labels(type="final_endpoint").inc()
             except Exception:
                 return
             await asyncio.to_thread(_recognizer.reset, stream)
@@ -177,6 +188,8 @@ async def asr_ws(ws: WebSocket) -> None:
     stream = _recognizer.create_stream()
     last_partial = [""]
     log.info("WS connected: %s", ws.client)
+    WS_TOTAL.inc()
+    WS_ACTIVE.inc()
 
     decoder_task = asyncio.create_task(_decode_loop(ws, stream, last_partial))
 
@@ -206,6 +219,7 @@ async def asr_ws(ws: WebSocket) -> None:
                     text = _get_text(stream)
                     log.info("final after EOS: %r", text)
                     await ws.send_json({"type": "final", "text": text})
+                    EVENTS_TOTAL.labels(type="final_eos").inc()
                     await asyncio.to_thread(_recognizer.reset, stream)
                     last_partial[0] = ""
                 elif cmd == "RESET":
@@ -232,4 +246,5 @@ async def asr_ws(ws: WebSocket) -> None:
             await ws.close()
         except Exception:
             pass
+        WS_ACTIVE.dec()
         log.info("WS closed: %s", ws.client)

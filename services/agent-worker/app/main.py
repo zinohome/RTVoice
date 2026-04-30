@@ -32,6 +32,7 @@ import numpy as np
 from livekit import api, rtc
 
 from app.llm_client import LLMClient
+from app import metrics as M
 from app.phrase_split import stream_to_phrases
 from app.state_machine import State, StateMachine
 from app.stt_client import STTClient
@@ -109,10 +110,12 @@ class Agent:
 
     def _on_state_change(self, prev: State, to: State) -> None:
         log.info("[FSM] %s -> %s", prev.value, to.value)
+        M.set_state(to.value)
 
     async def _on_stt_partial(self, text: str) -> None:
         if text:
             log.debug("[STT partial] %s", text)
+            M.STT_PARTIALS_TOTAL.inc()
 
     # ----- LiveKit 接入 -----
 
@@ -215,6 +218,7 @@ class Agent:
         log.info("[VAD] speech_start")
         if self.fsm.state == State.SPEAKING:
             log.info("[BARGE-IN] 用户打断，取消当前 LLM/TTS")
+            M.BARGE_INS_TOTAL.inc()
             self.fsm.transition(State.INTERRUPTED)
             if self._pipeline_task and not self._pipeline_task.done():
                 self._pipeline_task.cancel()
@@ -295,6 +299,7 @@ class Agent:
             user_text = await self.stt.request_final(timeout=STT_FINAL_TIMEOUT_S)
             t_stt_done = time.time()
             log.info("[STT final] %r (%.0fms)", user_text, (t_stt_done - t_stt_start) * 1000)
+            M.STT_FINALS_TOTAL.inc()
             if not user_text.strip():
                 log.info("STT 空结果，回 IDLE")
                 self.fsm.transition(State.IDLE)
@@ -340,8 +345,16 @@ class Agent:
             # 自然结束 → IDLE
             if self.fsm.state == State.SPEAKING:
                 self.fsm.transition(State.IDLE)
-            metrics["round_ms"] = (time.time() - round_t0) * 1000
+            round_s = time.time() - round_t0
+            metrics["round_ms"] = round_s * 1000
             log.info("[ROUND METRIC] %s", metrics)
+
+            # Prometheus
+            M.ROUNDS_TOTAL.inc()
+            M.ROUND_SECONDS.observe(round_s)
+            M.ROUND_PHRASES.observe(metrics["phrases"])
+            if metrics["first_audio_ms"] is not None:
+                M.FIRST_AUDIO_SECONDS.observe(metrics["first_audio_ms"] / 1000.0)
         except asyncio.CancelledError:
             log.info("pipeline 被 cancel（barge-in）")
             if prod_task and not prod_task.done():
@@ -349,6 +362,7 @@ class Agent:
             raise
         except Exception:
             log.exception("pipeline 异常")
+            M.PIPELINE_ERRORS_TOTAL.inc()
             self.fsm.force(State.IDLE)
             if prod_task and not prod_task.done():
                 prod_task.cancel()
@@ -434,6 +448,8 @@ def main() -> None:
              STT_WS_URL, LLM_BASE_URL, LLM_MODEL)
     log.info("tts=%s voice=%s lang=%s sr=%dHz pipeline_concurrency=%d",
              TTS_BASE_URL, TTS_VOICE, TTS_LANG, TTS_SAMPLE_RATE, TTS_PIPELINE_CONCURRENCY)
+    M.init_state_gauge()
+    M.start_metrics_server()
     asyncio.run(amain())
 
 

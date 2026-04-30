@@ -127,9 +127,12 @@ services:
       TTS_VOICE: ${TTS_VOICE:-zf_xiaobei}
       TTS_LANG: ${TTS_LANG:-cmn}
       TTS_PIPELINE_CONCURRENCY: ${TTS_PIPELINE_CONCURRENCY:-2}
+      METRICS_PORT: 9100
       AGENT_ROOM: ${AGENT_ROOM:-rtvoice-test}
       AGENT_IDENTITY: ${AGENT_IDENTITY:-rtvoice-agent}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    expose:
+      - "9100"
     deploy:
       resources:
         limits:

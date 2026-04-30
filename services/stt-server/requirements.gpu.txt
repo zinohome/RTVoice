@@ -5,3 +5,7 @@ onnxruntime-gpu==1.20.1
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
 numpy==2.2.1
+
+# Prometheus
+prometheus-client==0.21.1
+prometheus-fastapi-instrumentator==7.0.2

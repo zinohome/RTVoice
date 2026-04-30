@@ -7,3 +7,7 @@ uvicorn[standard]==0.32.1
 
 # 音频
 numpy==2.2.1
+
+# Prometheus
+prometheus-client==0.21.1
+prometheus-fastapi-instrumentator==7.0.2
