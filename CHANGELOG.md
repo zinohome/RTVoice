@@ -12,9 +12,51 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 ## [Unreleased]
 
 待规划：
-- v0.5+ prod：`docker-compose.prod.yml`（vLLM + sherpa-onnx GPU + CosyVoice 2 GPU）
 - v0.6：迁移到 `livekit-agents` 框架的 `AgentSession` + 框架级 turn detection
+- v0.6：CosyVoice 2 GPU 服务化（替换 Kokoro CPU prod TTS）
 - v0.7+：多音色配置 / 长上下文记忆 / function calling
+
+---
+
+## [Unreleased] / Engineering — 2026-04-30 — `5dab7d6` `6056f24` `260ebed`
+
+"v0.5+ 工程化补完"批次 — 用户要求"自主完成尽可能多的工作"，三个并行批 commit。
+
+### Phase A — `5dab7d6` 生产部署脚手架
+- `docker-compose.prod.yml`
+  - llm-server 完全替换为 `vllm/vllm-openai:v0.7.0` + Qwen2.5-3B-GPTQ-Int4
+  - stt-server 切到 GPU 镜像 + STT_PROVIDER=cuda
+  - tts-server 暂仍 Kokoro CPU（CosyVoice 2 留 v0.6）
+  - `${VAR:?}` 强制必填变量（缺 BIND_HOST/LIVEKIT_PUBLIC_URL 拒绝启动）
+- `livekit/livekit.prod.yaml`：`use_external_ip=true` + UDP 50000-50099 + JSON log
+- `scripts/prod-deploy.sh`：落地 [SECURITY.md §4](./SECURITY.md) 4 阶段协议
+  - `--inspect` / `--backup` / `--apply` 分步
+  - 拒绝 .env 中 `*changeme*` / `*devsecret*` 默认值
+  - 单服务渐进部署 + healthcheck 等待 + 二次确认
+- `scripts/backup-volumes.sh`：alpine ro 挂载打 tar.gz
+- `services/stt-server/Dockerfile.gpu` + `requirements.gpu.txt`：CUDA 12.4 + onnxruntime-gpu
+- `stt-server/app/main.py`：provider 改为环境变量驱动（cpu / cuda）
+
+### Phase B — `6056f24` dev 阶段补强
+- token-server 加 slowapi rate limit @ /token（默认 30/min/IP）
+- agent-worker 心跳文件健康检查（替换 v0.2 留的 `HEALTHCHECK NONE`）
+  - `agent.heartbeat_loop` 每 5s touch /tmp/agent-heartbeat
+  - Dockerfile HEALTHCHECK 看 mtime（30s 内 healthy）
+- 删除已废弃的 `mock_pipeline.py`（v0.5+ 全切真引擎）
+- README.md 加 Quick Start 章节
+- CONTRIBUTING.md 贡献指南
+- .env.example 大改：分节 [必改] / dev / prod 注释清晰
+
+### Phase C — `260ebed` 测试 + CI
+- 集成测试脚本：`scripts/test-stt.sh` `test-llm.sh` `test-tts.sh`
+- pytest 单元测试：
+  - `test_phrase_split.py` 11 用例
+  - `test_state_machine.py` 7 用例
+  - 18/18 passing
+- GitHub Actions：
+  - `.github/workflows/lint.yml`：yamllint + shellcheck + hadolint + compose config
+  - `.github/workflows/pytest.yml`：path filter agent-worker 改动触发
+- `docs/benchmarks/template.md`：实测报告模板
 
 ---
 
