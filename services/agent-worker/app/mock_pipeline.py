@@ -96,23 +96,34 @@ def _pcm_for_char(char_index: int, num_frames: int) -> np.ndarray:
 
 
 async def mock_tts(token_stream: AsyncIterator[str]) -> AsyncIterator[bytes]:
-    """流式 TTS：每收到一个字符吐 ~150ms 的音频（约等于一个汉字播放时长）。
+    """流式 TTS：每个字符吐 ~150ms sine wave（频率随字符变化）。
 
-    yield 的是单帧 PCM bytes（int16 LE），调用方按 20ms 节奏喂给 LiveKit。
-    可被外部 cancel；asyncio.CancelledError 会自然向上传播实现 barge-in。
+    输入 chunk 可能含多字符（OpenAI 流式回包常见 1-3 char/chunk）；
+    内部按 char 拆分独立合成，保证 barge-in 颗粒度细。
+
+    yield 单帧 PCM bytes（int16 LE）；调用方按 20ms 节奏喂给 LiveKit。
+    可被外部 cancel；asyncio.CancelledError 自然向上传播实现 barge-in。
     """
     char_index = 0
     frames_per_char = 8  # 8 帧 × 20ms = 160ms
-    async for ch in token_stream:
+
+    async def _emit_char(ch: str):
+        nonlocal char_index
+        # 跳过纯空白/标点（LLM 输出有空格不该发声）
+        if not ch.strip():
+            return
         log.debug("[mock TTS] synthesize char='%s'", ch)
         pcm = _pcm_for_char(char_index, frames_per_char)
         char_index += 1
-        # 切分成 20ms 帧吐出（让播放端可以平滑接收 + 中断点细）
         for i in range(0, len(pcm), SAMPLES_PER_FRAME):
             frame = pcm[i : i + SAMPLES_PER_FRAME]
             if len(frame) < SAMPLES_PER_FRAME:
                 pad = np.zeros(SAMPLES_PER_FRAME - len(frame), dtype=np.int16)
                 frame = np.concatenate([frame, pad])
             yield frame.tobytes()
-            # 让出事件循环；不要 sleep 真 20ms（消费端节奏控制）
             await asyncio.sleep(0)
+
+    async for chunk in token_stream:
+        for ch in chunk:
+            async for frame in _emit_char(ch):
+                yield frame

@@ -27,10 +27,10 @@ from datetime import timedelta
 import numpy as np
 from livekit import api, rtc
 
+from app.llm_client import LLMClient
 from app.mock_pipeline import (
     SAMPLE_RATE,
     SAMPLES_PER_FRAME,
-    mock_llm,
     mock_tts,
 )
 from app.state_machine import State, StateMachine
@@ -55,6 +55,9 @@ LIVEKIT_URL = os.environ.get("LIVEKIT_INTERNAL_URL", "ws://livekit-server:7880")
 LIVEKIT_API_KEY = os.environ["LIVEKIT_API_KEY"]
 LIVEKIT_API_SECRET = os.environ["LIVEKIT_API_SECRET"]
 STT_WS_URL = os.environ.get("STT_WS_URL", "ws://stt-server:9090/asr")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://llm-server:11434/v1")
+LLM_MODEL = os.environ.get("LLM_MODEL", "qwen2.5:1.5b")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 AGENT_ROOM = os.environ.get("AGENT_ROOM", "rtvoice-test")
 AGENT_IDENTITY = os.environ.get("AGENT_IDENTITY", "rtvoice-agent")
 
@@ -75,6 +78,8 @@ class Agent:
         )
         # STT 客户端（长连接到 stt-server）
         self.stt = STTClient(STT_WS_URL, on_partial=self._on_stt_partial)
+        # LLM 客户端（OpenAI 兼容，连 llm-server）
+        self.llm = LLMClient(base_url=LLM_BASE_URL, model=LLM_MODEL, api_key=LLM_API_KEY)
         # 当前 inflight pipeline 任务（barge-in 取消用）
         self._pipeline_task: asyncio.Task | None = None
         # 用户音频累积缓冲（VAD 按帧消费）
@@ -221,8 +226,8 @@ class Agent:
 
             self.fsm.transition(State.SPEAKING)
 
-            # 2) mock LLM + mock TTS（v0.4 / v0.5 才会换真）
-            llm_stream = mock_llm(user_text)
+            # 2) 真 LLM (ollama OpenAI 兼容流式) → mock TTS（v0.5 才换真 TTS）
+            llm_stream = self.llm.stream(user_text)
             tts_stream = mock_tts(llm_stream)
 
             async for pcm_frame in tts_stream:
@@ -305,15 +310,21 @@ async def amain() -> None:
         except Exception:
             log.exception("STT close 异常")
         try:
+            await agent.llm.close()
+        except Exception:
+            log.exception("LLM close 异常")
+        try:
             await room.disconnect()
         except Exception:
             log.exception("room disconnect 异常")
 
 
 def main() -> None:
-    log.info("RTVoice agent worker v0.3 启动")
-    log.info("room=%s identity=%s url=%s stt=%s",
-             AGENT_ROOM, AGENT_IDENTITY, LIVEKIT_URL, STT_WS_URL)
+    log.info("RTVoice agent worker v0.4 启动")
+    log.info("room=%s identity=%s livekit=%s",
+             AGENT_ROOM, AGENT_IDENTITY, LIVEKIT_URL)
+    log.info("stt=%s llm=%s model=%s",
+             STT_WS_URL, LLM_BASE_URL, LLM_MODEL)
     asyncio.run(amain())
 
 

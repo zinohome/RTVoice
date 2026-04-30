@@ -13,6 +13,10 @@ networks:
   rtvoice_net:
     driver: bridge
 
+volumes:
+  rtvoice_ollama_models:
+    driver: local
+
 services:
   # ---------------------------------------------------------------
   # LiveKit WebRTC SFU
@@ -96,7 +100,7 @@ services:
     build:
       context: ./services/agent-worker
       dockerfile: Dockerfile
-    image: rtvoice/agent-worker:v0.3.0
+    image: rtvoice/agent-worker:v0.4.0
     container_name: rtvoice-agent
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -106,12 +110,17 @@ services:
         condition: service_healthy
       stt-server:
         condition: service_healthy
+      llm-server:
+        condition: service_healthy
     environment:
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
       # 走 docker network 内部地址（不经宿主端口）
       LIVEKIT_INTERNAL_URL: ws://livekit-server:7880
       STT_WS_URL: ws://stt-server:9090/asr
+      LLM_BASE_URL: http://llm-server:11434/v1
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5:1.5b}
+      LLM_API_KEY: ollama   # ollama 不验证 key，但 OpenAI SDK 必需
       AGENT_ROOM: ${AGENT_ROOM:-rtvoice-test}
       AGENT_IDENTITY: ${AGENT_IDENTITY:-rtvoice-agent}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -156,7 +165,45 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------
+  # LLM Server — ollama + Qwen2.5-1.5B (CPU)
+  # OpenAI 兼容 API：POST /v1/chat/completions
+  # ---------------------------------------------------------------
+  llm-server:
+    build:
+      context: ./services/llm-server
+      dockerfile: Dockerfile
+    image: rtvoice/llm-server:v0.4.0
+    container_name: rtvoice-llm
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    networks: [rtvoice_net]
+    environment:
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5:1.5b}
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+    volumes:
+      - rtvoice_ollama_models:/root/.ollama
+    expose:
+      - "11434"
+    healthcheck:
+      # 模型 pull 完成且 serve 正常后才 healthy
+      test: ["CMD-SHELL", "ollama list 2>/dev/null | awk 'NR>1 {print $$1}' | grep -qx \"${LLM_MODEL:-qwen2.5:1.5b}\""]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 300s   # 首次 pull 给 5 分钟
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "4.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "30m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------
   # 后续版本占位
   # ---------------------------------------------------------------
   # tts-server:      # v0.5 真
-  # llm-server:      # v0.4 ollama / v0.5 vLLM

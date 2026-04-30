@@ -9,5 +9,8 @@ onnxruntime==1.20.1
 # WebSocket 客户端（连 stt-server）
 websockets==13.1
 
+# OpenAI 兼容 API 客户端（连 llm-server / 未来的 vLLM）
+openai==1.59.7
+
 # 音频处理
 numpy==2.2.1
