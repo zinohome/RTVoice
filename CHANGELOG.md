@@ -47,6 +47,28 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 - CONTRIBUTING.md 贡献指南
 - .env.example 大改：分节 [必改] / dev / prod 注释清晰
 
+### Phase E — Grafana 监控栈
+基于 Phase D 暴露的指标，提供 opt-in 的 prometheus + grafana 栈。
+
+- `monitoring/prometheus.yml` — 5 个 scrape job（含自身），15s interval
+- `monitoring/grafana-provisioning/` — datasource + dashboards 自动加载
+- `monitoring/dashboards/rtvoice.json` — RTVoice 总览 dashboard
+  - 21 panels / 5 rows：Global Health / Agent E2E / STT / TTS / Token Server
+  - 关键 panel：Agent FSM Gauge / round_seconds p50p95 / first_audio p50p95 /
+    TTS phrase RTF（红线 < 1.0）/ HTTP latency
+  - 引用 20 个指标，全对应 Phase D 实际暴露
+- `docker-compose.monitoring.yml` — 可选 overlay
+  - `--profile monitoring` 启 prometheus（13000→3000 避端口冲突）+ grafana
+  - 镜像：`prom/prometheus:v2.55.0` + `grafana/grafana:11.4.0`
+  - named volume 持久化 TSDB 与 Grafana 配置
+- `monitoring/README.md` — 启动 / 自定义 / 接现有 Prometheus / 未来 alerting 计划
+
+autonomous 验证：
+- ✅ 5 targets 全 UP（含 prometheus 自己）
+- ✅ Grafana 自动加载 dashboard `rtvoice-overview` 21 panels
+- ✅ PromQL `rtvoice_agent_state` 返回正确 FSM 状态
+- ✅ Grafana 端口冲突（3000 → 13000）已处理
+
 ### Phase D — Prometheus 指标
 所有 4 个 service 暴露 `/metrics`（agent-worker 在独立端口 :9100），
 Prometheus 文本格式，可直接对接 Grafana/Alertmanager。
