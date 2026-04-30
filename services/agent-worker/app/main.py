@@ -26,10 +26,13 @@ import os
 import signal
 from datetime import timedelta
 
+import time
+
 import numpy as np
 from livekit import api, rtc
 
 from app.llm_client import LLMClient
+from app.phrase_split import stream_to_phrases
 from app.state_machine import State, StateMachine
 from app.stt_client import STTClient
 from app.tts_client import TTSClient
@@ -63,6 +66,11 @@ AGENT_ROOM = os.environ.get("AGENT_ROOM", "rtvoice-test")
 AGENT_IDENTITY = os.environ.get("AGENT_IDENTITY", "rtvoice-agent")
 
 STT_FINAL_TIMEOUT_S = float(os.environ.get("STT_FINAL_TIMEOUT_S", "5.0"))
+
+# v0.5.1：LLM 流式 → 句切分 → TTS pipeline 并发度
+# 1=纯串行（夯实顺序播放，资源最少）
+# 2-3=并行合成隐藏 synth 间隙（前提：CPU 够强 / GPU）
+TTS_PIPELINE_CONCURRENCY = int(os.environ.get("TTS_PIPELINE_CONCURRENCY", "2"))
 
 # 输出音频参数（与 Kokoro 原生输出对齐，避免重采样）
 TTS_SAMPLE_RATE = 24000
@@ -216,27 +224,23 @@ class Agent:
 
     # ----- Pipeline: STT(WS) → mock LLM → mock TTS -----
 
-    async def _stream_tts_to_room(self, text: str) -> None:
-        """从 tts-server 流式拉 PCM bytes，切成 20ms 帧推到 LiveKit AudioSource。
+    async def _publish_pcm_bytes(self, pcm: bytes) -> None:
+        """把 PCM int16 LE bytes 切成 20ms 帧推到 LiveKit AudioSource。
 
-        TTS server 输出可能是变长 chunk；这里维护一个缓冲，按 480 samples/帧均匀切分。
+        长度不是 frame 整数倍时，尾段补零（半静音 < 20ms 不会有可听咔哒）。
         """
-        leftover = b""
         bytes_per_frame = TTS_SAMPLES_PER_FRAME * 2  # int16 = 2 bytes
-        async for chunk in self.tts.stream(text):
-            buf = leftover + chunk
-            n_full = len(buf) // bytes_per_frame
-            for i in range(n_full):
-                seg = buf[i * bytes_per_frame : (i + 1) * bytes_per_frame]
-                frame = rtc.AudioFrame.create(
-                    sample_rate=TTS_SAMPLE_RATE,
-                    num_channels=1,
-                    samples_per_channel=TTS_SAMPLES_PER_FRAME,
-                )
-                np.frombuffer(frame.data, dtype=np.int16)[:] = np.frombuffer(seg, dtype=np.int16)
-                await self.audio_source.capture_frame(frame)
-            leftover = buf[n_full * bytes_per_frame :]
-        # 尾巴：补零凑齐一帧
+        n_full = len(pcm) // bytes_per_frame
+        for i in range(n_full):
+            seg = pcm[i * bytes_per_frame : (i + 1) * bytes_per_frame]
+            frame = rtc.AudioFrame.create(
+                sample_rate=TTS_SAMPLE_RATE,
+                num_channels=1,
+                samples_per_channel=TTS_SAMPLES_PER_FRAME,
+            )
+            np.frombuffer(frame.data, dtype=np.int16)[:] = np.frombuffer(seg, dtype=np.int16)
+            await self.audio_source.capture_frame(frame)
+        leftover = pcm[n_full * bytes_per_frame :]
         if leftover:
             pad = bytes(bytes_per_frame - len(leftover))
             seg = leftover + pad
@@ -248,47 +252,93 @@ class Agent:
             np.frombuffer(frame.data, dtype=np.int16)[:] = np.frombuffer(seg, dtype=np.int16)
             await self.audio_source.capture_frame(frame)
 
+    async def _synth_phrase(self, phrase: str, sem: asyncio.Semaphore) -> bytes:
+        """合成一个 phrase 的全部 PCM。受 sem 限流。"""
+        async with sem:
+            chunks: list[bytes] = []
+            async for chunk in self.tts.stream(phrase):
+                chunks.append(chunk)
+            return b"".join(chunks)
+
     async def _run_pipeline(self) -> None:
+        """v0.5.1 streaming pipeline：
+            STT final → LLM 流式 → 句切分 → 并发 TTS → 顺序 publish
+
+        关键时序：
+          - LLM 第一句完成 → 立刻 fire TTS task → 进入 SPEAKING
+          - 后续 LLM 句子并发合成（受 TTS_PIPELINE_CONCURRENCY 限流）
+          - publisher 严格按 phrase 顺序 await 已完成 task → 推音频
+        """
+        round_t0 = time.time()
+        prod_task: asyncio.Task | None = None
+
         try:
             self.fsm.transition(State.THINKING)
 
-            # 1) 等剩余 PCM 推完，发 EOS，拿 final
-            # 等 feed queue 排空（避免 EOS 比最后帧先到）
             while not self._stt_feed_queue.empty():
                 await asyncio.sleep(0.01)
 
+            t_stt_start = time.time()
             user_text = await self.stt.request_final(timeout=STT_FINAL_TIMEOUT_S)
-            log.info("[STT final] %r", user_text)
+            t_stt_done = time.time()
+            log.info("[STT final] %r (%.0fms)", user_text, (t_stt_done - t_stt_start) * 1000)
             if not user_text.strip():
                 log.info("STT 空结果，回 IDLE")
                 self.fsm.transition(State.IDLE)
                 return
 
-            self.fsm.transition(State.SPEAKING)
+            # ---- 流式 LLM → phrase → TTS pipeline ----
+            tasks_q: asyncio.Queue[asyncio.Task | None] = asyncio.Queue()
+            sem = asyncio.Semaphore(TTS_PIPELINE_CONCURRENCY)
+            metrics: dict = {"phrases": 0, "first_phrase_ready_ms": None,
+                             "first_audio_ms": None, "round_ms": None}
+            t_llm_start = time.time()
 
-            # 2) LLM 流式输出 → 累积成完整文本 → TTS 整段流式合成
-            #    Kokoro 不支持 token 级流式（需句级），所以攒齐 LLM 文本再 POST。
-            #    这增加 ~半秒首字延迟，可在 v0.6 改成 LLM 标点切片 + 多段 TTS 并发。
-            full_reply = []
-            async for delta in self.llm.stream(user_text):
-                full_reply.append(delta)
-            reply_text = "".join(full_reply).strip()
-            if not reply_text:
-                log.info("LLM 空回复，回 IDLE")
-                self.fsm.transition(State.IDLE)
-                return
+            async def producer() -> None:
+                try:
+                    llm_iter = self.llm.stream(user_text)
+                    async for phrase in stream_to_phrases(llm_iter):
+                        metrics["phrases"] += 1
+                        log.info("[phrase %d] %r", metrics["phrases"], phrase)
+                        task = asyncio.create_task(self._synth_phrase(phrase, sem))
+                        await tasks_q.put(task)
+                finally:
+                    await tasks_q.put(None)
 
-            # 3) TTS 流式合成 + 切帧 publish
-            await self._stream_tts_to_room(reply_text)
+            prod_task = asyncio.create_task(producer())
 
+            # 第一个 phrase 就绪即转 SPEAKING（开播）
+            first = True
+            while True:
+                task = await tasks_q.get()
+                if task is None:
+                    break
+                pcm = await task
+                now = time.time()
+                if first:
+                    metrics["first_phrase_ready_ms"] = (now - t_llm_start) * 1000
+                    metrics["first_audio_ms"] = (now - round_t0) * 1000
+                    if self.fsm.state == State.THINKING:
+                        self.fsm.transition(State.SPEAKING)
+                    first = False
+                if pcm:
+                    await self._publish_pcm_bytes(pcm)
+
+            # 自然结束 → IDLE
             if self.fsm.state == State.SPEAKING:
                 self.fsm.transition(State.IDLE)
+            metrics["round_ms"] = (time.time() - round_t0) * 1000
+            log.info("[ROUND METRIC] %s", metrics)
         except asyncio.CancelledError:
             log.info("pipeline 被 cancel（barge-in）")
+            if prod_task and not prod_task.done():
+                prod_task.cancel()
             raise
         except Exception:
             log.exception("pipeline 异常")
             self.fsm.force(State.IDLE)
+            if prod_task and not prod_task.done():
+                prod_task.cancel()
 
 
 # ---------- 启动 -------------------------------------------------------------
@@ -364,13 +414,13 @@ async def amain() -> None:
 
 
 def main() -> None:
-    log.info("RTVoice agent worker v0.5 启动")
+    log.info("RTVoice agent worker v0.5.1 启动")
     log.info("room=%s identity=%s livekit=%s",
              AGENT_ROOM, AGENT_IDENTITY, LIVEKIT_URL)
     log.info("stt=%s llm=%s model=%s",
              STT_WS_URL, LLM_BASE_URL, LLM_MODEL)
-    log.info("tts=%s voice=%s lang=%s sr=%dHz",
-             TTS_BASE_URL, TTS_VOICE, TTS_LANG, TTS_SAMPLE_RATE)
+    log.info("tts=%s voice=%s lang=%s sr=%dHz pipeline_concurrency=%d",
+             TTS_BASE_URL, TTS_VOICE, TTS_LANG, TTS_SAMPLE_RATE, TTS_PIPELINE_CONCURRENCY)
     asyncio.run(amain())
 
 

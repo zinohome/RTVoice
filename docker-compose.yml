@@ -126,6 +126,7 @@ services:
       TTS_BASE_URL: http://tts-server:9880
       TTS_VOICE: ${TTS_VOICE:-zf_xiaobei}
       TTS_LANG: ${TTS_LANG:-cmn}
+      TTS_PIPELINE_CONCURRENCY: ${TTS_PIPELINE_CONCURRENCY:-2}
       AGENT_ROOM: ${AGENT_ROOM:-rtvoice-test}
       AGENT_IDENTITY: ${AGENT_IDENTITY:-rtvoice-agent}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

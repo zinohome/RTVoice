@@ -2,7 +2,7 @@
 
 **职责**：加入 LiveKit 房间，订阅用户音频，跑 VAD + 状态机，驱动 STT → LLM → TTS 流水线。
 
-**状态**：✅ v0.4（STT + LLM 已切独立服务；TTS 仍 mock）
+**状态**：✅ v0.5.1（STT/LLM/TTS 全切独立服务 + LLM 流式句切片 → TTS pipeline）
 
 ## 技术栈
 
@@ -53,7 +53,9 @@ agent-worker/
     ├── vad.py               ← onnxruntime 直加载 silero VAD
     ├── stt_client.py        ← WS 客户端（连 stt-server）
     ├── llm_client.py        ← OpenAI 兼容客户端（连 llm-server）
-    └── mock_pipeline.py     ← mock TTS（mock_stt / mock_llm 已废弃）
+    ├── tts_client.py        ← HTTP 流式客户端（连 tts-server）
+    ├── phrase_split.py      ← LLM token 流 → phrase async generator (v0.5.1)
+    └── mock_pipeline.py     ← 已废弃，待 v0.6 删除
 ```
 
 ## 环境变量
@@ -68,6 +70,10 @@ agent-worker/
 | `LLM_BASE_URL` | `http://llm-server:11434/v1` | OpenAI 兼容 API 端点 |
 | `LLM_MODEL` | `qwen2.5:1.5b` | LLM 模型 ID（ollama / vLLM 都用） |
 | `LLM_API_KEY` | `ollama` | ollama 不验证；OpenAI SDK 必需非空 |
+| `TTS_BASE_URL` | `http://tts-server:9880` | TTS 服务 HTTP 地址 |
+| `TTS_VOICE` | `zf_xiaobei` | Kokoro 音色 ID |
+| `TTS_LANG` | `cmn` | espeak-ng 语言代码 |
+| `TTS_PIPELINE_CONCURRENCY` | `2` | 并行 TTS 任务数（v0.5.1） |
 | `AGENT_ROOM` | `rtvoice-test` | agent 加入哪个 room |
 | `AGENT_IDENTITY` | `rtvoice-agent` | agent 标识 |
 | `LOG_LEVEL` | `INFO` | DEBUG/INFO/WARNING/ERROR |
@@ -107,5 +113,35 @@ Idle → Listening → Thinking → Speaking → Idle
 |---|---|---|
 | v0.3 | STT 切独立 stt-server（sherpa-onnx Streaming Zipformer CPU），WS 协议 | ✅ |
 | v0.4 | LLM 切独立 llm-server（ollama + Qwen2.5-1.5B CPU），OpenAI 兼容流式 | ✅ |
-| v0.5 | 切 prod profile：vLLM + CosyVoice 2 GPU + sherpa-onnx GPU | ⏳ |
+| v0.5 | TTS 切独立 tts-server（Kokoro 82M ONNX CPU），HTTP 流式 chunked | ✅ |
+| v0.5.1 | LLM 流式 → 句切分 → 并发 TTS pipeline（首包延迟降~1-3s） | ✅ |
+| v0.5+ | docker-compose.prod.yml：vLLM + CosyVoice 2 GPU + sherpa-onnx GPU | ⏳ |
 | v0.6 | 迁移到 livekit-agents AgentSession 框架；接入框架的 turn detection | ⏳ |
+
+## v0.5.1 Pipeline 设计
+
+```
+STT final text
+   ↓
+LLM.stream(text) ──→ token deltas
+   ↓
+phrase_split.stream_to_phrases() ──→ phrase
+   ↓ (按到达即 fire create_task，受 SEM 限流)
+[TTS task 1] [TTS task 2] [TTS task 3] ...   并发合成
+   ↓ (严格按 phrase 顺序 await)
+publisher: pull → publish 20ms 帧到 LiveKit
+```
+
+**关键时序**：
+- 第一个 phrase 一就绪就转 SPEAKING，开播
+- producer 边收 LLM 边切片边 fire TTS（不等整段 LLM）
+- consumer 严格按入队顺序 await，保证音频顺序正确
+
+**指标日志**（每轮对话末尾）：
+```
+[ROUND METRIC] {'phrases': 2, 'first_phrase_ready_ms': 850, 'first_audio_ms': 1450, 'round_ms': 4200}
+```
+- `first_phrase_ready_ms`：LLM 开始 → 首个 TTS 完成（含网络）
+- `first_audio_ms`：用户说完 → 首字音频送出
+- `round_ms`：用户说完 → agent 说完
+- 这是 v0.6 真实测延迟的基础
