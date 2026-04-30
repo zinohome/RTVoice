@@ -1,0 +1,150 @@
+# RTVoice 生产覆盖
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod up -d
+#
+# 与 dev 的差异：
+#   - llm-server 切到 vLLM GPU（Qwen2.5-3B-Instruct-GPTQ-Int4，~3GB VRAM）
+#   - stt-server 切到 sherpa-onnx GPU 镜像（同协议，仅 provider=cuda）
+#   - tts-server v0.5+ 暂仍 Kokoro CPU（CosyVoice 2 集成留 v0.6）
+#   - livekit 用 livekit.prod.yaml（rtc.use_external_ip=true，UDP 50000-50099）
+#   - token-server 加 rate limit；BIND_HOST 由 .env.prod 显式决定
+#
+# 生产前必读 [SECURITY.md](./SECURITY.md) §4 迁移协议
+#
+# GPU 资源声明语法：deploy.resources.reservations.devices（compose v2 标准）
+
+services:
+  # ---------------------------------------------------------------
+  # LiveKit — 公网 SFU
+  # ---------------------------------------------------------------
+  livekit-server:
+    image: livekit/livekit-server:v1.11.0
+    ports:
+      # BIND_HOST 必须由用户在 .env 显式配（默认空，启动会失败）
+      - "${BIND_HOST:?BIND_HOST 未配置；prod 必须显式指定，禁止默认}:${LIVEKIT_PORT:-7880}:7880"
+      - "${BIND_HOST}:${LIVEKIT_RTC_TCP_PORT:-7881}:7881"
+      # prod 固定 50000-50099（容器侧一致）；不读 .env 的 dev 范围
+      - "${BIND_HOST}:50000-50099:50000-50099/udp"
+    volumes:
+      - ./livekit/livekit.prod.yaml:/etc/livekit.yaml:ro
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+
+  # ---------------------------------------------------------------
+  # Token Server — 公网/限流（dev 同代码，环境变量切 prod）
+  # ---------------------------------------------------------------
+  token-server:
+    image: rtvoice/token-server:v0.5.0
+    ports:
+      - "${BIND_HOST}:${TOKEN_SERVER_PORT:-8000}:8000"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL:?LIVEKIT_PUBLIC_URL 必须显式，例 wss://voice.example.com}
+      DEV_AUTO_INJECT_KEY: "false"        # 生产绝不注入 key 到测试页
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-30}
+    volumes: []   # prod 不挂源码
+
+  # ---------------------------------------------------------------
+  # STT Server (GPU) — sherpa-onnx + onnxruntime-gpu
+  # ---------------------------------------------------------------
+  stt-server:
+    build:
+      context: ./services/stt-server
+      dockerfile: Dockerfile.gpu
+    image: rtvoice/stt-server-gpu:v0.5.0
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      STT_NUM_THREADS: 1                  # GPU 时 CPU 线程减少
+      STT_PROVIDER: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+        limits:
+          memory: 2G
+          cpus: "1.0"
+
+  # ---------------------------------------------------------------
+  # LLM Server (GPU) — vLLM + Qwen2.5-3B GPTQ Int4
+  # ---------------------------------------------------------------
+  # 完全替换 dev ollama；vllm/vllm-openai 镜像直接做 OpenAI 兼容服务
+  # 模型自动从 HF 下载（建议预先 docker run 一次预热到 named volume）
+  llm-server:
+    image: vllm/vllm-openai:v0.7.0
+    container_name: rtvoice-llm
+    profiles: ["prod"]
+    restart: unless-stopped
+    networks: [rtvoice_net]
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      # 国内可设 hf-mirror 加速
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+    volumes:
+      - rtvoice_hf_cache:/root/.cache/huggingface
+    expose:
+      - "8000"
+    # vLLM CLI 直接吃这些 args（OpenAI 兼容服务）
+    command:
+      - --model=${LLM_MODEL_PROD:-Qwen/Qwen2.5-3B-Instruct-GPTQ-Int4}
+      - --port=8000
+      - --host=0.0.0.0
+      - --gpu-memory-utilization=${VLLM_GPU_MEM_UTIL:-0.4}
+      - --max-model-len=${VLLM_MAX_MODEL_LEN:-4096}
+      - --quantization=gptq
+      - --dtype=half
+      - --served-model-name=${LLM_MODEL:-qwen2.5:3b}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 600s   # 首次启动 + 模型下载 ≤10min
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+        limits:
+          memory: 8G
+          cpus: "2.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "30m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------
+  # TTS Server — v0.5+ prod 暂保持 Kokoro CPU（用户家 home/prod CPU 应能跑）
+  # CosyVoice 2 GPU 切换留 v0.6（独立 Dockerfile.cosyvoice，需要单独 dev iteration）
+  # ---------------------------------------------------------------
+  tts-server:
+    image: rtvoice/tts-server:v0.5.0
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "4.0"
+
+  # ---------------------------------------------------------------
+  # Agent Worker — 协议层不变，跑 CPU 即可（不分 GPU）
+  # ---------------------------------------------------------------
+  agent-worker:
+    image: rtvoice/agent-worker:v0.5.0
+    environment:
+      # 注意 prod LLM_BASE_URL 端口从 11434(ollama) 变 8000(vLLM)
+      LLM_BASE_URL: http://llm-server:8000/v1
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5:3b}
+
+# ---------------------------------------------------------------
+# 卷
+# ---------------------------------------------------------------
+volumes:
+  # vLLM 用 HF cache 而非 ollama 卷；rtvoice_ollama_models 在 prod 不挂载（可手动清理）
+  rtvoice_hf_cache:
+    driver: local

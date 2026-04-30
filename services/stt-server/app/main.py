@@ -47,6 +47,7 @@ MODEL_NAME = os.environ.get(
 )
 MODEL_DIR = MODELS_DIR / MODEL_NAME
 NUM_THREADS = int(os.environ.get("STT_NUM_THREADS", "2"))
+PROVIDER = os.environ.get("STT_PROVIDER", "cpu")  # "cpu" | "cuda"
 SAMPLE_RATE = 16000
 
 # 端点检测参数（agent-worker 已有 VAD，这里参数偏宽松，兜底用）
@@ -71,7 +72,7 @@ def _build_recognizer() -> sherpa_onnx.OnlineRecognizer:
     log.info("  decoder=%s (%.1fMB)", decoder, decoder.stat().st_size / 1e6)
     log.info("  joiner=%s  (%.1fMB)", joiner, joiner.stat().st_size / 1e6)
     log.info("  tokens=%s", tokens)
-    log.info("  threads=%d", NUM_THREADS)
+    log.info("  threads=%d provider=%s", NUM_THREADS, PROVIDER)
 
     return sherpa_onnx.OnlineRecognizer.from_transducer(
         encoder=str(encoder),
@@ -82,7 +83,7 @@ def _build_recognizer() -> sherpa_onnx.OnlineRecognizer:
         sample_rate=SAMPLE_RATE,
         feature_dim=80,
         decoding_method="greedy_search",
-        provider="cpu",
+        provider=PROVIDER,
         enable_endpoint_detection=True,
         rule1_min_trailing_silence=RULE1_TRAILING_SILENCE_S,
         rule2_min_trailing_silence=RULE2_TRAILING_SILENCE_S,

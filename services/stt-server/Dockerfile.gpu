@@ -1,0 +1,65 @@
+# stt-server GPU 变体（生产）
+#
+# 与 dev CPU 版差异：
+#   - FROM nvidia/cuda 提供 CUDA 12.4 + cuDNN 9 运行时
+#   - 装 onnxruntime-gpu（dev 版 sherpa-onnx 已自带 CPU ORT）
+#   - 默认 STT_PROVIDER=cuda
+#
+# 协议层不变：WS /asr，bytes 进 JSON 出。
+# 同代码（main.py），只切环境变量。
+#
+# 性能预期（RTX 3060）：
+#   - Streaming Zipformer int8 GPU：RTF 5-10×（CPU 版 1× 已经够用，但 GPU 留余地给并发）
+#   - 真实价值在多 stream 并发（每 stream 独占 GPU 流但分时复用）
+
+FROM nvidia/cuda:12.4.0-cudnn-runtime-ubuntu22.04
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3-pip python3.11-venv \
+    ca-certificates \
+    wget \
+ && ln -sf /usr/bin/python3.11 /usr/bin/python \
+ && rm -rf /var/lib/apt/lists/*
+
+# requirements 与 dev 共用；onnxruntime-gpu 替代 CPU 版
+COPY requirements.txt requirements.gpu.txt ./
+RUN pip install --break-system-packages --no-cache-dir -r requirements.gpu.txt
+
+# 模型下载与 dev 同
+ARG MODEL_NAME=sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
+ARG HF_REPO=csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
+
+RUN mkdir -p /app/models/${MODEL_NAME} && cd /app/models/${MODEL_NAME} && \
+    base="https://huggingface.co/${HF_REPO}/resolve/main" && \
+    for f in \
+        "encoder-epoch-99-avg-1.int8.onnx" \
+        "decoder-epoch-99-avg-1.int8.onnx" \
+        "joiner-epoch-99-avg-1.int8.onnx" \
+        "tokens.txt" \
+    ; do \
+        wget -q -O "$f" "${base}/${f}" || (echo "FAILED: $f"; exit 1); \
+    done
+
+RUN apt-get purge -y --auto-remove wget && rm -rf /var/lib/apt/lists/*
+
+COPY app ./app
+
+RUN useradd -u 1000 -m appuser && chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 9090
+
+# 健康检查同 dev
+HEALTHCHECK --interval=10s --timeout=3s --retries=5 --start-period=60s \
+  CMD python -c "import urllib.request,json,sys; r=json.load(urllib.request.urlopen('http://127.0.0.1:9090/health',timeout=2)); sys.exit(0 if r.get('status')=='ok' else 1)" \
+    || exit 1
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9090"]
