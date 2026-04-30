@@ -1,0 +1,71 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  yamllint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ibiqlik/action-yamllint@v3
+        with:
+          file_or_dir: 'docker-compose*.yml livekit/'
+          config_data: |
+            extends: relaxed
+            rules:
+              line-length: disable
+              empty-lines: disable
+              comments: disable
+              comments-indentation: disable
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: scripts
+          severity: warning
+
+  hadolint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dockerfile:
+          - services/token-server/Dockerfile
+          - services/agent-worker/Dockerfile
+          - services/stt-server/Dockerfile
+          - services/stt-server/Dockerfile.gpu
+          - services/llm-server/Dockerfile
+          - services/tts-server/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+          failure-threshold: error
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate dev compose
+        env:
+          LIVEKIT_API_KEY: k
+          LIVEKIT_API_SECRET: s
+          APP_API_KEY: a
+          BIND_HOST: 127.0.0.1
+          LIVEKIT_PUBLIC_URL: ws://127.0.0.1:7880
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config --quiet
+      - name: validate prod compose
+        env:
+          LIVEKIT_API_KEY: k
+          LIVEKIT_API_SECRET: s
+          APP_API_KEY: a
+          BIND_HOST: 0.0.0.0
+          LIVEKIT_PUBLIC_URL: wss://test.example.com
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod config --quiet
