@@ -45,4 +45,8 @@ HEALTHCHECK --interval=15s --timeout=3s --retries=3 --start-period=20s \
     sys.exit(0 if os.path.exists(p) and time.time() - os.path.getmtime(p) < 30 else 1)" \
     || exit 1
 
-CMD ["python", "-m", "app.main"]
+# AGENT_BACKEND 切换：默认 v05 = main.py（自写 FSM，已验证可工作）
+#                     v06 = main_v06.py（livekit-agents framework，experimental）
+# v06 默认追加 'start' subcommand（livekit-agents CLI 约定：start/dev/download-files/...）
+# 用户可 docker run --entrypoint 跑诊断命令
+CMD ["sh", "-c", "if [ \"$AGENT_BACKEND\" = \"v06\" ]; then exec python -m app.main_v06 start; else exec python -m app.main; fi"]

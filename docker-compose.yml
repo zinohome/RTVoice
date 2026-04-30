@@ -128,6 +128,9 @@ services:
       TTS_LANG: ${TTS_LANG:-cmn}
       TTS_PIPELINE_CONCURRENCY: ${TTS_PIPELINE_CONCURRENCY:-2}
       METRICS_PORT: 9100
+      # v0.6 实验性：AGENT_BACKEND=v06 走 livekit-agents 框架
+      # 默认空（=v05）= 已验证可工作的自写 FSM 路径
+      AGENT_BACKEND: ${AGENT_BACKEND:-}
       AGENT_ROOM: ${AGENT_ROOM:-rtvoice-test}
       AGENT_IDENTITY: ${AGENT_IDENTITY:-rtvoice-agent}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

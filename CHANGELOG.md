@@ -47,6 +47,38 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 - CONTRIBUTING.md 贡献指南
 - .env.example 大改：分节 [必改] / dev / prod 注释清晰
 
+### Phase F — v0.6 (experimental) livekit-agents 框架迁移
+**并行实现**，不破坏 v0.5.1。通过 `AGENT_BACKEND=v06` opt-in。
+
+新增：
+- `app/plugins.py` — 自定义 STT/TTS plugin 子类
+  - `RTVoiceSTT(stt.STT)` + `_RTVoiceRecognizeStream(stt.RecognizeStream)`
+    包装现有 `STTClient` WS 协议
+  - `RTVoiceTTS(tts.TTS)` + `_RTVoiceChunkedStream(tts.ChunkedStream)`
+    包装现有 tts-server HTTP chunked 协议
+- `app/main_v06.py` — `cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))` 入口
+- Dockerfile CMD 按 `AGENT_BACKEND` 分支：默认 v0.5.1，opt-in v0.6
+- docker-compose / .env.example 加 `AGENT_BACKEND` 透传
+
+依赖（pip 协商替代精确 pin）：
+- `livekit-agents>=1.5.6,<2.0`
+- `livekit-plugins-openai>=1.5.6,<2.0`
+- `livekit-plugins-silero>=1.5.6,<2.0`
+- 镜像从 537MB → 742MB（+200MB framework）
+
+模块映射 (v0.5.1 → v0.6)：
+- 自写 5 状态 FSM → `AgentSession` 内置 turn detection
+- 手写 onnxruntime VAD → `silero.VAD.load()` plugin
+- `llm_client.py` → `openai.LLM(base_url=ollama/vLLM)` 直接（无需自定义）
+- `phrase_split.py` + 手写 producer/consumer → framework 自动
+
+⭐ 自动验证（超预期）：
+- ✅ 镜像 build + import + 实例化全过
+- ✅ **worker 实际注册到 LiveKit**：日志 `"registered worker" agent_name=rtvoice-agent url=ws://livekit-server:7880 protocol=17`
+- ⏳ entrypoint 实际触发 / 端到端对话需 home box 真音频验证
+
+详见 [docs/v0.6-validation.md](./docs/v0.6-validation.md)。
+
 ### Phase E — Grafana 监控栈
 基于 Phase D 暴露的指标，提供 opt-in 的 prometheus + grafana 栈。
 
