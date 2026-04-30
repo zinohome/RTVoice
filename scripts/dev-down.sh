@@ -19,10 +19,10 @@ if [[ "${1:-}" == "--wipe" ]]; then
     echo "已取消。"
     exit 0
   fi
-  "${COMPOSE[@]}" down -v
+  "${COMPOSE[@]}" --profile dev down -v
   echo "✅ 已停止并清空数据卷。"
 else
-  "${COMPOSE[@]}" down
+  "${COMPOSE[@]}" --profile dev down
   echo "✅ 已停止（数据卷保留）。"
   echo "如需清空数据卷：./scripts/dev-down.sh --wipe"
 fi
