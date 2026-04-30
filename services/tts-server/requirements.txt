@@ -1,0 +1,10 @@
+# kokoro-onnx：纯 ONNX 推理，无 torch 依赖
+# 间接拉入：onnxruntime, numpy, phonemizer-fork, espeakng-loader
+kokoro-onnx==0.5.0
+
+# Web 框架
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# numpy 显式 pin
+numpy==2.2.1

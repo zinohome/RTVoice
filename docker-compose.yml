@@ -100,7 +100,7 @@ services:
     build:
       context: ./services/agent-worker
       dockerfile: Dockerfile
-    image: rtvoice/agent-worker:v0.4.0
+    image: rtvoice/agent-worker:v0.5.0
     container_name: rtvoice-agent
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -112,6 +112,8 @@ services:
         condition: service_healthy
       llm-server:
         condition: service_healthy
+      tts-server:
+        condition: service_healthy
     environment:
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
@@ -121,6 +123,9 @@ services:
       LLM_BASE_URL: http://llm-server:11434/v1
       LLM_MODEL: ${LLM_MODEL:-qwen2.5:1.5b}
       LLM_API_KEY: ollama   # ollama 不验证 key，但 OpenAI SDK 必需
+      TTS_BASE_URL: http://tts-server:9880
+      TTS_VOICE: ${TTS_VOICE:-zf_xiaobei}
+      TTS_LANG: ${TTS_LANG:-cmn}
       AGENT_ROOM: ${AGENT_ROOM:-rtvoice-test}
       AGENT_IDENTITY: ${AGENT_IDENTITY:-rtvoice-agent}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -204,6 +209,32 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------
-  # 后续版本占位
+  # TTS Server — Kokoro 82M ONNX (CPU dev) / CosyVoice 2 GPU (prod 切换)
   # ---------------------------------------------------------------
-  # tts-server:      # v0.5 真
+  tts-server:
+    build:
+      context: ./services/tts-server
+      dockerfile: Dockerfile
+    image: rtvoice/tts-server:v0.5.0
+    container_name: rtvoice-tts
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    networks: [rtvoice_net]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TTS_DEFAULT_VOICE: ${TTS_DEFAULT_VOICE:-zf_xiaobei}
+      TTS_DEFAULT_LANG: ${TTS_DEFAULT_LANG:-cmn}
+    expose:
+      - "9880"
+    deploy:
+      resources:
+        limits:
+          # Kokoro 82M ONNX 在 CPU 上对核心数敏感；4 核可达约 0.7-1.0× realtime
+          # 生产 v0.5+ 切 GPU 后 CPU 限制可降回 1.5
+          memory: 2G
+          cpus: "4.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "30m"
+        max-file: "3"

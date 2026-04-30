@@ -1,0 +1,205 @@
+"""RTVoice TTS Server.
+
+后端：Kokoro v1.0 ONNX (~325MB), CPU
+前端：HTTP chunked streaming, JSON in / PCM bytes out
+
+HTTP 协议（v0.5）
+==================
+端点：
+    POST /tts/stream
+    Content-Type: application/json
+
+请求体：
+    {
+      "text": "你好，今天天气真好。",
+      "voice": "zf_xiaobei",      // 可选；默认中文女声
+      "speed": 1.0                // 可选；0.5-1.5
+    }
+
+响应：
+    HTTP/1.1 200 OK
+    Content-Type: application/octet-stream
+    Transfer-Encoding: chunked
+    X-Sample-Rate: 24000
+    X-Channels: 1
+
+    [PCM int16 LE bytes 流，按句切分；每句 chunk 在合成完成后整段推出]
+
+辅助端点：
+    GET /health           ── {"status": "ok"}
+    GET /info             ── 模型/音色信息
+    GET /voices           ── 可用音色 ID 列表
+
+设计：
+    - Kokoro 模型本身非流式（单次输入 → 单次输出），用"按标点切句"模拟流式
+    - 长文本分句后逐句合成；每句合成完即推；调用方播放节奏由网络/HTTP 缓冲决定
+    - 单实例 Kokoro，串行合成（CPU 资源限制 + 内存友好）
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import numpy as np
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+log = logging.getLogger("rtvoice.tts")
+
+MODELS_DIR = Path(os.environ.get("TTS_MODELS_DIR", "/app/models"))
+MODEL_PATH = MODELS_DIR / "kokoro-v1.0.onnx"
+VOICES_PATH = MODELS_DIR / "voices-v1.0.bin"
+DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", "zf_xiaobei")  # 中文女声
+DEFAULT_LANG = os.environ.get("TTS_DEFAULT_LANG", "cmn")           # Mandarin
+SAMPLE_RATE = 24000
+
+# 句子切分正则：中英文标点都吃
+_SENTENCE_SPLIT = re.compile(r'(?<=[。！？\.\!\?])\s*|(?<=[，；,;])\s+')
+# 短句最小长度（合成 < N 字的太碎，合并到下一句）
+MIN_PHRASE_CHARS = 4
+
+
+def split_phrases(text: str) -> list[str]:
+    """按标点切短语；过短的合并到下一句。"""
+    raw = [p.strip() for p in _SENTENCE_SPLIT.split(text) if p and p.strip()]
+    out: list[str] = []
+    buf = ""
+    for p in raw:
+        buf = (buf + p) if buf else p
+        if len(buf) >= MIN_PHRASE_CHARS:
+            out.append(buf)
+            buf = ""
+    if buf:
+        if out:
+            out[-1] = out[-1] + buf
+        else:
+            out.append(buf)
+    return out
+
+
+# 全局 Kokoro 单例（避免重复加载 325MB 模型）
+_kokoro = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _kokoro
+    log.info("加载 Kokoro 模型: %s (%.1fMB)", MODEL_PATH, MODEL_PATH.stat().st_size / 1e6)
+    log.info("加载音色 embedding: %s (%.1fMB)", VOICES_PATH, VOICES_PATH.stat().st_size / 1e6)
+    # 在线程池里加载，避免阻塞事件循环（虽然 startup 期间没并发，但养成习惯）
+    from kokoro_onnx import Kokoro
+    _kokoro = await asyncio.to_thread(
+        Kokoro, str(MODEL_PATH), str(VOICES_PATH)
+    )
+    voices = list(_kokoro.get_voices())
+    log.info("Kokoro 就绪：%d 个音色，默认 voice=%s lang=%s",
+             len(voices), DEFAULT_VOICE, DEFAULT_LANG)
+    yield
+    log.info("shutdown")
+
+
+app = FastAPI(title="RTVoice TTS Server", version="0.5.0", lifespan=lifespan)
+
+
+class TTSRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000)
+    voice: str | None = Field(None, description="音色 ID，缺省用 TTS_DEFAULT_VOICE")
+    speed: float = Field(1.0, ge=0.5, le=1.5)
+    lang: str | None = Field(None, description="语言代码，缺省用 TTS_DEFAULT_LANG")
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok" if _kokoro is not None else "loading"}
+
+
+@app.get("/info")
+async def info() -> dict:
+    if _kokoro is None:
+        return {"status": "loading"}
+    return {
+        "model": str(MODEL_PATH.name),
+        "sample_rate": SAMPLE_RATE,
+        "default_voice": DEFAULT_VOICE,
+        "default_lang": DEFAULT_LANG,
+        "voice_count": len(list(_kokoro.get_voices())),
+    }
+
+
+@app.get("/voices")
+async def voices() -> dict:
+    if _kokoro is None:
+        raise HTTPException(503, "Kokoro 尚未加载")
+    return {"voices": sorted(_kokoro.get_voices())}
+
+
+def _to_pcm_int16(samples_f32: np.ndarray) -> bytes:
+    """Kokoro 输出 float32 in [-1,1]；转 int16 LE bytes（LiveKit 习惯）。"""
+    clipped = np.clip(samples_f32, -1.0, 1.0)
+    return (clipped * 32767.0).astype(np.int16).tobytes()
+
+
+async def _synthesize_stream(req: TTSRequest, request: Request) -> AsyncIterator[bytes]:
+    """按短语切分，逐句合成 → yield PCM bytes。
+
+    监听 request.is_disconnected() 让客户端断开时及时退出（节约 CPU）。
+    """
+    assert _kokoro is not None
+    voice = req.voice or DEFAULT_VOICE
+    lang = req.lang or DEFAULT_LANG
+    phrases = split_phrases(req.text)
+    log.info("[TTS] voice=%s lang=%s speed=%.2f text_len=%d phrases=%d",
+             voice, lang, req.speed, len(req.text), len(phrases))
+
+    for i, phrase in enumerate(phrases):
+        if await request.is_disconnected():
+            log.info("[TTS] client disconnected, stop at phrase %d/%d", i, len(phrases))
+            return
+        try:
+            # Kokoro.create 是 sync CPU 密集，丢线程池
+            samples, sr = await asyncio.to_thread(
+                _kokoro.create, phrase, voice=voice, speed=req.speed, lang=lang
+            )
+            assert sr == SAMPLE_RATE, f"unexpected sr {sr}"
+            pcm = _to_pcm_int16(samples)
+            log.debug("[TTS] phrase %d/%d %r → %d bytes", i + 1, len(phrases), phrase[:20], len(pcm))
+            yield pcm
+        except Exception as e:
+            log.exception("[TTS] phrase %d 合成失败: %s", i, e)
+            # 跳过失败的句子，继续下一句（不破坏整段流）
+            continue
+
+
+@app.post("/tts/stream")
+async def tts_stream(req: TTSRequest, request: Request):
+    if _kokoro is None:
+        raise HTTPException(503, "Kokoro 尚未加载")
+    voice = req.voice or DEFAULT_VOICE
+    if voice not in _kokoro.get_voices():
+        raise HTTPException(400, f"未知音色 voice={voice!r}")
+    return StreamingResponse(
+        _synthesize_stream(req, request),
+        media_type="application/octet-stream",
+        headers={
+            "X-Sample-Rate": str(SAMPLE_RATE),
+            "X-Channels": "1",
+            "X-Format": "pcm-int16-le",
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def _http_exc(request: Request, exc: HTTPException):
+    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})

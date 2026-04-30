@@ -12,5 +12,8 @@ websockets==13.1
 # OpenAI 兼容 API 客户端（连 llm-server / 未来的 vLLM）
 openai==1.59.7
 
+# HTTP 异步客户端（连 tts-server 的流式 chunked endpoint；OpenAI SDK 也用 httpx）
+httpx==0.27.2
+
 # 音频处理
 numpy==2.2.1

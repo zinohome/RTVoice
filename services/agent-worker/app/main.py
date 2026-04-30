@@ -1,18 +1,20 @@
 """RTVoice agent worker.
 
-v0.3：STT 切到独立 stt-server (sherpa-onnx Streaming Zipformer CPU)，
-      LLM/TTS 仍是 mock 内嵌。
+v0.5：STT/LLM/TTS 三个独立服务全部接入。
 功能：
     - 启动用 LIVEKIT_API_KEY/SECRET 自签 token，加入指定房间
     - 启动连 stt-server WebSocket 长连接
-    - 订阅参与者音频流，跑 silero-vad
+    - 订阅参与者音频流，跑 silero-vad（输入 16kHz）
     - LISTENING 状态下：PCM 实时推送给 stt-server (流式 partial)
-    - VAD speech_end → 发 EOS，等 final 文本 → THINKING
-    - mock LLM 流式 token → mock TTS 流式 PCM → publish 回 LiveKit
-    - 用户在 agent 说话期间再次开口 → barge-in：取消 LLM/TTS，重置 STT
+    - VAD speech_end → 发 EOS → 拿 final 文本 → THINKING
+    - LLM (ollama Qwen2.5-1.5B) 流式 token
+    - TTS (Kokoro 82M ONNX, 24kHz) HTTP 流式合成 → publish 24kHz audio track
+    - 用户在 agent 说话期间再次开口 → barge-in：取消 LLM/TTS、reset STT、清音频队列
 
-v0.4 计划：LLM 切独立 ollama (Qwen2.5-1.5B CPU)
-v0.5 计划：TTS 切真引擎 (Kokoro CPU 或 CosyVoice 2 GPU)
+音频采样率：
+    - 输入侧（用户麦克风 → VAD/STT）：16000Hz mono int16
+    - 输出侧（agent → 浏览器）：24000Hz mono int16（Kokoro 原生输出，避免重采样）
+
 v0.6 计划：迁移到 livekit-agents AgentSession 框架
 """
 
@@ -28,13 +30,9 @@ import numpy as np
 from livekit import api, rtc
 
 from app.llm_client import LLMClient
-from app.mock_pipeline import (
-    SAMPLE_RATE,
-    SAMPLES_PER_FRAME,
-    mock_tts,
-)
 from app.state_machine import State, StateMachine
 from app.stt_client import STTClient
+from app.tts_client import TTSClient
 from app.vad import (
     SileroVAD,
     SAMPLE_RATE as VAD_SAMPLE_RATE,
@@ -58,10 +56,18 @@ STT_WS_URL = os.environ.get("STT_WS_URL", "ws://stt-server:9090/asr")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://llm-server:11434/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen2.5:1.5b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
+TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "http://tts-server:9880")
+TTS_VOICE = os.environ.get("TTS_VOICE", "zf_xiaobei")
+TTS_LANG = os.environ.get("TTS_LANG", "cmn")
 AGENT_ROOM = os.environ.get("AGENT_ROOM", "rtvoice-test")
 AGENT_IDENTITY = os.environ.get("AGENT_IDENTITY", "rtvoice-agent")
 
 STT_FINAL_TIMEOUT_S = float(os.environ.get("STT_FINAL_TIMEOUT_S", "5.0"))
+
+# 输出音频参数（与 Kokoro 原生输出对齐，避免重采样）
+TTS_SAMPLE_RATE = 24000
+TTS_FRAME_MS = 20
+TTS_SAMPLES_PER_FRAME = TTS_SAMPLE_RATE * TTS_FRAME_MS // 1000   # 480
 
 
 # ---------- Agent ------------------------------------------------------------
@@ -71,8 +77,8 @@ class Agent:
         self.room = room
         self.fsm = StateMachine(on_change=self._on_state_change)
         self.vad = SileroVAD()
-        # TTS audio source（agent 的"喉咙"）
-        self.audio_source = rtc.AudioSource(SAMPLE_RATE, 1)
+        # TTS audio source（agent 的"喉咙"）— 24kHz 对齐 Kokoro 输出
+        self.audio_source = rtc.AudioSource(TTS_SAMPLE_RATE, 1)
         self.audio_track = rtc.LocalAudioTrack.create_audio_track(
             "agent-tts", self.audio_source
         )
@@ -80,6 +86,8 @@ class Agent:
         self.stt = STTClient(STT_WS_URL, on_partial=self._on_stt_partial)
         # LLM 客户端（OpenAI 兼容，连 llm-server）
         self.llm = LLMClient(base_url=LLM_BASE_URL, model=LLM_MODEL, api_key=LLM_API_KEY)
+        # TTS 客户端（HTTP 流式，连 tts-server）
+        self.tts = TTSClient(base_url=TTS_BASE_URL, voice=TTS_VOICE, lang=TTS_LANG)
         # 当前 inflight pipeline 任务（barge-in 取消用）
         self._pipeline_task: asyncio.Task | None = None
         # 用户音频累积缓冲（VAD 按帧消费）
@@ -208,6 +216,38 @@ class Agent:
 
     # ----- Pipeline: STT(WS) → mock LLM → mock TTS -----
 
+    async def _stream_tts_to_room(self, text: str) -> None:
+        """从 tts-server 流式拉 PCM bytes，切成 20ms 帧推到 LiveKit AudioSource。
+
+        TTS server 输出可能是变长 chunk；这里维护一个缓冲，按 480 samples/帧均匀切分。
+        """
+        leftover = b""
+        bytes_per_frame = TTS_SAMPLES_PER_FRAME * 2  # int16 = 2 bytes
+        async for chunk in self.tts.stream(text):
+            buf = leftover + chunk
+            n_full = len(buf) // bytes_per_frame
+            for i in range(n_full):
+                seg = buf[i * bytes_per_frame : (i + 1) * bytes_per_frame]
+                frame = rtc.AudioFrame.create(
+                    sample_rate=TTS_SAMPLE_RATE,
+                    num_channels=1,
+                    samples_per_channel=TTS_SAMPLES_PER_FRAME,
+                )
+                np.frombuffer(frame.data, dtype=np.int16)[:] = np.frombuffer(seg, dtype=np.int16)
+                await self.audio_source.capture_frame(frame)
+            leftover = buf[n_full * bytes_per_frame :]
+        # 尾巴：补零凑齐一帧
+        if leftover:
+            pad = bytes(bytes_per_frame - len(leftover))
+            seg = leftover + pad
+            frame = rtc.AudioFrame.create(
+                sample_rate=TTS_SAMPLE_RATE,
+                num_channels=1,
+                samples_per_channel=TTS_SAMPLES_PER_FRAME,
+            )
+            np.frombuffer(frame.data, dtype=np.int16)[:] = np.frombuffer(seg, dtype=np.int16)
+            await self.audio_source.capture_frame(frame)
+
     async def _run_pipeline(self) -> None:
         try:
             self.fsm.transition(State.THINKING)
@@ -226,20 +266,20 @@ class Agent:
 
             self.fsm.transition(State.SPEAKING)
 
-            # 2) 真 LLM (ollama OpenAI 兼容流式) → mock TTS（v0.5 才换真 TTS）
-            llm_stream = self.llm.stream(user_text)
-            tts_stream = mock_tts(llm_stream)
+            # 2) LLM 流式输出 → 累积成完整文本 → TTS 整段流式合成
+            #    Kokoro 不支持 token 级流式（需句级），所以攒齐 LLM 文本再 POST。
+            #    这增加 ~半秒首字延迟，可在 v0.6 改成 LLM 标点切片 + 多段 TTS 并发。
+            full_reply = []
+            async for delta in self.llm.stream(user_text):
+                full_reply.append(delta)
+            reply_text = "".join(full_reply).strip()
+            if not reply_text:
+                log.info("LLM 空回复，回 IDLE")
+                self.fsm.transition(State.IDLE)
+                return
 
-            async for pcm_frame in tts_stream:
-                frame = rtc.AudioFrame.create(
-                    sample_rate=SAMPLE_RATE,
-                    num_channels=1,
-                    samples_per_channel=SAMPLES_PER_FRAME,
-                )
-                np.frombuffer(frame.data, dtype=np.int16)[:] = np.frombuffer(
-                    pcm_frame, dtype=np.int16
-                )
-                await self.audio_source.capture_frame(frame)
+            # 3) TTS 流式合成 + 切帧 publish
+            await self._stream_tts_to_room(reply_text)
 
             if self.fsm.state == State.SPEAKING:
                 self.fsm.transition(State.IDLE)
@@ -314,17 +354,23 @@ async def amain() -> None:
         except Exception:
             log.exception("LLM close 异常")
         try:
+            await agent.tts.close()
+        except Exception:
+            log.exception("TTS close 异常")
+        try:
             await room.disconnect()
         except Exception:
             log.exception("room disconnect 异常")
 
 
 def main() -> None:
-    log.info("RTVoice agent worker v0.4 启动")
+    log.info("RTVoice agent worker v0.5 启动")
     log.info("room=%s identity=%s livekit=%s",
              AGENT_ROOM, AGENT_IDENTITY, LIVEKIT_URL)
     log.info("stt=%s llm=%s model=%s",
              STT_WS_URL, LLM_BASE_URL, LLM_MODEL)
+    log.info("tts=%s voice=%s lang=%s sr=%dHz",
+             TTS_BASE_URL, TTS_VOICE, TTS_LANG, TTS_SAMPLE_RATE)
     asyncio.run(amain())
 
 
