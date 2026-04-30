@@ -50,27 +50,64 @@ RTVoice/
 
 ---
 
-## 快速开始（开发机）
+## Quick Start
 
-> ⚠️ 当前阶段服务尚未实现，下面是规划中的命令。
+需要 Docker 24+（含 compose v2）。**不需要** Python / NodeJS / NVIDIA 驱动（dev 是 CPU）。
 
 ```bash
-# 1. 配置环境变量
+# 1. 克隆 + 进入目录
+git clone git@github.com:zinohome/RTVoice.git && cd RTVoice
+
+# 2. 配置环境变量
 cp .env.example .env
-# 编辑 .env 填入 LIVEKIT_API_KEY/SECRET
+# 生成两个强密钥（任一发行版有 python3 即可）：
+echo "LIVEKIT_API_SECRET=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" >> .env.tmp
+echo "APP_API_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" >> .env.tmp
+# 把上面两行填回 .env，覆盖默认值，删掉 .env.tmp
 
-# 2. 启动开发栈（CPU + mock 引擎）
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+# 3. 一键启动（首次会拉取镜像 + ollama 拉 Qwen2.5-1.5B 约 5 分钟）
+./scripts/dev-up.sh
 
-# 3. 查看状态
-docker compose ps
-docker compose logs -f agent-worker
-
-# 4. 浏览器测试（待前端就位）
-# 打开 http://127.0.0.1:8000
+# 4. 浏览器测试
+# 打开 http://127.0.0.1:8000，点"加入房间" → "开麦克风" → 说话
+# (DEV_AUTO_INJECT_KEY=true 会自动填 API key 到表单)
 
 # 5. 停止
-docker compose down
+./scripts/dev-down.sh                # 仅停容器，保留模型卷（推荐）
+./scripts/dev-down.sh --wipe         # 连模型一起删（需输入 YES I AM SURE）
+```
+
+### 验证服务健康
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
+# 期望看到 6 个服务全 healthy:
+#   livekit-server / token-server / stt-server / llm-server / tts-server / agent-worker
+```
+
+### 看 agent 实时日志
+
+```bash
+docker logs -f rtvoice-agent
+# 期望事件流（说话 → agent 回复）：
+#   [VAD] speech_start
+#   [STT final] '<你说的话>'
+#   [phrase 1] '<LLM 第一句回复>'
+#   [ROUND METRIC] {phrases: 2, first_audio_ms: 1450, round_ms: 4200}
+```
+
+### 生产部署（RTX 3060 12GB 服务器）
+
+详细步骤见 [DEPLOY.md](./DEPLOY.md)。简版：
+
+```bash
+# 1. 在生产服务器上 git pull 此仓库 + 配置 .env（强随机 + 公网 URL）
+# 2. 只读探查
+./scripts/prod-deploy.sh --inspect
+# 3. 备份现有数据卷
+./scripts/prod-deploy.sh --backup
+# 4. 拉镜像 + 渐进部署（每服务 healthcheck 后再继续）
+./scripts/prod-deploy.sh --apply
 ```
 
 ---

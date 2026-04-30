@@ -32,6 +32,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from livekit import api
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -56,14 +59,18 @@ LIVEKIT_API_SECRET = _require_env("LIVEKIT_API_SECRET", min_len=16)
 APP_API_KEY = _require_env("APP_API_KEY", min_len=32)
 LIVEKIT_PUBLIC_URL = os.environ.get("LIVEKIT_PUBLIC_URL", "ws://127.0.0.1:7880")
 DEV_AUTO_INJECT_KEY = os.environ.get("DEV_AUTO_INJECT_KEY", "false").lower() == "true"
+RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "30"))
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(
     title="RTVoice Token Server",
-    version="0.1.0",
-    description="为客户端签发 LiveKit JWT。v0.1 使用共享 API key 鉴权。",
+    version="0.5.0",
+    description="为客户端签发 LiveKit JWT。共享 API key 鉴权 + slowapi rate limit。",
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 if STATIC_DIR.is_dir():
@@ -138,6 +145,7 @@ def health() -> dict[str, str]:
     response_model=TokenResponse,
     dependencies=[Depends(require_api_key)],
 )
+@limiter.limit(lambda: f"{RATE_LIMIT_PER_MINUTE}/minute")
 def issue_token(req: TokenRequest, request: Request) -> TokenResponse:
     if not _NAME_RE.match(req.room):
         raise HTTPException(400, "room 仅允许 [A-Za-z0-9_-]，长度 1-64")

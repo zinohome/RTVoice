@@ -3,3 +3,6 @@ fastapi==0.115.6
 uvicorn[standard]==0.32.1
 livekit-api==0.8.2
 pydantic==2.10.4
+
+# 限流：每 IP/分钟阈值（防 API key 泄露后被刷）
+slowapi==0.1.9

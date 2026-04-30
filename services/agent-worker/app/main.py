@@ -103,6 +103,7 @@ class Agent:
         # 累积 user PCM bytes 队列（供推到 STT 用，仅 LISTENING 时填）
         self._stt_feed_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
         self._stt_feeder_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
 
     # ----- 状态转移回调 -----
 
@@ -114,6 +115,16 @@ class Agent:
             log.debug("[STT partial] %s", text)
 
     # ----- LiveKit 接入 -----
+
+    async def heartbeat_loop(self, path: str = "/tmp/agent-heartbeat") -> None:
+        """每 5s 触摸心跳文件；docker healthcheck 看这个 mtime 判活。"""
+        while True:
+            try:
+                with open(path, "w") as f:
+                    f.write(str(asyncio.get_running_loop().time()))
+            except Exception:
+                pass
+            await asyncio.sleep(5)
 
     async def join(self, url: str, token: str) -> None:
         log.info("agent 加入 room=%s url=%s", AGENT_ROOM, url)
@@ -133,6 +144,8 @@ class Agent:
 
         # 启动 STT feeder 任务（消费 _stt_feed_queue 推给 stt-server）
         self._stt_feeder_task = asyncio.create_task(self._stt_feeder_loop())
+        # 启动心跳任务（健康检查依据）
+        self._heartbeat_task = asyncio.create_task(self.heartbeat_loop())
 
     def _on_participant_connected(self, p: rtc.RemoteParticipant) -> None:
         log.info("参与者加入: %s", p.identity)
