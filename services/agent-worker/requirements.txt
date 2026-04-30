@@ -6,5 +6,8 @@ livekit-api==1.1.0
 # 避开 silero-vad pip 包（它会拖 torch + CUDA toolkit ~12GB）
 onnxruntime==1.20.1
 
+# WebSocket 客户端（连 stt-server）
+websockets==13.1
+
 # 音频处理
 numpy==2.2.1

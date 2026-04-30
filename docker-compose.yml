@@ -96,7 +96,7 @@ services:
     build:
       context: ./services/agent-worker
       dockerfile: Dockerfile
-    image: rtvoice/agent-worker:v0.2.0
+    image: rtvoice/agent-worker:v0.3.0
     container_name: rtvoice-agent
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -104,11 +104,14 @@ services:
     depends_on:
       livekit-server:
         condition: service_healthy
+      stt-server:
+        condition: service_healthy
     environment:
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
       # 走 docker network 内部地址（不经宿主端口）
       LIVEKIT_INTERNAL_URL: ws://livekit-server:7880
+      STT_WS_URL: ws://stt-server:9090/asr
       AGENT_ROOM: ${AGENT_ROOM:-rtvoice-test}
       AGENT_IDENTITY: ${AGENT_IDENTITY:-rtvoice-agent}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -124,8 +127,36 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------
+  # STT Server — sherpa-onnx 中文流式 Paraformer (CPU)
+  # ---------------------------------------------------------------
+  stt-server:
+    build:
+      context: ./services/stt-server
+      dockerfile: Dockerfile
+    image: rtvoice/stt-server:v0.3.0
+    container_name: rtvoice-stt
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    networks: [rtvoice_net]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      STT_NUM_THREADS: ${STT_NUM_THREADS:-2}
+    # 内部服务，端口不映射到宿主（仅 docker network 可达）
+    expose:
+      - "9090"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "30m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------
   # 后续版本占位
   # ---------------------------------------------------------------
-  # stt-server:      # v0.3
   # tts-server:      # v0.5 真
   # llm-server:      # v0.4 ollama / v0.5 vLLM

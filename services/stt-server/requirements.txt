@@ -1,0 +1,9 @@
+# sherpa-onnx：CPU-only wheel，C++ 内核 + 内置 ORT，不拖 torch
+sherpa-onnx==1.13.0
+
+# WS 服务
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# 音频
+numpy==2.2.1

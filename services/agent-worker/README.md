@@ -2,7 +2,7 @@
 
 **职责**：加入 LiveKit 房间，订阅用户音频，跑 VAD + 状态机，驱动 STT → LLM → TTS 流水线。
 
-**状态**：✅ v0.2（mock 引擎内嵌）
+**状态**：✅ v0.3（STT 切到独立 stt-server；LLM/TTS 仍 mock）
 
 ## 技术栈
 
@@ -10,7 +10,9 @@
 |---|---|---|
 | LiveKit 客户端 | `livekit==1.0.16` (rtc) + `livekit-api==1.1.0` | 低层 rtc.Room API |
 | VAD | `onnxruntime` + 手动下载 silero VAD ONNX (~2MB) | **不用 silero-vad pip 包**（拖 torch 12GB） |
-| STT/LLM/TTS | mock 内嵌（in-process） | v0.3+ 切独立服务 |
+| STT | WS 客户端 → stt-server (sherpa-onnx Streaming Zipformer) | 长连接，PCM 流式 + EOS |
+| LLM/TTS | mock 内嵌（in-process） | v0.4 LLM, v0.5 TTS |
+| WebSocket | `websockets==13.1` | STT 客户端依赖 |
 
 **镜像大小**：~535MB（vs silero-vad pip 版 12GB+）
 
@@ -44,10 +46,11 @@ agent-worker/
 ├── README.md                ← 本文件
 └── app/
     ├── __init__.py
-    ├── main.py              ← 入口 + Agent 类 + LiveKit I/O
+    ├── main.py              ← 入口 + Agent 类 + LiveKit I/O + Pipeline
     ├── state_machine.py     ← FSM with 合法转移检查
     ├── vad.py               ← onnxruntime 直加载 silero VAD
-    └── mock_pipeline.py     ← mock STT / LLM / TTS
+    ├── stt_client.py        ← WS 客户端（连 stt-server）
+    └── mock_pipeline.py     ← mock LLM / TTS（mock_stt 已废弃）
 ```
 
 ## 环境变量
@@ -57,6 +60,8 @@ agent-worker/
 | `LIVEKIT_API_KEY` | - | 必填 |
 | `LIVEKIT_API_SECRET` | - | 必填 |
 | `LIVEKIT_INTERNAL_URL` | `ws://livekit-server:7880` | docker network 内地址 |
+| `STT_WS_URL` | `ws://stt-server:9090/asr` | STT 服务 WebSocket 地址 |
+| `STT_FINAL_TIMEOUT_S` | `5.0` | 等 STT final 的超时 |
 | `AGENT_ROOM` | `rtvoice-test` | agent 加入哪个 room |
 | `AGENT_IDENTITY` | `rtvoice-agent` | agent 标识 |
 | `LOG_LEVEL` | `INFO` | DEBUG/INFO/WARNING/ERROR |
@@ -92,9 +97,9 @@ Idle → Listening → Thinking → Speaking → Idle
 
 ## 演进路线
 
-| 版本 | 变化 |
-|---|---|
-| v0.3 | 把 STT 切到独立 stt-server（sherpa-onnx CPU + Paraformer-tiny），WS 协议 |
-| v0.4 | LLM 切到 Ollama（Qwen2.5-1.5B CPU），TTS 切到 Kokoro 或 CosyVoice CPU |
-| v0.5 | 切 prod profile：vLLM + CosyVoice 2 GPU + sherpa-onnx GPU |
-| v0.6 | 迁移到 livekit-agents AgentSession 框架；接入框架的 turn detection |
+| 版本 | 变化 | 状态 |
+|---|---|---|
+| v0.3 | STT 切独立 stt-server（sherpa-onnx Streaming Zipformer CPU），WS 协议 | ✅ |
+| v0.4 | LLM 切到 Ollama（Qwen2.5-1.5B CPU），HTTP/SSE 流式 | ⏳ |
+| v0.5 | 切 prod profile：vLLM + CosyVoice 2 GPU + sherpa-onnx GPU | ⏳ |
+| v0.6 | 迁移到 livekit-agents AgentSession 框架；接入框架的 turn detection | ⏳ |
