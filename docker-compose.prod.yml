@@ -138,9 +138,17 @@ services:
     image: rtvoice/agent-worker:v0.5.0
     # 让容器能解析 host.docker.internal 到宿主 IP
     # 用于连宿主上的 ollama (典型 1Panel/Portainer 已有 ollama 容器)
-    # 如果 LLM_BASE_URL 指向 vLLM 服务（profile=prod-vllm），此项无害
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # prod 默认走宿主 ollama，llm-server 不在 prod profile，故 depends_on 删掉
+    # 用 !override 替换 base 的 depends_on（含 llm-server 引用），避免 'undefined service' 错
+    depends_on: !override
+      livekit-server:
+        condition: service_healthy
+      stt-server:
+        condition: service_healthy
+      tts-server:
+        condition: service_healthy
     environment:
       # prod 默认走宿主 ollama；要切 vLLM 改成 http://llm-server:8000/v1 + 加 profile prod-vllm
       LLM_BASE_URL: ${LLM_BASE_URL_PROD:-http://host.docker.internal:11434/v1}
