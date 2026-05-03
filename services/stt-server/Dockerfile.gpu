@@ -12,7 +12,9 @@
 #   - Streaming Zipformer int8 GPU：RTF 5-10×（CPU 版 1× 已经够用，但 GPU 留余地给并发）
 #   - 真实价值在多 stream 并发（每 stream 独占 GPU 流但分时复用）
 
-FROM nvidia/cuda:12.4.0-cudnn-runtime-ubuntu22.04
+# onnxruntime-gpu wheel 自带 cuDNN 9 (nvidia-cudnn-cu12)，不需要镜像层提供 cudnn
+# 用 plain runtime tag 节约 ~1GB；CUDA 12.4 兼容驱动 ≥ 525.x
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 WORKDIR /app
 

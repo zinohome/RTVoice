@@ -186,7 +186,9 @@ services:
       dockerfile: Dockerfile
     image: rtvoice/llm-server:v0.4.0
     container_name: rtvoice-llm
-    profiles: ["dev", "prod"]
+    # 仅 dev 启动；prod 默认走宿主 ollama（agent extra_hosts host.docker.internal）
+    # 要在 prod 用 vLLM，单独 --profile prod-vllm（prod 覆盖文件已配 vLLM image）
+    profiles: ["dev"]
     restart: unless-stopped
     networks: [rtvoice_net]
     environment:
