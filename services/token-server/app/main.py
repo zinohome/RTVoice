@@ -26,7 +26,9 @@ import re
 from datetime import timedelta
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from typing import Annotated
+
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
@@ -159,7 +161,10 @@ def health() -> dict[str, str]:
     dependencies=[Depends(require_api_key)],
 )
 @limiter.limit(lambda: f"{RATE_LIMIT_PER_MINUTE}/minute")
-def issue_token(req: TokenRequest, request: Request) -> TokenResponse:
+def issue_token(
+    request: Request,
+    req: Annotated[TokenRequest, Body()],
+) -> TokenResponse:
     if not _NAME_RE.match(req.room):
         raise HTTPException(400, "room 仅允许 [A-Za-z0-9_-]，长度 1-64")
     if not _NAME_RE.match(req.identity):

@@ -31,8 +31,8 @@ room:
     - mime: audio/opus
     - mime: video/vp8
     - mime: video/h264
-  empty_timeout: 300
-  max_participants: 16        # 按业务上限调
+  empty_timeout: 86400         # 24h；防止 agent 在空房 5min 后被踢
+  max_participants: 16          # 按业务上限调
 
 # Webhook（可选，让 token-server 接收事件）
 # webhook:
