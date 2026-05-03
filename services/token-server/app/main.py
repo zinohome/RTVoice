@@ -76,6 +76,18 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+
+def _rate_limit_dep(request: Request) -> None:
+    """slowapi 限流改成 Depends；避免装饰器搞坏 FastAPI 的参数内省。
+
+    每个请求构造一个临时 limiter context；超额抛 RateLimitExceeded → 已注册全局 handler。
+    """
+    # slowapi.Limiter 的 limit() 调用会做计数 + 超额抛错
+    # 用 limiter._inject_headers 的内部接口在最简语义下：
+    limit_str = f"{RATE_LIMIT_PER_MINUTE}/minute"
+    # 直接用 hit 接口（slowapi 0.1.9 暴露的低层 API）
+    limiter._check_request_limit(request, limit_str, False)
+
 # Prometheus：自动 http_request_duration / http_requests_total + 自定义 counter
 TOKENS_ISSUED = Counter("rtvoice_tokens_issued_total", "Total LiveKit JWTs issued",
                         ["room"])
@@ -158,9 +170,8 @@ def health() -> dict[str, str]:
 @app.post(
     "/token",
     response_model=TokenResponse,
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_api_key), Depends(_rate_limit_dep)],
 )
-@limiter.limit(lambda: f"{RATE_LIMIT_PER_MINUTE}/minute")
 def issue_token(
     request: Request,
     req: Annotated[TokenRequest, Body()],
