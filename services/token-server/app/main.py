@@ -17,7 +17,9 @@
     LOG_LEVEL              DEBUG/INFO/WARNING/ERROR
 """
 
-from __future__ import annotations
+# 不能加 `from __future__ import annotations`！
+# FastAPI + Pydantic v2 用 forward ref 解析时会把 Annotated[X, Body()] 当成 Query，
+# 导致 schema 生成 500 + /token 422。Python 3.11 下 Annotated 原生可用，无须 future。
 
 import hmac
 import logging
