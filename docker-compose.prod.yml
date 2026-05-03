@@ -71,12 +71,12 @@ services:
   # ---------------------------------------------------------------
   # LLM Server (GPU) — vLLM + Qwen2.5-3B GPTQ Int4
   # ---------------------------------------------------------------
-  # 完全替换 dev ollama；vllm/vllm-openai 镜像直接做 OpenAI 兼容服务
-  # 模型自动从 HF 下载（建议预先 docker run 一次预热到 named volume）
+  # 仅 profile=prod-vllm 时启动；默认 prod 不启动，agent 走 LLM_BASE_URL
+  # 指向用户已有的 ollama 或外部 OpenAI 兼容服务（推荐 dev→prod 平滑过渡）
   llm-server:
     image: vllm/vllm-openai:v0.7.0
     container_name: rtvoice-llm
-    profiles: ["prod"]
+    profiles: ["prod-vllm"]
     restart: unless-stopped
     networks: [rtvoice_net]
     environment:
@@ -136,10 +136,15 @@ services:
   # ---------------------------------------------------------------
   agent-worker:
     image: rtvoice/agent-worker:v0.5.0
+    # 让容器能解析 host.docker.internal 到宿主 IP
+    # 用于连宿主上的 ollama (典型 1Panel/Portainer 已有 ollama 容器)
+    # 如果 LLM_BASE_URL 指向 vLLM 服务（profile=prod-vllm），此项无害
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      # 注意 prod LLM_BASE_URL 端口从 11434(ollama) 变 8000(vLLM)
-      LLM_BASE_URL: http://llm-server:8000/v1
-      LLM_MODEL: ${LLM_MODEL:-qwen2.5:3b}
+      # prod 默认走宿主 ollama；要切 vLLM 改成 http://llm-server:8000/v1 + 加 profile prod-vllm
+      LLM_BASE_URL: ${LLM_BASE_URL_PROD:-http://host.docker.internal:11434/v1}
+      LLM_MODEL: ${LLM_MODEL_PROD:-qwen2.5:7b}
 
 # ---------------------------------------------------------------
 # 卷
