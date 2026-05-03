@@ -22,7 +22,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
-SERVICES=(livekit-server token-server stt-server llm-server tts-server agent-worker)
+
+# 默认 prod profile 不含 llm-server（用宿主 ollama）；vLLM 走 --profile prod-vllm
+# Service → 容器名映射（用关联数组防字符串处理 bug）
+declare -A CONTAINER_FOR=(
+  [livekit-server]="rtvoice-livekit"
+  [token-server]="rtvoice-token"
+  [stt-server]="rtvoice-stt"
+  [tts-server]="rtvoice-tts"
+  [agent-worker]="rtvoice-agent"
+)
+SERVICES=(livekit-server token-server stt-server tts-server agent-worker)
 
 confirm() {
   local msg="$1"
@@ -129,22 +139,30 @@ phase4_apply() {
   echo
   if ! confirm "继续？"; then return 0; fi
 
-  for svc in livekit-server stt-server llm-server tts-server token-server agent-worker; do
+  for svc in "${SERVICES[@]}"; do
+    container="${CONTAINER_FOR[$svc]}"
     echo
-    echo "▶ 部署 ${svc}（影响：仅此服务；可逆性：可，回滚命令见下）"
-    echo "  回滚：docker compose ... up -d --no-deps <prev-tag-svc>"
+    echo "▶ 部署 ${svc} (容器: ${container})"
+    echo "  影响：仅此服务；回滚：docker compose -f .. -f .. --profile prod up -d --no-deps <prev-tag>"
     if ! confirm "  应用 ${svc}？"; then echo "  跳过"; continue; fi
+
     "${COMPOSE[@]}" --profile prod up -d --no-deps "${svc}"
 
-    # 等 healthcheck（最多 10 分钟，LLM 首次拉模型可能慢）
-    echo "  等待 ${svc} 健康..."
-    for i in $(seq 1 120); do
-      status=$(docker inspect --format='{{.State.Health.Status}}' "rtvoice-${svc##*-server}" 2>/dev/null \
-              || docker inspect --format='{{.State.Health.Status}}' "rtvoice-${svc%-worker}" 2>/dev/null \
-              || echo "?")
-      if [[ "$status" == "healthy" || "$status" == "<no value>" ]]; then
-        echo "  ✅ ${svc} 健康"
+    # 等 healthcheck（最多 5 分钟）
+    echo "  等待 ${container} 健康..."
+    for i in $(seq 1 60); do
+      status=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "?")
+      if [[ "$status" == "healthy" ]]; then
+        echo "  ✅ ${container} healthy"
         break
+      fi
+      if [[ "$status" == "<no value>" ]]; then
+        # 服务无 healthcheck，看 running 即可
+        running=$(docker inspect --format='{{.State.Running}}' "${container}" 2>/dev/null || echo "false")
+        if [[ "$running" == "true" ]]; then
+          echo "  ✅ ${container} running (no healthcheck)"
+          break
+        fi
       fi
       sleep 5
     done
