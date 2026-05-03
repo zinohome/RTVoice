@@ -16,9 +16,9 @@ rtc:
   tcp_port: 7881
   port_range_start: 50000
   port_range_end: 50099
-  # 生产需要 server 上报正确的对外 IP（NAT 后的公网 IP）
-  use_external_ip: true
-  # 如果生产服务器是 LAN-only 部署，可改为 false 配合 STUN
+  # LAN 部署：关闭 STUN 自动发现（不查公网 IP）
+  # node_ip 由 docker-compose command 行 --node-ip 显式注入（yaml 不支持 env var 替换）
+  use_external_ip: false
 
 # 日志（prod 简洁）
 logging:

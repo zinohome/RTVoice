@@ -30,6 +30,13 @@ services:
       - ./livekit/livekit.prod.yaml:/etc/livekit.yaml:ro
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    # 用 CLI flag --node-ip 显式注入对外宣告 IP（yaml 不支持 env var 替换）
+    # ${RTVOICE_NODE_IP:?...} 强制必填（LAN IP，与 LIVEKIT_PUBLIC_URL 主机名一致）
+    command:
+      - --config
+      - /etc/livekit.yaml
+      - --node-ip
+      - ${RTVOICE_NODE_IP:?RTVOICE_NODE_IP 必须显式（LAN IP，例 192.168.66.163）}
 
   # ---------------------------------------------------------------
   # Token Server — 公网/限流（dev 同代码，环境变量切 prod）
