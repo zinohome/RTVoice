@@ -25,15 +25,20 @@ ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3-pip python3.11-venv \
+    python3.11 python3.11-venv \
     ca-certificates \
     wget \
- && ln -sf /usr/bin/python3.11 /usr/bin/python \
  && rm -rf /var/lib/apt/lists/*
+
+# 用 venv 隔离 PEP 668 system Python
+# 避免 --break-system-packages（旧 pip 不支持）+ 不污染系统包
+RUN python3.11 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN python -m pip install --upgrade pip
 
 # requirements 与 dev 共用；onnxruntime-gpu 替代 CPU 版
 COPY requirements.txt requirements.gpu.txt ./
-RUN pip install --break-system-packages --no-cache-dir -r requirements.gpu.txt
+RUN pip install --no-cache-dir -r requirements.gpu.txt
 
 # 模型下载与 dev 同
 ARG MODEL_NAME=sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
