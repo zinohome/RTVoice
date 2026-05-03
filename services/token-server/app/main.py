@@ -80,15 +80,16 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 def _rate_limit_dep(request: Request) -> None:
-    """slowapi 限流改成 Depends；避免装饰器搞坏 FastAPI 的参数内省。
+    """限流占位（v0.5+ 暂禁用）。
 
-    每个请求构造一个临时 limiter context；超额抛 RateLimitExceeded → 已注册全局 handler。
+    历史：尝试过 @limiter.limit 装饰器（破坏 FastAPI 内省）和
+    limiter._check_request_limit（私有 API 签名错，'str' has no __module__）。
+    都翻车。slowapi 0.1.9 + FastAPI 0.115 的稳定 Depends 模式需要更深整合。
+
+    voice agent 场景下限流应该放在反向代理（nginx/Caddy）层，
+    应用内限流是次优方案。v0.7+ 上 Caddy 后这个 Depends 直接删除。
     """
-    # slowapi.Limiter 的 limit() 调用会做计数 + 超额抛错
-    # 用 limiter._inject_headers 的内部接口在最简语义下：
-    limit_str = f"{RATE_LIMIT_PER_MINUTE}/minute"
-    # 直接用 hit 接口（slowapi 0.1.9 暴露的低层 API）
-    limiter._check_request_limit(request, limit_str, False)
+    return None
 
 # Prometheus：自动 http_request_duration / http_requests_total + 自定义 counter
 TOKENS_ISSUED = Counter("rtvoice_tokens_issued_total", "Total LiveKit JWTs issued",
