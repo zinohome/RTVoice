@@ -76,6 +76,11 @@ def _build_recognizer() -> sherpa_onnx.OnlineRecognizer:
     log.info("  tokens=%s", tokens)
     log.info("  threads=%d provider=%s", NUM_THREADS, PROVIDER)
 
+    # 关键决策（v0.5.3）：禁用 sherpa 的端点检测（is_endpoint）。
+    # 客户端 agent 的 silero VAD 是唯一权威——它告诉我们一句话什么时候结束。
+    # 如果 sherpa 自己也检测端点，会和 agent VAD 冲突 + 在 decode_loop 里
+    # 触发 stream.reset() 引起 race condition。RULE1/2/3 参数保留为
+    # 兼容字段，但 enable_endpoint_detection=False 时 sherpa 完全不用它们。
     return sherpa_onnx.OnlineRecognizer.from_transducer(
         encoder=str(encoder),
         decoder=str(decoder),
@@ -86,7 +91,7 @@ def _build_recognizer() -> sherpa_onnx.OnlineRecognizer:
         feature_dim=80,
         decoding_method="greedy_search",
         provider=PROVIDER,
-        enable_endpoint_detection=True,
+        enable_endpoint_detection=False,
         rule1_min_trailing_silence=RULE1_TRAILING_SILENCE_S,
         rule2_min_trailing_silence=RULE2_TRAILING_SILENCE_S,
         rule3_min_utterance_length=RULE3_MIN_UTT_LEN_S,
@@ -149,36 +154,21 @@ async def info() -> dict:
     }
 
 
-async def _decode_loop(ws: WebSocket, stream, last_partial: list[str]) -> None:
-    """异步循环：从 stream 拉 partial/final 事件推给客户端。"""
-    assert _recognizer is not None
-    while True:
-        await asyncio.sleep(0.05)  # decode 节奏 50ms
-        if not _recognizer.is_ready(stream):
-            continue
-        with DECODE_LATENCY.time():
-            await asyncio.to_thread(_recognizer.decode_stream, stream)
-        text = _get_text(stream)
-        if text != last_partial[0]:
-            last_partial[0] = text
-            try:
-                await ws.send_json({"type": "partial", "text": text})
-                EVENTS_TOTAL.labels(type="partial").inc()
-            except Exception:
-                return
-        if _recognizer.is_endpoint(stream):
-            log.info("endpoint detected, text=%r", text)
-            try:
-                await ws.send_json({"type": "final", "text": text})
-                EVENTS_TOTAL.labels(type="final_endpoint").inc()
-            except Exception:
-                return
-            await asyncio.to_thread(_recognizer.reset, stream)
-            last_partial[0] = ""
-
-
 @app.websocket("/asr")
 async def asr_ws(ws: WebSocket) -> None:
+    """v0.5.3：单线程消费循环，杜绝 stream 并发访问。
+
+    旧版（v0.5.2）有两个 task 同时操作 sherpa-onnx Stream（decode_loop +
+    EOS handler），加上 sherpa 自己的端点检测会异步 reset，三方 race
+    导致 'STT 连接已关闭' WS crash。
+
+    新版：
+        - 取消独立 decode_loop task
+        - 单一循环：receive WS msg（带超时）→ accept_waveform 或 EOS 处理
+        - 每个循环周期检查 is_ready → 同线程内 decode → emit partial
+        - sherpa endpoint detection 在 _build_recognizer 已禁用
+        - 全程一个协程操作 stream，无并发，无 race
+    """
     await ws.accept()
     if _recognizer is None:
         await ws.send_json({"type": "error", "message": "recognizer not loaded"})
@@ -186,48 +176,75 @@ async def asr_ws(ws: WebSocket) -> None:
         return
 
     stream = _recognizer.create_stream()
-    last_partial = [""]
+    last_partial: str = ""
     log.info("WS connected: %s", ws.client)
     WS_TOTAL.inc()
     WS_ACTIVE.inc()
 
-    decoder_task = asyncio.create_task(_decode_loop(ws, stream, last_partial))
+    # decode 节奏：每 50ms 跑一次（与旧 _decode_loop 一致）
+    DECODE_INTERVAL_S = 0.05
+    last_decode_t = 0.0
 
     try:
         while True:
-            msg = await ws.receive()
-            if msg.get("type") == "websocket.disconnect":
-                break
+            # ws.receive() 带超时——超时返回 None 让我们能周期性 decode
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=DECODE_INTERVAL_S)
+            except asyncio.TimeoutError:
+                msg = None
 
-            data_bytes = msg.get("bytes")
-            data_text = msg.get("text")
+            if msg is not None:
+                if msg.get("type") == "websocket.disconnect":
+                    break
 
-            if data_bytes:
-                # PCM int16 LE → float32 [-1, 1]
-                samples = np.frombuffer(data_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-                if samples.size > 0:
-                    # accept_waveform 是同步快操作，无需 to_thread
-                    stream.accept_waveform(SAMPLE_RATE, samples)
-            elif data_text:
-                cmd = data_text.strip().upper()
-                if cmd == "EOS":
-                    log.info("EOS received, flushing")
-                    stream.input_finished()
-                    # 把剩余特征 decode 完
-                    while _recognizer.is_ready(stream):
-                        await asyncio.to_thread(_recognizer.decode_stream, stream)
-                    text = _get_text(stream)
-                    log.info("final after EOS: %r", text)
-                    await ws.send_json({"type": "final", "text": text})
-                    EVENTS_TOTAL.labels(type="final_eos").inc()
-                    await asyncio.to_thread(_recognizer.reset, stream)
-                    last_partial[0] = ""
-                elif cmd == "RESET":
-                    log.info("RESET received")
-                    await asyncio.to_thread(_recognizer.reset, stream)
-                    last_partial[0] = ""
-                else:
-                    log.warning("未知文本指令: %r", cmd)
+                data_bytes = msg.get("bytes")
+                data_text = msg.get("text")
+
+                if data_bytes:
+                    # PCM int16 LE → float32 [-1, 1]
+                    samples = np.frombuffer(data_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                    if samples.size > 0:
+                        # accept_waveform 是同步快操作，无需 to_thread
+                        stream.accept_waveform(SAMPLE_RATE, samples)
+                elif data_text:
+                    cmd = data_text.strip().upper()
+                    if cmd == "EOS":
+                        log.info("EOS received, flushing")
+                        stream.input_finished()
+                        while _recognizer.is_ready(stream):
+                            with DECODE_LATENCY.time():
+                                await asyncio.to_thread(_recognizer.decode_stream, stream)
+                        text = _get_text(stream)
+                        log.info("final after EOS: %r", text)
+                        await ws.send_json({"type": "final", "text": text})
+                        EVENTS_TOTAL.labels(type="final_eos").inc()
+                        await asyncio.to_thread(_recognizer.reset, stream)
+                        last_partial = ""
+                        last_decode_t = 0.0
+                        continue
+                    elif cmd == "RESET":
+                        log.info("RESET received")
+                        await asyncio.to_thread(_recognizer.reset, stream)
+                        last_partial = ""
+                        last_decode_t = 0.0
+                        continue
+                    else:
+                        log.warning("未知文本指令: %r", cmd)
+
+            # 周期性 decode + 推 partial（同协程，与上面的处理 100% 串行）
+            now = asyncio.get_event_loop().time()
+            if (now - last_decode_t) >= DECODE_INTERVAL_S and _recognizer.is_ready(stream):
+                with DECODE_LATENCY.time():
+                    await asyncio.to_thread(_recognizer.decode_stream, stream)
+                last_decode_t = now
+                text = _get_text(stream)
+                if text and text != last_partial:
+                    last_partial = text
+                    try:
+                        await ws.send_json({"type": "partial", "text": text})
+                        EVENTS_TOTAL.labels(type="partial").inc()
+                    except Exception:
+                        break
     except WebSocketDisconnect:
         log.info("client disconnected")
     except Exception:
@@ -237,11 +254,6 @@ async def asr_ws(ws: WebSocket) -> None:
         except Exception:
             pass
     finally:
-        decoder_task.cancel()
-        try:
-            await decoder_task
-        except (asyncio.CancelledError, Exception):
-            pass
         try:
             await ws.close()
         except Exception:
