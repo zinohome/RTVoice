@@ -18,12 +18,13 @@ ENV PYTHONUNBUFFERED=1 \
     MODEL_DIR=/opt/CosyVoice/pretrained_models/CosyVoice2-0.5B
 
 # 系统依赖：Python + 编译工具 + 音频处理 + git（拉 submodule）
+# 注：Ubuntu 24.04 没有 libopenfst-dev（22.04 才有）；pynini 走 PyPI wheel 即可
+# 如果 pip 装 pynini 失败要从源码编 OpenFst，回头单独加这步
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv python3.12-dev \
     git wget curl ca-certificates \
     sox libsox-dev \
     build-essential pkg-config \
-    libopenfst-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # venv 隔离 PEP 668
