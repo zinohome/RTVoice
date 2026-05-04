@@ -35,7 +35,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # venv 用 Python 3.10（CosyVoice 原生兼容版本）
 RUN python3.10 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-RUN python -m pip install --upgrade pip wheel setuptools
+
+# 关键：用 setuptools<70 因为 setuptools 70+ 移除了 pkg_resources（独立化），
+# 而 CosyVoice 依赖（如 openai-whisper==20231117）的 setup.py 还 import 它。
+# build isolation 创建的子环境也要装这个旧 setuptools——靠 PIP_BUILD_CONSTRAINT。
+RUN python -m pip install --upgrade pip \
+ && pip install 'setuptools<70' wheel \
+ && echo "setuptools<70" > /tmp/build-constraints.txt
+ENV PIP_BUILD_CONSTRAINT=/tmp/build-constraints.txt
+ENV PIP_CONSTRAINT=/tmp/build-constraints.txt
 
 # Clone CosyVoice + Matcha-TTS submodule
 WORKDIR /opt
