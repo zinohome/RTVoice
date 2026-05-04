@@ -105,6 +105,8 @@ class Agent:
         self._stt_feed_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
         self._stt_feeder_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
+        # shutdown 标志（区分手动 shutdown vs RoomClosed 触发的 disconnect）
+        self._shutdown: asyncio.Event = asyncio.Event()
 
     # ----- 状态转移回调 -----
 
@@ -129,12 +131,44 @@ class Agent:
                 pass
             await asyncio.sleep(5)
 
+    def _on_disconnected(self, *args) -> None:
+        """LiveKit room 断开 → 调度异步重连。
+
+        触发场景：RoomClosed（LiveKit 内部回收）、网络抖动、livekit-server 重启等。
+        v0.5.1 之前只 log，agent 卡死；v0.5.2 加自动重连（指数退避，最多 5 次）。
+        """
+        log.warning("room disconnected: %s, scheduling reconnect", args)
+        if not self._shutdown.is_set():
+            asyncio.create_task(self._reconnect())
+
+    async def _reconnect(self, max_attempts: int = 5) -> None:
+        for attempt in range(1, max_attempts + 1):
+            if self._shutdown.is_set():
+                return
+            backoff = min(2 ** attempt, 30)
+            log.info("[RECONNECT] 第 %d/%d 次尝试，等 %ds", attempt, max_attempts, backoff)
+            await asyncio.sleep(backoff)
+            try:
+                # 重建 Room（旧 Room 实例已经断开，事件 listener 失效）
+                self.room = rtc.Room()
+                self.audio_source = rtc.AudioSource(TTS_SAMPLE_RATE, 1)
+                self.audio_track = rtc.LocalAudioTrack.create_audio_track(
+                    "agent-tts", self.audio_source
+                )
+                token = make_agent_token()
+                await self.join(LIVEKIT_URL, token)
+                log.info("[RECONNECT] ✅ 成功（第 %d 次尝试）", attempt)
+                return
+            except Exception:
+                log.exception("[RECONNECT] 第 %d 次失败", attempt)
+        log.error("[RECONNECT] %d 次后放弃；agent 进入空闲（重启容器恢复）", max_attempts)
+
     async def join(self, url: str, token: str) -> None:
         log.info("agent 加入 room=%s url=%s", AGENT_ROOM, url)
         self.room.on("track_subscribed", self._on_track_subscribed)
         self.room.on("participant_connected", self._on_participant_connected)
         self.room.on("participant_disconnected", self._on_participant_disconnected)
-        self.room.on("disconnected", lambda *a: log.warning("room disconnected: %s", a))
+        self.room.on("disconnected", self._on_disconnected)
 
         await self.room.connect(url, token, options=rtc.RoomOptions(auto_subscribe=True))
         log.info("agent 已加入 room；本地参与者: %s", self.room.local_participant.identity)
@@ -146,9 +180,11 @@ class Agent:
         log.info("agent 已 publish track: %s", publication.sid)
 
         # 启动 STT feeder 任务（消费 _stt_feed_queue 推给 stt-server）
-        self._stt_feeder_task = asyncio.create_task(self._stt_feeder_loop())
+        if self._stt_feeder_task is None or self._stt_feeder_task.done():
+            self._stt_feeder_task = asyncio.create_task(self._stt_feeder_loop())
         # 启动心跳任务（健康检查依据）
-        self._heartbeat_task = asyncio.create_task(self.heartbeat_loop())
+        if self._heartbeat_task is None or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(self.heartbeat_loop())
 
     def _on_participant_connected(self, p: rtc.RemoteParticipant) -> None:
         log.info("参与者加入: %s", p.identity)
@@ -191,16 +227,37 @@ class Agent:
 
     async def _consume_audio(self, track: rtc.RemoteAudioTrack) -> None:
         """订阅用户麦克风，逐帧跑 VAD，触发状态机；LISTENING 状态下喂 STT。"""
+        log.info("[AUDIO] 开始消费 track %s", track.sid)
         stream = rtc.AudioStream(track, sample_rate=VAD_SAMPLE_RATE, num_channels=1)
+        frame_count = 0
+        max_amp_seen = 0
         async for ev in stream:
             frame = ev.frame
             samples = np.frombuffer(frame.data, dtype=np.int16)
+            frame_count += 1
+            # 每 100 帧打一次诊断（约每 2 秒）
+            if frame_count <= 5 or frame_count % 100 == 0:
+                amp = int(np.abs(samples).max()) if samples.size > 0 else 0
+                max_amp_seen = max(max_amp_seen, amp)
+                log.info("[AUDIO] track %s frame#%d samples=%d max_amp=%d (历史 max=%d)",
+                         track.sid, frame_count, samples.size, amp, max_amp_seen)
             self._user_audio_buf = np.concatenate([self._user_audio_buf, samples])
 
             while len(self._user_audio_buf) >= VAD_FRAME_SAMPLES:
                 vad_frame = self._user_audio_buf[:VAD_FRAME_SAMPLES]
                 self._user_audio_buf = self._user_audio_buf[VAD_FRAME_SAMPLES:]
-                speech_start, speech_end, _prob = self.vad.feed(vad_frame)
+                speech_start, speech_end, prob = self.vad.feed(vad_frame)
+
+                # 每 100 个 VAD 帧打一次最高 prob，诊断 silero 看到的概率
+                if not hasattr(self, '_vad_log_counter'):
+                    self._vad_log_counter = 0
+                    self._vad_max_prob = 0.0
+                self._vad_log_counter += 1
+                self._vad_max_prob = max(self._vad_max_prob, prob)
+                if self._vad_log_counter % 100 == 0:
+                    log.info("[VAD diag] frames=%d 历史 max prob=%.3f (阈值 0.5)",
+                             self._vad_log_counter, self._vad_max_prob)
+                    self._vad_max_prob = 0.0
 
                 if speech_start:
                     await self._on_speech_start()
@@ -399,6 +456,7 @@ async def amain() -> None:
 
     def _shutdown(*_):
         log.info("收到信号，shutdown...")
+        agent._shutdown.set()
         stop.set()
 
     loop = asyncio.get_running_loop()
