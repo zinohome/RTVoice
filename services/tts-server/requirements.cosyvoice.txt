@@ -1,0 +1,13 @@
+# tts-server CosyVoice 包装层依赖
+# CosyVoice 自身依赖通过 /opt/CosyVoice/requirements.txt 安装
+# 这里只补我们的 server wrapper 需要的
+
+fastapi>=0.115
+uvicorn[standard]>=0.32
+
+# Prometheus（与 Kokoro 版对齐）
+prometheus-client>=0.21
+prometheus-fastapi-instrumentator>=7.0
+
+# modelscope（首次拉模型）
+modelscope>=1.20

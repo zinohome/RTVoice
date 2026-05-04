@@ -127,16 +127,36 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------
-  # TTS Server — v0.5+ prod 暂保持 Kokoro CPU（用户家 home/prod CPU 应能跑）
-  # CosyVoice 2 GPU 切换留 v0.6（独立 Dockerfile.cosyvoice，需要单独 dev iteration）
+  # TTS Server — Kokoro CPU (默认) / CosyVoice 2 GPU (TTS_BACKEND=cosyvoice)
   # ---------------------------------------------------------------
+  # 切到 CosyVoice 2 GPU：
+  #   1. .env 加 TTS_IMAGE=rtvoice/tts-server-cosyvoice:v0.6.0
+  #   2. docker compose build tts-server (会用 Dockerfile.cosyvoice)
+  #   3. docker compose up -d
+  # 默认走 Kokoro（rtvoice/tts-server:v0.5.0）保持兼容
   tts-server:
-    image: rtvoice/tts-server:v0.5.0
+    build:
+      context: ./services/tts-server
+      dockerfile: ${TTS_DOCKERFILE:-Dockerfile}
+    image: ${TTS_IMAGE:-rtvoice/tts-server:v0.5.0}
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TTS_DEFAULT_VOICE: ${TTS_DEFAULT_VOICE:-中文女}
+      TTS_DEFAULT_LANG: ${TTS_DEFAULT_LANG:-cmn}
+    volumes:
+      # CosyVoice 模型持久化卷（首次启动下载 ~5GB；后续重启秒起）
+      - rtvoice_cosyvoice_models:/opt/CosyVoice/pretrained_models
+    # CosyVoice 模式时启用 GPU（TTS_BACKEND_GPU=true 时下面声明生效）
     deploy:
       resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
         limits:
-          memory: 2G
-          cpus: "4.0"
+          memory: ${TTS_MEM_LIMIT:-8G}
+          cpus: "${TTS_CPU_LIMIT:-2.0}"
 
   # ---------------------------------------------------------------
   # Agent Worker — 协议层不变，跑 CPU 即可（不分 GPU）
@@ -167,4 +187,7 @@ services:
 volumes:
   # vLLM 用 HF cache 而非 ollama 卷；rtvoice_ollama_models 在 prod 不挂载（可手动清理）
   rtvoice_hf_cache:
+    driver: local
+  # CosyVoice 模型卷（5GB；首次下载，后续复用）
+  rtvoice_cosyvoice_models:
     driver: local

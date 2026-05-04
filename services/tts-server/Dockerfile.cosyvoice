@@ -1,0 +1,71 @@
+# tts-server CosyVoice 2 GPU 变体（v0.6.0）
+#
+# CosyVoice 2-0.5B GPU 推理：中文 SOTA TTS，质量明显优于 Kokoro
+# 协议层与 Kokoro 版完全相同：POST /tts/stream → chunked PCM 24kHz int16 mono
+# agent 端零改动；切换路径走 docker-compose.prod.yml 的 image 选择
+#
+# 镜像大小预估：~10GB（CUDA base + python + torch + CosyVoice deps）
+# 模型文件 ~5GB 不打包进镜像，runtime 自动下载到 named volume
+
+FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    COSYVOICE_DIR=/opt/CosyVoice \
+    MODEL_DIR=/opt/CosyVoice/pretrained_models/CosyVoice2-0.5B
+
+# 系统依赖：Python + 编译工具 + 音频处理 + git（拉 submodule）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 python3.12-venv python3.12-dev \
+    git wget curl ca-certificates \
+    sox libsox-dev \
+    build-essential pkg-config \
+    libopenfst-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# venv 隔离 PEP 668
+RUN python3.12 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN python -m pip install --upgrade pip wheel setuptools
+
+# Clone CosyVoice + Matcha-TTS submodule
+WORKDIR /opt
+RUN git clone --depth 1 --recurse-submodules \
+    https://github.com/FunAudioLLM/CosyVoice.git CosyVoice \
+ && cd CosyVoice && git log --oneline | head -1
+
+WORKDIR /opt/CosyVoice
+
+# CosyVoice 自身依赖（torch、transformers、diffusers、conformer、hyperpyyaml 等）
+# 注：requirements.txt 里 torch 默认是 cu121，对 12.6 base 也兼容（向下）
+RUN pip install -r requirements.txt
+
+# 我们的 server wrapper deps（FastAPI + Prometheus + 我们的协议）
+COPY requirements.cosyvoice.txt /tmp/server-requirements.txt
+RUN pip install -r /tmp/server-requirements.txt
+
+# 我们的服务代码
+WORKDIR /app
+COPY app /app/app
+
+# 入口脚本：首次运行下载模型（~5GB → named volume，重启秒起）
+COPY entrypoint-cosyvoice.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# 非 root（24.04 base 已占 uid 1000=ubuntu）
+RUN useradd -u 1001 -m appuser \
+ && chown -R appuser:appuser /app /opt/venv /opt/CosyVoice
+USER appuser
+
+EXPOSE 9880
+
+# 健康检查：模型加载完毕（recognizer ready）
+HEALTHCHECK --interval=15s --timeout=5s --retries=10 --start-period=600s \
+  CMD python -c "import urllib.request,json,sys; r=json.load(urllib.request.urlopen('http://127.0.0.1:9880/health',timeout=3)); sys.exit(0 if r.get('status')=='ok' else 1)" \
+    || exit 1
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["uvicorn", "app.main_cosyvoice:app", "--host", "0.0.0.0", "--port", "9880"]
