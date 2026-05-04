@@ -17,18 +17,23 @@ ENV PYTHONUNBUFFERED=1 \
     COSYVOICE_DIR=/opt/CosyVoice \
     MODEL_DIR=/opt/CosyVoice/pretrained_models/CosyVoice2-0.5B
 
-# 系统依赖：Python + 编译工具 + 音频处理 + git（拉 submodule）
-# 注：Ubuntu 24.04 没有 libopenfst-dev（22.04 才有）；pynini 走 PyPI wheel 即可
-# 如果 pip 装 pynini 失败要从源码编 OpenFst，回头单独加这步
+# 系统依赖
+# 注：CosyVoice requirements.txt 里很多包（grpcio==1.57, lhotse, pyworld 等）
+# 在 Python 3.12 上没 cp312 wheel，CosyVoice 项目本身原生在 3.10 上测试。
+# 用 deadsnakes PPA 装 Python 3.10 而非用 24.04 默认 3.12，避免大量兼容陷阱。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 python3.12-venv python3.12-dev \
+    software-properties-common \
     git wget curl ca-certificates \
     sox libsox-dev \
     build-essential pkg-config \
+ && add-apt-repository -y ppa:deadsnakes/ppa \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+    python3.10 python3.10-venv python3.10-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# venv 隔离 PEP 668
-RUN python3.12 -m venv /opt/venv
+# venv 用 Python 3.10（CosyVoice 原生兼容版本）
+RUN python3.10 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN python -m pip install --upgrade pip wheel setuptools
 
