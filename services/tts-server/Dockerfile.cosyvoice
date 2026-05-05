@@ -7,11 +7,11 @@
 # 镜像大小预估：~10GB（CUDA base + python + torch + CosyVoice deps）
 # 模型文件 ~5GB 不打包进镜像，runtime 自动下载到 named volume
 
-# 用 devel 镜像（带 nvcc + CUDA toolkit）而非 runtime
-# CosyVoice 依赖 deepspeed 0.15.1，import 时调 nvcc -V 探测 CUDA 版本；
-# runtime 镜像没 nvcc → FileNotFoundError 让整个 import 链断
-# devel 镜像多 ~2GB，但能保证 deepspeed + 任何 JIT 编译路径稳定
-FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
+# 用 ubuntu22.04 + devel 镜像 — 本地实测过的稳定组合：
+# - devel 自带 nvcc 12.6.85（CosyVoice 的 deepspeed import 时探测 CUDA 版本必需）
+# - ubuntu22.04 默认 python3 = 3.10.12（CosyVoice 原生兼容版本，零 PPA）
+# - 之前用 ubuntu24.04 + deadsnakes PPA 在中国 CDN 反复 TLS 握手失败
+FROM nvidia/cuda:12.6.3-devel-ubuntu22.04
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -21,23 +21,16 @@ ENV PYTHONUNBUFFERED=1 \
     COSYVOICE_DIR=/opt/CosyVoice \
     MODEL_DIR=/opt/CosyVoice/pretrained_models/CosyVoice2-0.5B
 
-# 系统依赖
-# 注：CosyVoice requirements.txt 里很多包（grpcio==1.57, lhotse, pyworld 等）
-# 在 Python 3.12 上没 cp312 wheel，CosyVoice 项目本身原生在 3.10 上测试。
-# 用 deadsnakes PPA 装 Python 3.10 而非用 24.04 默认 3.12，避免大量兼容陷阱。
+# 系统依赖：ubuntu22.04 默认 python3 = 3.10，apt 直接装即可
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
+    python3 python3-venv python3-dev \
     git wget curl ca-certificates \
     sox libsox-dev \
     build-essential pkg-config \
- && add-apt-repository -y ppa:deadsnakes/ppa \
- && apt-get update \
- && apt-get install -y --no-install-recommends \
-    python3.10 python3.10-venv python3.10-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# venv 用 Python 3.10（CosyVoice 原生兼容版本）
-RUN python3.10 -m venv /opt/venv
+# venv（python3 是 3.10.12）
+RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # 关键：用 setuptools<70 因为 setuptools 70+ 移除了 pkg_resources（独立化），
