@@ -7,7 +7,11 @@
 # 镜像大小预估：~10GB（CUDA base + python + torch + CosyVoice deps）
 # 模型文件 ~5GB 不打包进镜像，runtime 自动下载到 named volume
 
-FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
+# 用 devel 镜像（带 nvcc + CUDA toolkit）而非 runtime
+# CosyVoice 依赖 deepspeed 0.15.1，import 时调 nvcc -V 探测 CUDA 版本；
+# runtime 镜像没 nvcc → FileNotFoundError 让整个 import 链断
+# devel 镜像多 ~2GB，但能保证 deepspeed + 任何 JIT 编译路径稳定
+FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
