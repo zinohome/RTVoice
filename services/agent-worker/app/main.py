@@ -383,9 +383,15 @@ class Agent:
                 chunks_recv += 1
                 await self._publish_pcm_bytes(pcm)
         finally:
+            # barge-in 时（外层 task.cancel）这里要保证 close frame 发出去，
+            # 否则 server 只能靠 TCP RST 才察觉，inference 多浪费 1-2 个 chunk。
+            # shield 让 aclose 不被外层 cancel 中断。
             if not feed_task.done():
                 feed_task.cancel()
-            await ws.aclose()
+            try:
+                await asyncio.shield(asyncio.wait_for(ws.aclose(), timeout=2.0))
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
 
         round_s = time.time() - round_t0
         log.info("[WS-pipeline] done chunks=%d llm_to_done=%.1fs round=%.1fs",

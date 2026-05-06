@@ -481,8 +481,10 @@ async def tts_stream_ws(ws: WebSocket) -> None:
             try:
                 await ws.send_bytes(item)
                 sent_chunks += 1
-            except WebSocketDisconnect:
-                log.info("[ws-tts] client disconnected")
+            except (WebSocketDisconnect, RuntimeError) as e:
+                # starlette 在 client close 后再 send 抛 RuntimeError 而非
+                # WebSocketDisconnect — 都按"对端已断"处理
+                log.info("[ws-tts] client disconnected (%s)", type(e).__name__)
                 break
         try:
             await ws.send_json({"type": "done", "chunks": sent_chunks})
