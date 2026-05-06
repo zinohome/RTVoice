@@ -66,8 +66,11 @@ COPY app /app/app
 COPY entrypoint-cosyvoice.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# 非 root（24.04 base 已占 uid 1000=ubuntu）
+# 非 root（uid 1001 与 stt-server-gpu 一致）
+# 关键：mkdir 显式创建 mount point 后 chown，让 docker 第一次挂载空 named volume
+# 时继承 1001 ownership——entrypoint 以 appuser 写入 modelscope 下载才能成功
 RUN useradd -u 1001 -m appuser \
+ && mkdir -p /opt/CosyVoice/pretrained_models \
  && chown -R appuser:appuser /app /opt/venv /opt/CosyVoice
 USER appuser
 
