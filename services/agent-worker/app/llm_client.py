@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator
 
 from openai import AsyncOpenAI
@@ -27,11 +28,18 @@ from openai import AsyncOpenAI
 log = logging.getLogger("rtvoice.agent.llm")
 
 
-SYSTEM_PROMPT = (
+DEFAULT_SYSTEM_PROMPT = (
     "你是一个语音助手 RTVoice。请用中文简洁回答用户问题。"
     "每次回复不超过 30 个字，直接说话，不要使用任何符号、emoji、列表或 markdown 格式。"
     "用户说的话可能是 ASR 转写，可能有错别字，请你智能理解。"
 )
+
+# 允许 .env 用 AGENT_SYSTEM_PROMPT 覆盖（不需要 rebuild 镜像，重启 agent-worker 即生效）
+SYSTEM_PROMPT = os.environ.get("AGENT_SYSTEM_PROMPT", "").strip() or DEFAULT_SYSTEM_PROMPT
+
+# max_tokens 是 LLM 上限，不是"文本长度限制"——pipeline 是 token 流式→句切分→并发 TTS→顺序播放，
+# 改大不影响首字节延迟，只让回复更长。
+DEFAULT_MAX_TOKENS = int(os.environ.get("AGENT_LLM_MAX_TOKENS", "80"))
 
 
 class LLMClient:
@@ -40,7 +48,7 @@ class LLMClient:
         base_url: str,
         model: str,
         api_key: str = "ollama",
-        max_tokens: int = 80,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         temperature: float = 0.6,
         system_prompt: str = SYSTEM_PROMPT,
     ) -> None:

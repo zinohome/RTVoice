@@ -127,6 +127,9 @@ services:
       TTS_VOICE: ${TTS_VOICE:-zf_xiaobei}
       TTS_LANG: ${TTS_LANG:-cmn}
       TTS_PIPELINE_CONCURRENCY: ${TTS_PIPELINE_CONCURRENCY:-2}
+      # 留空走代码内默认 prompt（30 字短回复）；想要更长/更自然回复就在 .env 设置
+      AGENT_SYSTEM_PROMPT: ${AGENT_SYSTEM_PROMPT:-}
+      AGENT_LLM_MAX_TOKENS: ${AGENT_LLM_MAX_TOKENS:-80}
       METRICS_PORT: 9100
       # v0.6 实验性：AGENT_BACKEND=v06 走 livekit-agents 框架
       # 默认空（=v05）= 已验证可工作的自写 FSM 路径
