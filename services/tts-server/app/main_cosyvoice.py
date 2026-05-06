@@ -205,8 +205,18 @@ async def _synthesize_stream(req: TTSRequest, request: Request) -> AsyncIterator
     def producer():
         nonlocal audio_samples_total
         try:
-            for output in _cosyvoice.inference_sft(
-                req.text, voice, stream=True, speed=req.speed
+            # 用 inference_zero_shot 而非 inference_sft：
+            # - CosyVoice 2-0.5B 不带 SFT spk2info.pt（schema: 'embedding'）
+            # - 启动时 add_zero_shot_spk 注册的是 zero-shot schema (llm_embedding/flow_embedding)
+            # - inference_zero_shot 在 zero_shot_spk_id != '' 时走 spk2info 缓存路径，
+            #   prompt_text/prompt_wav 此时被 frontend 忽略（仍需传值占位）
+            for output in _cosyvoice.inference_zero_shot(
+                req.text,
+                DEFAULT_PROMPT_TEXT,    # 占位；spk_id 非空时不使用
+                DEFAULT_PROMPT_WAV,     # 占位；spk_id 非空时不使用
+                zero_shot_spk_id=voice,
+                stream=True,
+                speed=req.speed,
             ):
                 samples = output["tts_speech"]
                 audio_samples_total += samples.numel()
