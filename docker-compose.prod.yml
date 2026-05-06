@@ -145,6 +145,9 @@ services:
       # （Kokoro 模式忽略此环境变量；仅 Dockerfile.cosyvoice 用）
       TTS_DEFAULT_VOICE: ${TTS_DEFAULT_VOICE:-default_zh_female}
       TTS_DEFAULT_LANG: ${TTS_DEFAULT_LANG:-cmn}
+      # Admin endpoints (POST/DELETE /voices/...) Bearer 鉴权
+      # 留空 = 禁用 admin（生产建议设置）
+      TTS_ADMIN_API_KEY: ${TTS_ADMIN_API_KEY:-}
     volumes:
       # CosyVoice 模型持久化卷（首次启动下载 ~5GB；后续重启秒起）
       - rtvoice_cosyvoice_models:/opt/CosyVoice/pretrained_models

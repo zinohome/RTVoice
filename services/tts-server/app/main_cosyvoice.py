@@ -30,7 +30,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from fastapi import FastAPI, HTTPException, Request
+import torchaudio
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -63,6 +64,20 @@ DEFAULT_PROMPT_WAV = os.path.join(COSYVOICE_DIR, "asset/zero_shot_prompt.wav")
 DEFAULT_PROMPT_TEXT = "希望你以后能够做的比我还好呦。"
 
 DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", DEFAULT_SPK_ID)
+
+# 用户上传的 reference wav 持久化目录（与模型同 named volume，重启后保留）
+VOICES_WAV_DIR = Path(MODEL_DIR).parent / "voices"
+
+# Admin endpoints (POST/DELETE /voices/...) Bearer 鉴权
+# 留空 = 禁用 admin endpoints（防止误开放）
+ADMIN_API_KEY = os.environ.get("TTS_ADMIN_API_KEY", "").strip()
+
+# 上传 wav 大小上限（防爆磁盘）；CosyVoice 推荐 prompt 3-30 秒 16k mono → ≤2 MB
+MAX_WAV_BYTES = int(os.environ.get("TTS_MAX_WAV_BYTES", str(5 * 1024 * 1024)))
+
+# spk_id 限制：避免路径穿越/特殊字符；接受字母数字下划线和中日韩字符
+import re
+SPK_ID_RE = re.compile(r"^[\w\u4e00-\u9fff\u3040-\u30ff-]{1,64}$")
 
 # 任意 voice 别名都 fallback 到默认注册的 SFT id
 # Kokoro 用户不改 .env 可直接复用
@@ -115,9 +130,17 @@ async def lifespan(app: FastAPI):
     )
     log.info("默认音色注册完成 (%.1fs)", time.time() - t0)
 
+    # 用户上传的 reference 持久化目录（admin 注册的音色由 spk2info.pt 自动恢复，
+    # 这里只放原始 wav 文件用于审计/重建）
+    VOICES_WAV_DIR.mkdir(parents=True, exist_ok=True)
+
     _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
     log.info("可用 SFT 音色 (%d): %s", len(_cosyvoice_voices), _cosyvoice_voices)
     log.info("默认 voice=%s sample_rate=%d", DEFAULT_VOICE, SAMPLE_RATE)
+    if ADMIN_API_KEY:
+        log.info("admin endpoints 已启用 (TTS_ADMIN_API_KEY 设置)")
+    else:
+        log.info("admin endpoints 已禁用 (TTS_ADMIN_API_KEY 未设置)")
     yield
     log.info("shutdown")
 
@@ -283,6 +306,113 @@ async def tts_stream(req: TTSRequest, request: Request):
             "X-Format": "pcm-int16-le",
         },
     )
+
+
+# ---------------------------------------------------------------
+# Admin endpoints — 音色注册（POST/DELETE /voices/...）
+# ---------------------------------------------------------------
+# Bearer 鉴权：TTS_ADMIN_API_KEY 留空时拒绝（避免误开放）
+# 注册路径：multipart/form-data 上传 wav + form 字段 spk_id + prompt_text
+# 持久化：CosyVoice.save_spkinfo() 写 spk2info.pt 到 model dir（即 named volume），
+#        启动 CosyVoice2.__init__ 自动 torch.load → 重启即恢复。
+# 原始 wav 另存到 VOICES_WAV_DIR/<spk_id>.wav 便于审计/重建（同卷）
+
+def _check_admin_auth(authorization: str | None = Header(None)) -> None:
+    if not ADMIN_API_KEY:
+        raise HTTPException(403, "admin endpoints disabled (TTS_ADMIN_API_KEY 未设置)")
+    expected = f"Bearer {ADMIN_API_KEY}"
+    if authorization != expected:
+        raise HTTPException(401, "invalid or missing Bearer token")
+
+
+def _validate_spk_id(spk_id: str) -> str:
+    spk_id = spk_id.strip()
+    if not SPK_ID_RE.match(spk_id):
+        raise HTTPException(400, "spk_id 只允许字母数字下划线/中日韩字符/连字符，长度 1-64")
+    return spk_id
+
+
+@app.post("/voices/add")
+async def add_voice(
+    spk_id: str = Form(..., description="新音色 ID（不能与现有冲突）"),
+    prompt_text: str = Form(..., min_length=1, max_length=200,
+                            description="参考音频对应的文本（≥3 秒发音）"),
+    file: UploadFile = File(..., description="参考音频 wav (16kHz mono 推荐, 3-30 秒)"),
+    _auth: None = Depends(_check_admin_auth),
+) -> dict:
+    if _cosyvoice is None:
+        raise HTTPException(503, "CosyVoice 尚未加载")
+
+    spk_id = _validate_spk_id(spk_id)
+    if spk_id in _cosyvoice.list_available_spks():
+        raise HTTPException(409, f"音色 {spk_id!r} 已存在；先 DELETE 再 POST")
+
+    # 读到内存校验（5 MB 上限够 30 秒 16k mono 16-bit wav）
+    raw = await file.read()
+    if len(raw) > MAX_WAV_BYTES:
+        raise HTTPException(413, f"wav 超过 {MAX_WAV_BYTES} 字节上限")
+    if len(raw) < 1024:
+        raise HTTPException(400, "wav 文件过小，疑似无效")
+
+    # 持久化到 named volume；先写再注册，失败时清理
+    wav_path = VOICES_WAV_DIR / f"{spk_id}.wav"
+    wav_path.write_bytes(raw)
+
+    try:
+        # torchaudio 校验 + load 给 CosyVoice
+        try:
+            waveform, sr = torchaudio.load(str(wav_path))
+        except Exception as e:
+            raise HTTPException(400, f"wav 解码失败：{e}")
+        log.info("[admin] add voice spk_id=%s sr=%d duration=%.2fs",
+                 spk_id, sr, waveform.shape[-1] / sr)
+
+        # 调 CosyVoice 注册（同步 → 跑线程，避免阻塞 event loop）
+        await asyncio.to_thread(
+            _cosyvoice.add_zero_shot_spk, prompt_text, str(wav_path), spk_id
+        )
+        # 持久化 spk2info.pt 到 MODEL_DIR（重启自动 reload）
+        await asyncio.to_thread(_cosyvoice.save_spkinfo)
+    except HTTPException:
+        wav_path.unlink(missing_ok=True)
+        raise
+    except Exception as e:
+        wav_path.unlink(missing_ok=True)
+        log.exception("[admin] add voice 失败")
+        raise HTTPException(500, f"注册失败：{e}")
+
+    # 刷新 voices 列表
+    global _cosyvoice_voices
+    _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
+    return {"spk_id": spk_id, "voice_count": len(_cosyvoice_voices)}
+
+
+@app.delete("/voices/{spk_id}")
+async def delete_voice(
+    spk_id: str,
+    _auth: None = Depends(_check_admin_auth),
+) -> dict:
+    if _cosyvoice is None:
+        raise HTTPException(503, "CosyVoice 尚未加载")
+    spk_id = _validate_spk_id(spk_id)
+    if spk_id == DEFAULT_SPK_ID:
+        raise HTTPException(400, f"默认音色 {DEFAULT_SPK_ID!r} 不可删除")
+    if spk_id not in _cosyvoice.list_available_spks():
+        raise HTTPException(404, f"音色 {spk_id!r} 不存在")
+
+    # 从 frontend.spk2info pop（CosyVoice 没暴露 delete API，直接操作 dict）
+    spk2info = _cosyvoice.frontend.spk2info
+    spk2info.pop(spk_id, None)
+    await asyncio.to_thread(_cosyvoice.save_spkinfo)
+
+    # 删除原始 wav（如果有）
+    wav_path = VOICES_WAV_DIR / f"{spk_id}.wav"
+    wav_path.unlink(missing_ok=True)
+
+    global _cosyvoice_voices
+    _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
+    log.info("[admin] deleted voice spk_id=%s", spk_id)
+    return {"spk_id": spk_id, "deleted": True, "voice_count": len(_cosyvoice_voices)}
 
 
 @app.exception_handler(HTTPException)
