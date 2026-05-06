@@ -1,0 +1,86 @@
+# tts-server Fun-CosyVoice 3 GPU 变体（v0.7.0）
+#
+# Fun-CosyVoice3-0.5B-2512：双向流式（text-in + audio-out）端到端 150ms
+# 协议层不变：POST /tts/stream → chunked PCM 24kHz int16 mono
+# agent 端零改动；与 v0.6 (CosyVoice2) 并存——env 切 TTS_DOCKERFILE/TTS_IMAGE
+# 即可瞬间回滚（image / named volume 各自独立）。
+#
+# 镜像大小预估：~10GB（CUDA base + python + torch + CosyVoice deps）
+# 模型文件 ~5.6GB（不含可选 llm.rl.pt），首次 entrypoint 下载到 named volume
+
+# 用 ubuntu22.04 + devel 镜像 — 本地实测过的稳定组合：
+# - devel 自带 nvcc 12.6.85（CosyVoice 的 deepspeed import 时探测 CUDA 版本必需）
+# - ubuntu22.04 默认 python3 = 3.10.12（CosyVoice 原生兼容版本，零 PPA）
+# - 之前用 ubuntu24.04 + deadsnakes PPA 在中国 CDN 反复 TLS 握手失败
+FROM nvidia/cuda:12.6.3-devel-ubuntu22.04
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    COSYVOICE_DIR=/opt/CosyVoice \
+    MODEL_DIR=/opt/CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B-2512
+
+# 系统依赖：ubuntu22.04 默认 python3 = 3.10，apt 直接装即可
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-venv python3-dev \
+    git wget curl ca-certificates \
+    sox libsox-dev \
+    build-essential pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+
+# venv（python3 是 3.10.12）
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# 关键：用 setuptools<70 因为 setuptools 70+ 移除了 pkg_resources（独立化），
+# 而 CosyVoice 依赖（如 openai-whisper==20231117）的 setup.py 还 import 它。
+# build isolation 创建的子环境也要装这个旧 setuptools——靠 PIP_BUILD_CONSTRAINT。
+RUN python -m pip install --upgrade pip \
+ && pip install 'setuptools<70' wheel \
+ && echo "setuptools<70" > /tmp/build-constraints.txt
+ENV PIP_BUILD_CONSTRAINT=/tmp/build-constraints.txt
+ENV PIP_CONSTRAINT=/tmp/build-constraints.txt
+
+# Clone CosyVoice + Matcha-TTS submodule
+WORKDIR /opt
+RUN git clone --depth 1 --recurse-submodules \
+    https://github.com/FunAudioLLM/CosyVoice.git CosyVoice \
+ && cd CosyVoice && git log --oneline | head -1
+
+WORKDIR /opt/CosyVoice
+
+# CosyVoice 自身依赖（torch、transformers、diffusers、conformer、hyperpyyaml 等）
+# 注：requirements.txt 里 torch 默认是 cu121，对 12.6 base 也兼容（向下）
+RUN pip install -r requirements.txt
+
+# 我们的 server wrapper deps（FastAPI + Prometheus + 我们的协议）
+COPY requirements.cosyvoice.txt /tmp/server-requirements.txt
+RUN pip install -r /tmp/server-requirements.txt
+
+# 我们的服务代码
+WORKDIR /app
+COPY app /app/app
+
+# 入口脚本：首次运行下载模型（~5GB → named volume，重启秒起）
+COPY entrypoint-cosyvoice3.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# 非 root（uid 1001 与 stt-server-gpu 一致）
+# 关键：mkdir 显式创建 mount point 后 chown，让 docker 第一次挂载空 named volume
+# 时继承 1001 ownership——entrypoint 以 appuser 写入 modelscope 下载才能成功
+RUN useradd -u 1001 -m appuser \
+ && mkdir -p /opt/CosyVoice/pretrained_models \
+ && chown -R appuser:appuser /app /opt/venv /opt/CosyVoice
+USER appuser
+
+EXPOSE 9880
+
+# 健康检查：模型加载完毕（recognizer ready）
+HEALTHCHECK --interval=15s --timeout=5s --retries=10 --start-period=600s \
+  CMD python -c "import urllib.request,json,sys; r=json.load(urllib.request.urlopen('http://127.0.0.1:9880/health',timeout=3)); sys.exit(0 if r.get('status')=='ok' else 1)" \
+    || exit 1
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["uvicorn", "app.main_cosyvoice3:app", "--host", "0.0.0.0", "--port", "9880"]

@@ -148,6 +148,9 @@ services:
       # Admin endpoints (POST/DELETE /voices/...) Bearer 鉴权
       # 留空 = 禁用 admin（生产建议设置）
       TTS_ADMIN_API_KEY: ${TTS_ADMIN_API_KEY:-}
+      # Fun-CosyVoice 3 (Dockerfile.cosyvoice3) 模型下载控制：
+      # 1 = 跳过 llm.rl.pt（默认；省 2GB）；0 = 全量下载含 RL 变体
+      SKIP_RL_MODEL: ${SKIP_RL_MODEL:-1}
     volumes:
       # CosyVoice 模型持久化卷（首次启动下载 ~5GB；后续重启秒起）
       - rtvoice_cosyvoice_models:/opt/CosyVoice/pretrained_models
