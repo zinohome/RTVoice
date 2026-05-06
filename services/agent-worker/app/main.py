@@ -101,6 +101,9 @@ class Agent:
         # TTS 客户端（HTTP 流式，连 tts-server）
         self.tts = TTSClient(base_url=TTS_BASE_URL, voice=TTS_VOICE, lang=TTS_LANG,
                              api_key=RTVOICE_API_KEY)
+        # 启动时探测 TTS server 能力，决定是否走 v0.7 双向流式（150ms 端到端）
+        # None = 未探测；True/False = 探测后结果。失败默认 False（fallback HTTP）
+        self._tts_text_streaming: bool | None = None
         # 当前 inflight pipeline 任务（barge-in 取消用）
         self._pipeline_task: asyncio.Task | None = None
         # 用户音频累积缓冲（VAD 按帧消费）
@@ -182,6 +185,17 @@ class Agent:
             rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE),
         )
         log.info("agent 已 publish track: %s", publication.sid)
+
+        # 探测 TTS 能力（一次性；失败 fallback HTTP）
+        if self._tts_text_streaming is None:
+            try:
+                info = await self.tts.probe_capabilities()
+                self._tts_text_streaming = bool(info.get("text_streaming"))
+                log.info("[TTS-probe] backend=%s text_streaming=%s",
+                         info.get("backend"), self._tts_text_streaming)
+            except Exception as e:
+                log.warning("[TTS-probe] 失败 %s；fallback HTTP", e)
+                self._tts_text_streaming = False
 
         # 启动 STT feeder 任务（消费 _stt_feed_queue 推给 stt-server）
         if self._stt_feeder_task is None or self._stt_feeder_task.done():
@@ -338,6 +352,47 @@ class Agent:
                 chunks.append(chunk)
             return b"".join(chunks)
 
+    async def _run_pipeline_ws(self, user_text: str, round_t0: float) -> None:
+        """v0.7 双向流式：LLM token → TTS WS → PCM 顺序 publish。
+
+        理论端到端首字节 ~150ms（vs v0.6 的 phrase-level ~300-500ms）。
+        失败时不静默 fallback —— 直接抛 → 上层 cancel；下一轮 join 再探测。
+        """
+        ws = await self.tts.open_ws()
+        first_audio: bool = False
+        chunks_recv = 0
+        t_llm = time.time()
+
+        async def feeder() -> None:
+            try:
+                async for delta in self.llm.stream(user_text):
+                    if delta:
+                        await ws.send_text(delta)
+            finally:
+                await ws.eos()
+
+        feed_task = asyncio.create_task(feeder())
+        try:
+            async for pcm in ws.audio_chunks():
+                if not first_audio:
+                    first_audio = True
+                    if self.fsm.state == State.THINKING:
+                        self.fsm.transition(State.SPEAKING)
+                    log.info("[WS-pipeline] first_audio_ms=%.0f",
+                             (time.time() - round_t0) * 1000)
+                chunks_recv += 1
+                await self._publish_pcm_bytes(pcm)
+        finally:
+            if not feed_task.done():
+                feed_task.cancel()
+            await ws.aclose()
+
+        round_s = time.time() - round_t0
+        log.info("[WS-pipeline] done chunks=%d llm_to_done=%.1fs round=%.1fs",
+                 chunks_recv, time.time() - t_llm, round_s)
+        M.ROUNDS_TOTAL.inc()
+        M.ROUND_SECONDS.observe(round_s)
+
     async def _run_pipeline(self) -> None:
         """v0.5.1 streaming pipeline：
             STT final → LLM 流式 → 句切分 → 并发 TTS → 顺序 publish
@@ -346,6 +401,8 @@ class Agent:
           - LLM 第一句完成 → 立刻 fire TTS task → 进入 SPEAKING
           - 后续 LLM 句子并发合成（受 TTS_PIPELINE_CONCURRENCY 限流）
           - publisher 严格按 phrase 顺序 await 已完成 task → 推音频
+
+        v0.7：tts-server 报 text_streaming=true 时改走 _run_pipeline_ws。
         """
         round_t0 = time.time()
         prod_task: asyncio.Task | None = None
@@ -365,6 +422,21 @@ class Agent:
                 log.info("STT 空结果，回 IDLE")
                 self.fsm.transition(State.IDLE)
                 return
+
+            # v0.7：能力探测显示支持双向流式 → 走 ws 路径（150ms TTFB）
+            if self._tts_text_streaming:
+                try:
+                    await self._run_pipeline_ws(user_text, round_t0)
+                    if self.fsm.state == State.SPEAKING:
+                        self.fsm.transition(State.IDLE)
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("[WS-pipeline] 异常，本轮失败；下次仍尝试 ws")
+                    if self.fsm.state in (State.THINKING, State.SPEAKING):
+                        self.fsm.transition(State.IDLE)
+                    return
 
             # ---- 流式 LLM → phrase → TTS pipeline ----
             tasks_q: asyncio.Queue[asyncio.Task | None] = asyncio.Queue()

@@ -27,6 +27,8 @@ import logging
 import os
 import sys
 import time
+import json
+import queue as sync_queue
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,7 +36,10 @@ from pathlib import Path
 import numpy as np
 import torch
 import torchaudio
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import (
+    Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile,
+    WebSocket, WebSocketDisconnect,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -195,6 +200,21 @@ def _check_client_auth(authorization: str | None = Header(None)) -> None:
         raise HTTPException(401, "invalid or missing Bearer token")
 
 
+def _ws_auth_ok(ws: WebSocket) -> bool:
+    """WS 三路 Bearer：header / subprotocol / query。RTVOICE_API_KEY 空时通过。"""
+    if not RTVOICE_API_KEY:
+        return True
+    proto = ws.headers.get("sec-websocket-protocol", "")
+    for p in (s.strip() for s in proto.split(",")):
+        if p.startswith("bearer.") and p[len("bearer."):] == RTVOICE_API_KEY:
+            return True
+    if ws.headers.get("authorization") == f"Bearer {RTVOICE_API_KEY}":
+        return True
+    if ws.query_params.get("token") == RTVOICE_API_KEY:
+        return True
+    return False
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok" if _cosyvoice is not None else "loading"}
@@ -209,6 +229,8 @@ async def info() -> dict:
         "default_voice": DEFAULT_VOICE,
         "voice_count": len(_cosyvoice_voices),
         "ready": _cosyvoice is not None,
+        # agent-worker 探测此字段决定走 ws 流式还是单次 HTTP（v0.6 路径）
+        "text_streaming": True,
     }
 
 
@@ -323,6 +345,162 @@ async def tts_stream(req: TTSRequest, request: Request,
             "X-Format": "pcm-int16-le",
         },
     )
+
+
+# ---------------------------------------------------------------
+# WebSocket /tts/stream_ws — v0.7 双向流式（text-in 流入，audio-out 流出）
+# ---------------------------------------------------------------
+# 协议：
+#   连接：       wss://host:9880/tts/stream_ws
+#   鉴权：       三路 Bearer（同 STT 风格）
+#
+#   client → server（按顺序）：
+#     1) text frame: JSON metadata {"voice":"...", "speed":1.0, "lang":"cmn"}
+#     2..N) text frame: 文本增量（任意长度，CosyVoice 内部累积）
+#     EOS:  text "EOS"  → 关闭文本流，等待最后 PCM
+#
+#   server → client：
+#     binary frames: PCM int16 LE 24kHz mono chunks
+#     {"type":"done"}    text frame，最后一帧（PCM 流结束后）
+#     {"type":"error", "message":"..."}  text frame，异常即关
+#
+# barge-in：
+#   client 直接 close ws → server 检测 disconnect → text_q.put(None) → 生成器
+#   提前结束 → CosyVoice 内部停止后续 token 处理（依赖 v3 实现停损延迟）
+
+class _SendError:
+    def __init__(self, msg: str):
+        self.msg = msg
+
+
+@app.websocket("/tts/stream_ws")
+async def tts_stream_ws(ws: WebSocket) -> None:
+    if _cosyvoice is None:
+        await ws.close(code=1013, reason="CosyVoice 尚未加载")
+        return
+    if not _ws_auth_ok(ws):
+        await ws.close(code=4401, reason="unauthorized")
+        log.warning("[ws-tts] 鉴权失败 client=%s", ws.client)
+        return
+    await ws.accept()
+
+    # 1) 接收 metadata
+    try:
+        meta_raw = await asyncio.wait_for(ws.receive_text(), timeout=5)
+    except (asyncio.TimeoutError, WebSocketDisconnect):
+        await ws.close(code=4400, reason="metadata 超时或断连")
+        return
+    try:
+        meta = json.loads(meta_raw)
+    except json.JSONDecodeError:
+        await ws.send_json({"type": "error", "message": "首帧必须是 JSON metadata"})
+        await ws.close()
+        return
+    voice = _resolve_voice(meta.get("voice"))
+    speed = float(meta.get("speed", 1.0))
+    if _cosyvoice_voices and voice not in _cosyvoice_voices:
+        await ws.send_json({"type": "error",
+                            "message": f"未知音色 {meta.get('voice')!r}"})
+        await ws.close()
+        return
+
+    log.info("[ws-tts] start voice=%s speed=%.2f", voice, speed)
+
+    loop = asyncio.get_running_loop()
+    text_q: sync_queue.Queue = sync_queue.Queue()  # async ws → sync gen
+    pcm_q: asyncio.Queue = asyncio.Queue()         # sync prod → async send
+
+    def text_gen():
+        """喂给 inference_zero_shot 的同步 generator。"""
+        while True:
+            item = text_q.get()
+            if item is None:
+                return
+            yield item
+
+    def producer():
+        try:
+            for output in _cosyvoice.inference_zero_shot(
+                text_gen(),
+                DEFAULT_PROMPT_TEXT,
+                DEFAULT_PROMPT_WAV,
+                zero_shot_spk_id=voice,
+                stream=True,
+                speed=speed,
+            ):
+                pcm = _tensor_to_pcm_bytes(output["tts_speech"])
+                asyncio.run_coroutine_threadsafe(pcm_q.put(pcm), loop).result()
+        except Exception as e:
+            log.exception("[ws-tts] 推理异常")
+            asyncio.run_coroutine_threadsafe(
+                pcm_q.put(_SendError(str(e))), loop).result()
+        finally:
+            asyncio.run_coroutine_threadsafe(pcm_q.put(None), loop).result()
+
+    inference_fut = loop.run_in_executor(None, producer)
+
+    async def reader():
+        """读 ws 文本帧 → text_q。EOS / disconnect → 关闭 generator。"""
+        try:
+            while True:
+                msg = await ws.receive()
+                t = msg.get("type")
+                if t == "websocket.disconnect":
+                    break
+                text = msg.get("text")
+                if text is None:
+                    continue
+                if text == "EOS":
+                    break
+                text_q.put(text)
+        except Exception:
+            log.exception("[ws-tts] reader 异常")
+        finally:
+            text_q.put(None)  # 关闭 sync generator
+
+    reader_task = asyncio.create_task(reader())
+
+    # 3) 主循环：pcm_q → ws.send_bytes
+    sent_chunks = 0
+    t_start = time.time()
+    first = True
+    try:
+        while True:
+            item = await pcm_q.get()
+            if item is None:
+                break
+            if isinstance(item, _SendError):
+                try:
+                    await ws.send_json({"type": "error", "message": item.msg})
+                except Exception:
+                    pass
+                break
+            if first:
+                TTFB.observe(time.time() - t_start)
+                first = False
+            try:
+                await ws.send_bytes(item)
+                sent_chunks += 1
+            except WebSocketDisconnect:
+                log.info("[ws-tts] client disconnected")
+                break
+        try:
+            await ws.send_json({"type": "done", "chunks": sent_chunks})
+        except Exception:
+            pass
+    finally:
+        text_q.put(None)
+        reader_task.cancel()
+        try:
+            await asyncio.wait_for(inference_fut, timeout=5)
+        except (asyncio.TimeoutError, Exception):
+            pass
+        try:
+            await ws.close()
+        except Exception:
+            pass
+    SYNTH_PHRASES.inc()
+    log.info("[ws-tts] done chunks=%d elapsed=%.1fs", sent_chunks, time.time() - t_start)
 
 
 # ---------------------------------------------------------------
