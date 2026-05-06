@@ -5,19 +5,16 @@
     POST /tts/stream  body={text, voice, lang?, speed?}
     → chunked PCM int16 LE 24kHz mono
 
-Voice 选项（CosyVoice 2 内置 SFT 音色，无需 reference audio）：
-    - 中文女 (默认)
-    - 中文男
-    - 粤语女
-    - 英文女 / 英文男
-    - 日语男 / 韩语女
+⚠️ CosyVoice 2-0.5B **不自带 SFT 预训练音色**（spk2info.pt 文件不存在），
+   但 repo 自带 asset/zero_shot_prompt.wav 作为默认 reference audio。
+   启动时调 add_zero_shot_spk() 把它注册成 SFT 音色 ID 'default_zh_female'，
+   之后 inference_sft() 即可用。这是 CosyVoice 2 的官方推荐路径。
 
-"voice" 参数兼容 Kokoro 命名：
-    - zf_xiaobei → 中文女
-    - zm_yunyang → 中文男
-    - 直接传 SFT 名称（如 '中文女'）也可
+   未来想换音色：把自己的参考音频放到 named volume，然后 add_zero_shot_spk
+   注册新 ID（v0.7+ 加 admin endpoint）。
 
-agent 端代码完全不变；切换由 docker-compose 的 image 选择。
+agent 端代码完全不变；切换由 docker-compose 的 image 选择。Kokoro voice
+ID（zf_xiaobei 等）+ "中文女"/"中文男" 等都 alias 到 default_zh_female。
 """
 
 from __future__ import annotations
@@ -56,16 +53,29 @@ log = logging.getLogger("rtvoice.tts.cosyvoice")
 MODEL_DIR = os.environ.get(
     "MODEL_DIR", "/opt/CosyVoice/pretrained_models/CosyVoice2-0.5B"
 )
-DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", "中文女")
+COSYVOICE_DIR = os.environ.get("COSYVOICE_DIR", "/opt/CosyVoice")
 SAMPLE_RATE = 24000
 
-# Kokoro voice id → CosyVoice SFT 音色映射（agent 不需要改 .env）
+# CosyVoice 2-0.5B 不自带 SFT 音色，启动时用 repo 自带 reference 注册一个
+DEFAULT_SPK_ID = "default_zh_female"
+DEFAULT_PROMPT_WAV = os.path.join(COSYVOICE_DIR, "asset/zero_shot_prompt.wav")
+# 此参考音频对应的文本（CosyVoice repo runtime/python/fastapi/client.py 默认值）
+DEFAULT_PROMPT_TEXT = "希望你以后能够做的比我还好呦。"
+
+DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", DEFAULT_SPK_ID)
+
+# 任意 voice 别名都 fallback 到默认注册的 SFT id
+# Kokoro 用户不改 .env 可直接复用
 VOICE_ALIASES = {
-    "zf_xiaobei": "中文女",
-    "zf_xiaoni": "中文女",
-    "zm_yunjian": "中文男",
-    "zm_yunxia": "中文男",
-    "zm_yunyang": "中文男",
+    "zf_xiaobei": DEFAULT_SPK_ID,
+    "zf_xiaoni": DEFAULT_SPK_ID,
+    "zm_yunjian": DEFAULT_SPK_ID,
+    "zm_yunxia": DEFAULT_SPK_ID,
+    "zm_yunyang": DEFAULT_SPK_ID,
+    "中文女": DEFAULT_SPK_ID,
+    # 注：repo 自带的 reference 是中文女声；'中文男' 等需要用户上传自己的 reference
+    # （v0.7+ 加 /voices/add API 支持运行时注册）
+    "中文男": DEFAULT_SPK_ID,
 }
 
 
@@ -86,14 +96,27 @@ async def lifespan(app: FastAPI):
     _cosyvoice = await asyncio.to_thread(
         CosyVoice2, MODEL_DIR, load_jit=False, load_trt=False, fp16=True
     )
-    elapsed = time.time() - t0
-    log.info("CosyVoice2 加载完成 (%.1fs)", elapsed)
-    try:
-        _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
-        log.info("可用 SFT 音色 (%d): %s", len(_cosyvoice_voices), _cosyvoice_voices)
-    except Exception:
-        log.warning("无法获取 SFT 音色列表，使用默认")
-        _cosyvoice_voices = ["中文女", "中文男", "英文女", "英文男"]
+    log.info("CosyVoice2 加载完成 (%.1fs)", time.time() - t0)
+
+    # 注册默认 zero-shot speaker → 之后 inference_sft 即可用 DEFAULT_SPK_ID
+    if not Path(DEFAULT_PROMPT_WAV).exists():
+        raise RuntimeError(
+            f"参考音频 {DEFAULT_PROMPT_WAV} 不存在——image build 时 git clone "
+            "应该已经包含 CosyVoice/asset/，检查 Dockerfile"
+        )
+    log.info("注册默认 SFT 音色 '%s'（reference: %s）",
+             DEFAULT_SPK_ID, DEFAULT_PROMPT_WAV)
+    t0 = time.time()
+    await asyncio.to_thread(
+        _cosyvoice.add_zero_shot_spk,
+        DEFAULT_PROMPT_TEXT,
+        DEFAULT_PROMPT_WAV,
+        DEFAULT_SPK_ID,
+    )
+    log.info("默认音色注册完成 (%.1fs)", time.time() - t0)
+
+    _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
+    log.info("可用 SFT 音色 (%d): %s", len(_cosyvoice_voices), _cosyvoice_voices)
     log.info("默认 voice=%s sample_rate=%d", DEFAULT_VOICE, SAMPLE_RATE)
     yield
     log.info("shutdown")
