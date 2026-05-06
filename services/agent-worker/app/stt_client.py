@@ -34,8 +34,10 @@ class STTClient:
         self,
         url: str,
         on_partial: PartialCallback | None = None,
+        api_key: str | None = None,
     ) -> None:
         self.url = url
+        self.api_key = api_key
         self._ws: ClientConnection | None = None
         self._reader_task: asyncio.Task | None = None
         self._final_event = asyncio.Event()
@@ -46,11 +48,20 @@ class STTClient:
     async def connect(self) -> None:
         """建立 WS 连接并启动 reader 任务。"""
         log.info("连接 STT: %s", self.url)
+        # 服务端接受三种 Bearer 来源；这里同时带 header + subprotocol
+        # （中间代理可能 strip header，subprotocol 是 WebSocket 标准字段不会被改）
+        extra_headers = {}
+        subprotocols = None
+        if self.api_key:
+            extra_headers["Authorization"] = f"Bearer {self.api_key}"
+            subprotocols = [f"bearer.{self.api_key}"]
         self._ws = await connect(
             self.url,
             max_size=None,        # 不限制单帧大小
             ping_interval=20,     # 保活
             ping_timeout=10,
+            additional_headers=extra_headers or None,
+            subprotocols=subprotocols,
         )
         log.info("STT WS 已连接")
         self._reader_task = asyncio.create_task(self._reader_loop())

@@ -29,11 +29,13 @@ class TTSClient:
         lang: str = "cmn",
         speed: float = 1.0,
         timeout: float = 60.0,
+        api_key: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.voice = voice
         self.lang = lang
         self.speed = speed
+        self.api_key = api_key
         # 长 timeout：CPU 上 Kokoro 合成一段 30s 文本可能要 1 分钟；放宽防止超时切断
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=5.0))
 
@@ -52,7 +54,8 @@ class TTSClient:
             "speed": self.speed,
         }
         url = f"{self.base_url}/tts/stream"
-        async with self._client.stream("POST", url, json=payload) as resp:
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
+        async with self._client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
                 raise RuntimeError(

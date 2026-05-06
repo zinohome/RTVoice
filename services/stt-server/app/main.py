@@ -43,6 +43,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("rtvoice.stt")
 
+# Bearer 鉴权（v0.6.1）：留空 = 鉴权关闭（dev 默认）
+# WS 不能像 HTTP 那样轻易加 header，所以接受三种来源（按优先级）：
+#   1) Sec-WebSocket-Protocol: bearer.<TOKEN>     （browser 友好，标准用法）
+#   2) Authorization: Bearer <TOKEN>              （server-to-server）
+#   3) ?token=<TOKEN>                             （query param fallback；URL log 风险）
+RTVOICE_API_KEY = os.environ.get("RTVOICE_API_KEY", "").strip()
+
 MODELS_DIR = Path(os.environ.get("STT_MODELS_DIR", "/app/models"))
 MODEL_NAME = os.environ.get(
     "STT_MODEL", "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
@@ -154,6 +161,25 @@ async def info() -> dict:
     }
 
 
+def _ws_auth_ok(ws: WebSocket) -> bool:
+    """三路 Bearer 校验。RTVOICE_API_KEY 留空时直接通过。"""
+    if not RTVOICE_API_KEY:
+        return True
+    # 1) Sec-WebSocket-Protocol: bearer.<TOKEN>
+    proto = ws.headers.get("sec-websocket-protocol", "")
+    for p in (s.strip() for s in proto.split(",")):
+        if p.startswith("bearer.") and p[len("bearer."):] == RTVOICE_API_KEY:
+            return True
+    # 2) Authorization: Bearer <TOKEN>
+    auth = ws.headers.get("authorization", "")
+    if auth == f"Bearer {RTVOICE_API_KEY}":
+        return True
+    # 3) ?token=<TOKEN>
+    if ws.query_params.get("token") == RTVOICE_API_KEY:
+        return True
+    return False
+
+
 @app.websocket("/asr")
 async def asr_ws(ws: WebSocket) -> None:
     """v0.5.3：单线程消费循环，杜绝 stream 并发访问。
@@ -169,6 +195,11 @@ async def asr_ws(ws: WebSocket) -> None:
         - sherpa endpoint detection 在 _build_recognizer 已禁用
         - 全程一个协程操作 stream，无并发，无 race
     """
+    if not _ws_auth_ok(ws):
+        # close before accept → 4401（HTTP 路径上是 401，但 WS 协议得 close code）
+        await ws.close(code=4401, reason="unauthorized")
+        log.warning("WS 鉴权失败 client=%s", ws.client)
+        return
     await ws.accept()
     if _recognizer is None:
         await ws.send_json({"type": "error", "message": "recognizer not loaded"})

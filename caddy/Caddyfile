@@ -1,0 +1,55 @@
+# RTVoice Caddy 反代模板（v0.6.1）
+#
+# 选一种部署模式：
+#   A) 公网 + 域名 + Let's Encrypt 自动证书（推荐）
+#   B) 内网 IP + 本地自签证书（Caddy 'tls internal'，客户端要信任 root CA）
+#
+# Bearer 鉴权由后端 stt-server / tts-server 负责（RTVOICE_API_KEY），
+# Caddy 这层只做 TLS 终止 + 路径反代。
+
+# ============================================================
+# 模式 A: 公网域名（取消注释，把 voice.example.com 换成你的域名）
+# ============================================================
+# voice.example.com {
+#     # /asr 路径反代到 STT WS
+#     handle /asr* {
+#         reverse_proxy stt-server:9090
+#     }
+#     # /tts/* 和 /voices/* 反代到 TTS HTTP
+#     handle /tts/* {
+#         reverse_proxy tts-server:9880
+#     }
+#     handle /voices* {
+#         reverse_proxy tts-server:9880
+#     }
+#     # 默认拒绝
+#     respond 404
+#     # access log
+#     log {
+#         output file /data/access.log {
+#             roll_size 50mb
+#             roll_keep 5
+#         }
+#     }
+# }
+
+# ============================================================
+# 模式 B: 内网 IP / 本地自签（默认；改 IP 即可用）
+# ============================================================
+# 客户端首次需信任 caddy 自签的 root CA：
+#   docker exec rtvoice-caddy cat /data/caddy/pki/authorities/local/root.crt
+# 拷贝到调用机的系统信任链
+:443 {
+    tls internal
+
+    handle /asr* {
+        reverse_proxy stt-server:9090
+    }
+    handle /tts/* {
+        reverse_proxy tts-server:9880
+    }
+    handle /voices* {
+        reverse_proxy tts-server:9880
+    }
+    respond 404
+}

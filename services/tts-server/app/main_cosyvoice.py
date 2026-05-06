@@ -68,7 +68,11 @@ DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", DEFAULT_SPK_ID)
 # 用户上传的 reference wav 持久化目录（与模型同 named volume，重启后保留）
 VOICES_WAV_DIR = Path(MODEL_DIR).parent / "voices"
 
-# Admin endpoints (POST/DELETE /voices/...) Bearer 鉴权
+# Client Bearer 鉴权（v0.6.1）：保护 /tts/stream + GET /voices
+# 留空 = 鉴权关闭（dev 默认）；prod 暴露公网时必填
+RTVOICE_API_KEY = os.environ.get("RTVOICE_API_KEY", "").strip()
+
+# Admin endpoints (POST/DELETE /voices/...) Bearer 鉴权（独立 key，权限更高）
 # 留空 = 禁用 admin endpoints（防止误开放）
 ADMIN_API_KEY = os.environ.get("TTS_ADMIN_API_KEY", "").strip()
 
@@ -179,6 +183,14 @@ def _resolve_voice(voice: str | None) -> str:
     return voice  # 直接传 SFT 名
 
 
+def _check_client_auth(authorization: str | None = Header(None)) -> None:
+    """Bearer 鉴权（client tier）：保护 inference endpoints。"""
+    if not RTVOICE_API_KEY:
+        return  # dev：未设 key 跳过
+    if authorization != f"Bearer {RTVOICE_API_KEY}":
+        raise HTTPException(401, "invalid or missing Bearer token")
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok" if _cosyvoice is not None else "loading"}
@@ -197,7 +209,7 @@ async def info() -> dict:
 
 
 @app.get("/voices")
-async def voices() -> dict:
+async def voices(_auth: None = Depends(_check_client_auth)) -> dict:
     return {"voices": _cosyvoice_voices}
 
 
@@ -289,7 +301,8 @@ async def _synthesize_stream(req: TTSRequest, request: Request) -> AsyncIterator
 
 
 @app.post("/tts/stream")
-async def tts_stream(req: TTSRequest, request: Request):
+async def tts_stream(req: TTSRequest, request: Request,
+                     _auth: None = Depends(_check_client_auth)):
     if _cosyvoice is None:
         raise HTTPException(503, "CosyVoice 尚未加载")
     voice = _resolve_voice(req.voice)

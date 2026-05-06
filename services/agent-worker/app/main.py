@@ -63,6 +63,8 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "http://tts-server:9880")
 TTS_VOICE = os.environ.get("TTS_VOICE", "zf_xiaobei")
 TTS_LANG = os.environ.get("TTS_LANG", "cmn")
+# 与 stt-server / tts-server 共享：留空 = 鉴权关闭（dev）
+RTVOICE_API_KEY = os.environ.get("RTVOICE_API_KEY", "").strip() or None
 AGENT_ROOM = os.environ.get("AGENT_ROOM", "rtvoice-test")
 AGENT_IDENTITY = os.environ.get("AGENT_IDENTITY", "rtvoice-agent")
 
@@ -92,11 +94,13 @@ class Agent:
             "agent-tts", self.audio_source
         )
         # STT 客户端（长连接到 stt-server）
-        self.stt = STTClient(STT_WS_URL, on_partial=self._on_stt_partial)
+        self.stt = STTClient(STT_WS_URL, on_partial=self._on_stt_partial,
+                             api_key=RTVOICE_API_KEY)
         # LLM 客户端（OpenAI 兼容，连 llm-server）
         self.llm = LLMClient(base_url=LLM_BASE_URL, model=LLM_MODEL, api_key=LLM_API_KEY)
         # TTS 客户端（HTTP 流式，连 tts-server）
-        self.tts = TTSClient(base_url=TTS_BASE_URL, voice=TTS_VOICE, lang=TTS_LANG)
+        self.tts = TTSClient(base_url=TTS_BASE_URL, voice=TTS_VOICE, lang=TTS_LANG,
+                             api_key=RTVOICE_API_KEY)
         # 当前 inflight pipeline 任务（barge-in 取消用）
         self._pipeline_task: asyncio.Task | None = None
         # 用户音频累积缓冲（VAD 按帧消费）

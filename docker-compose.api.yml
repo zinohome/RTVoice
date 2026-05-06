@@ -1,0 +1,29 @@
+# RTVoice STT/TTS 公网/LAN 暴露 override
+#
+# 用途：
+#   把 STT WS（9090）和 TTS HTTP（9880）端口绑定到宿主，给"另一个项目"调用。
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#                  -f docker-compose.api.yml --profile prod up -d
+#   或 dev：
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#                  -f docker-compose.api.yml --profile dev up -d
+#
+# 安全要求：
+#   - 必须设置 RTVOICE_API_KEY（≥32 字符，rotated quarterly）
+#   - LAN 部署：BIND_HOST=<lan ip>；公网：用 docker-compose.tls.yml 加 Caddy TLS
+#   - 直接 BIND_HOST=0.0.0.0 暴露明文端口仅限内网信任环境
+#
+# 端点：
+#   STT: ws://<host>:${STT_API_PORT}/asr      (PCM int16 LE 16kHz mono in)
+#   TTS: http://<host>:${TTS_API_PORT}/tts/stream (POST JSON, chunked PCM out)
+
+services:
+  stt-server:
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${STT_API_PORT:-9090}:9090"
+
+  tts-server:
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${TTS_API_PORT:-9880}:9880"

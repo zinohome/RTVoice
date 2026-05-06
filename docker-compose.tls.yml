@@ -1,0 +1,58 @@
+# RTVoice TLS 反向代理（Caddy）override
+#
+# 用途：
+#   给 STT (WS) + TTS (HTTP) 加 TLS。Caddy 自动 Let's Encrypt（公网 + 域名时）
+#   或本地自签证书（内网 IP 用）。
+#
+# 用法：
+#   1. 确保 RTVOICE_API_KEY 已设（auth 是首要防线）
+#   2. 配 caddy/Caddyfile（看仓库自带模板，按域名替换）
+#   3. 公网 + 域名场景：
+#      docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#                     -f docker-compose.tls.yml --profile prod up -d
+#   4. LAN 场景（内网 IP 自签）：
+#      Caddyfile 用 'tls internal' 指令；客户端需信任 caddy 的 root CA
+#
+# 端口：
+#   - 443/tcp  TLS（HTTPS / WSS）
+#   - 80/tcp   ACME HTTP-01 challenge（Let's Encrypt 必需）
+#
+# Caddy 自动反代：
+#   wss://<host>/asr           → stt-server:9090/asr
+#   https://<host>/tts/...     → tts-server:9880/...
+#   https://<host>/voices/...  → tts-server:9880/voices/...
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: rtvoice-caddy
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    networks: [rtvoice_net]
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:80:80"
+      - "${BIND_HOST:-0.0.0.0}:443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - rtvoice_caddy_data:/data
+      - rtvoice_caddy_config:/config
+    depends_on:
+      stt-server:
+        condition: service_healthy
+      tts-server:
+        condition: service_healthy
+
+  # TLS 模式下 STT/TTS 不再直接 bind 宿主端口（仅 docker network 内）
+  # 如果同时引入 docker-compose.api.yml 想保留明文端口，需自行决定
+  # （生产建议：仅 caddy 暴露，STT/TTS 不绑宿主）
+  stt-server:
+    ports: !override []
+
+  tts-server:
+    ports: !override []
+
+volumes:
+  rtvoice_caddy_data:
+    driver: local
+  rtvoice_caddy_config:
+    driver: local

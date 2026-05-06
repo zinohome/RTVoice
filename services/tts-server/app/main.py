@@ -49,7 +49,7 @@ from pathlib import Path
 import time
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -68,6 +68,16 @@ VOICES_PATH = MODELS_DIR / "voices-v1.0.bin"
 DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", "zf_xiaobei")  # 中文女声
 DEFAULT_LANG = os.environ.get("TTS_DEFAULT_LANG", "cmn")           # Mandarin
 SAMPLE_RATE = 24000
+
+# Bearer 鉴权：留空 = 鉴权关闭（dev 默认）
+RTVOICE_API_KEY = os.environ.get("RTVOICE_API_KEY", "").strip()
+
+
+def _check_client_auth(authorization: str | None = Header(None)) -> None:
+    if not RTVOICE_API_KEY:
+        return
+    if authorization != f"Bearer {RTVOICE_API_KEY}":
+        raise HTTPException(401, "invalid or missing Bearer token")
 
 # 句子切分正则：中英文标点都吃
 _SENTENCE_SPLIT = re.compile(r'(?<=[。！？\.\!\?])\s*|(?<=[，；,;])\s+')
@@ -158,7 +168,7 @@ async def info() -> dict:
 
 
 @app.get("/voices")
-async def voices() -> dict:
+async def voices(_auth: None = Depends(_check_client_auth)) -> dict:
     if _kokoro is None:
         raise HTTPException(503, "Kokoro 尚未加载")
     return {"voices": sorted(_kokoro.get_voices())}
@@ -213,7 +223,8 @@ async def _synthesize_stream(req: TTSRequest, request: Request) -> AsyncIterator
 
 
 @app.post("/tts/stream")
-async def tts_stream(req: TTSRequest, request: Request):
+async def tts_stream(req: TTSRequest, request: Request,
+                     _auth: None = Depends(_check_client_auth)):
     if _kokoro is None:
         raise HTTPException(503, "Kokoro 尚未加载")
     voice = req.voice or DEFAULT_VOICE

@@ -130,6 +130,8 @@ services:
       # 留空走代码内默认 prompt（30 字短回复）；想要更长/更自然回复就在 .env 设置
       AGENT_SYSTEM_PROMPT: ${AGENT_SYSTEM_PROMPT:-}
       AGENT_LLM_MAX_TOKENS: ${AGENT_LLM_MAX_TOKENS:-80}
+      # 调用 stt/tts 时附带的 Bearer（必须与 stt/tts 服务的 RTVOICE_API_KEY 一致）
+      RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
       METRICS_PORT: 9100
       # v0.6 实验性：AGENT_BACKEND=v06 走 livekit-agents 框架
       # 默认空（=v05）= 已验证可工作的自写 FSM 路径
@@ -165,6 +167,8 @@ services:
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STT_NUM_THREADS: ${STT_NUM_THREADS:-2}
+      # Bearer 鉴权（留空 = 关闭，dev 默认；prod 暴露公网时必填）
+      RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
     # 内部服务，端口不映射到宿主（仅 docker network 可达）
     expose:
       - "9090"
@@ -236,6 +240,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       TTS_DEFAULT_VOICE: ${TTS_DEFAULT_VOICE:-zf_xiaobei}
       TTS_DEFAULT_LANG: ${TTS_DEFAULT_LANG:-cmn}
+      # Bearer 鉴权（与 STT 共享 key，agent-worker 同时用此 key 调用）
+      RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
     expose:
       - "9880"
     deploy:
