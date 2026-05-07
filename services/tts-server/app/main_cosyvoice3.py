@@ -277,6 +277,12 @@ async def _synthesize_stream(req: TTSRequest, request: Request) -> AsyncIterator
 
 async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: str) -> AsyncIterator[bytes]:
     assert _cosyvoice is not None
+    # v0.7.3: reset model.token_hop_len = 25。CosyVoice 3 model.tts() 内部用
+    # `self.token_hop_len = min(token_max_hop_len, hop * scale_factor)` 单调递增，
+    # 跨 inference 共享。第二路起 hop_len 已涨到 100，短文本 yield 不出（while
+    # 永远不满足条件） → 跳到 finalize 输出 ~40ms 残尾。手动 reset 确保每路
+    # 从 token_hop_len=25 重新开始。
+    _cosyvoice.model.token_hop_len = 25
     loop = asyncio.get_running_loop()
     chunk_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
     error_holder: list[Exception] = []
@@ -435,6 +441,8 @@ async def tts_stream_ws(ws: WebSocket) -> None:
 
 async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
     assert _cosyvoice is not None
+    # 同 _synthesize_stream_locked：reset token_hop_len 防累积污染（见上方注释）
+    _cosyvoice.model.token_hop_len = 25
     loop = asyncio.get_running_loop()
     text_q: sync_queue.Queue = sync_queue.Queue()  # async ws → sync gen
     pcm_q: asyncio.Queue = asyncio.Queue()         # sync prod → async send
