@@ -112,10 +112,18 @@ VOICE_ALIASES = {
 _cosyvoice: CosyVoice3 | None = None
 _cosyvoice_voices: list[str] = []
 
+# v0.7.2: 单 GPU 模型的 inference 必须串行 —— CosyVoice 3 的 model.tts() 在并发
+# 调用时共享内部 state（hift/flow LLM token 池）会被对方覆盖，prod G1 测试出现
+# 5 路并发时 2 路输出 0.04s 空音频。此 lock 包住每路推理全程（包括 stream 读
+# pcm_q），确保任何时刻只一路在 GPU。N 路并发→排队，吞吐受限但正确性保证。
+# 后续优化方向：CosyVoice batching API（如果上游开放）。
+_inference_lock: asyncio.Lock | None = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cosyvoice, _cosyvoice_voices
+    global _cosyvoice, _cosyvoice_voices, _inference_lock
+    _inference_lock = asyncio.Lock()
     log.info("加载 CosyVoice3 模型: %s", MODEL_DIR)
     if not Path(MODEL_DIR, "llm.pt").exists():
         raise RuntimeError(
@@ -255,11 +263,20 @@ async def _synthesize_stream(req: TTSRequest, request: Request) -> AsyncIterator
     """流式合成：把 CosyVoice 同步生成器桥接到 asyncio。
 
     sync 生成器跑在线程里，每个 chunk 通过 Queue 推回 event loop。
+    v0.7.2：用 _inference_lock 串行化（CosyVoice 单 GPU 模型并发会污染 state）。
     """
-    assert _cosyvoice is not None
+    assert _cosyvoice is not None and _inference_lock is not None
     voice = _resolve_voice(req.voice)
-    log.info("[TTS] voice=%s speed=%.2f text_len=%d", voice, req.speed, len(req.text))
+    log.info("[TTS] voice=%s speed=%.2f text_len=%d (waiting lock)", voice, req.speed, len(req.text))
 
+    async with _inference_lock:
+        log.info("[TTS] lock acquired, start inference")
+        async for chunk in _synthesize_stream_locked(req, request, voice):
+            yield chunk
+
+
+async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: str) -> AsyncIterator[bytes]:
+    assert _cosyvoice is not None
     loop = asyncio.get_running_loop()
     chunk_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
     error_holder: list[Exception] = []
@@ -407,8 +424,17 @@ async def tts_stream_ws(ws: WebSocket) -> None:
         await ws.close()
         return
 
-    log.info("[ws-tts] start voice=%s speed=%.2f", voice, speed)
+    log.info("[ws-tts] start voice=%s speed=%.2f (waiting lock)", voice, speed)
 
+    # v0.7.2: 串行化整段流式（含 reader/producer），防止并发污染 model state
+    assert _inference_lock is not None
+    async with _inference_lock:
+        log.info("[ws-tts] lock acquired")
+        await _ws_inference(ws, voice, speed)
+
+
+async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
+    assert _cosyvoice is not None
     loop = asyncio.get_running_loop()
     text_q: sync_queue.Queue = sync_queue.Queue()  # async ws → sync gen
     pcm_q: asyncio.Queue = asyncio.Queue()         # sync prod → async send
