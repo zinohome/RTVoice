@@ -259,5 +259,59 @@ curl -X DELETE http://127.0.0.1:9880/voices/alice \
 | v0.7.0 | TTS WebSocket 双向流式（agent 自动检测）| `b658573` |
 | v0.7.0 | barge-in cancel 加固 | `c54f963` |
 | v0.6.2 | LLM timeout/fallback + STT 重连 | `4ad21fc` `82b8628` |
+| v0.7-fix-1 | prod 实测 bug：v3 prompt_text 必须含 `<|endofprompt|>` | `da78e29` |
+| v0.7.1 | Dockerfile chown 重排，code-only rebuild 240× 加速 | `8ed9a4d` |
 
 完整记录见 [CHANGELOG.md](./CHANGELOG.md)。
+
+---
+
+## 8. Build 性能 & Docker 缓存（v0.7.1+）
+
+ML 镜像（venv 60GB+）的 build 缓存策略与普通 web 镜像不同。`Dockerfile.cosyvoice3` 已按下面规则优化（v0.7.1，commit `8ed9a4d`）。
+
+### 8.1 黄金法则：易变层放后面，重型操作放前面
+
+错误做法（v0.7.0 一开始）:
+```dockerfile
+RUN pip install -r requirements.txt        # 缓存稳定
+COPY app /app/app                           # 易变
+RUN useradd && chown -R /app /opt/venv      # ❌ 跟 COPY 后面 → 每次都跑 215s
+```
+
+正确做法（v0.7.1）:
+```dockerfile
+RUN pip install -r requirements.txt        # 缓存稳定
+RUN useradd && chown -R /opt/venv /opt/CosyVoice   # ✅ 重型 chown 在 COPY 前 → 缓存命中
+COPY --chown=appuser:appuser entrypoint /entrypoint.sh
+COPY --chown=appuser:appuser app /app/app  # ✅ 用 --chown 内联，避免后续重 chown
+USER appuser
+```
+
+### 8.2 实测对比（rtvoice/tts-server-cosyvoice3:v0.7.0）
+
+| 场景 | 优化前 | 优化后 | 加速 |
+|---|---|---|---|
+| 全量 build（缓存空） | ~52 min | ~52 min | — |
+| **code-only rebuild** | **~215 sec** | **~1 sec** | **215×** |
+| 无改动 rebuild | ~30s | ~1s | 30× |
+
+### 8.3 BuildKit content-hash 陷阱
+
+**用 `touch` 改 mtime 不会触发 BuildKit cache miss**。BuildKit 看的是文件内容 SHA，不是 mtime。从老 docker build 思维迁移时常踩此坑。
+
+测 cache 行为时：
+- ❌ `touch app/main.py && docker compose build`  →  cache 全命中（误判优化失效）
+- ✅ `echo "" >> app/main.py && docker compose build`  →  cache 失效（真测）
+- ✅ `git diff` 显示有变化才算"真改动"
+
+### 8.4 chown -R 在大目录上的成本
+
+实测 `chown -R appuser:appuser /opt/venv`（约 60GB，1.5M+ 文件）= **215 秒**（ext4，单磁盘）。这种 inode 操作没法靠 `--no-cache` 之外的方法跳过，只能避免它落在易变层后面。
+
+### 8.5 不要主动 prune build cache
+
+`/var/lib/docker/buildkit` 里的 build cache 看起来很大（120GB+ 可回收）但**不要主动 prune**：
+- 全量 rebuild 一次要 50+ 分钟，缓存能让 code-only rebuild 变 1 秒
+- 仅在硬盘真不够（< 30GB 余量）时才 `docker buildx prune --keep-storage 50G`
+- 永远 `--keep-storage` 设阈值，不要光秃秃 `prune -a -f`
