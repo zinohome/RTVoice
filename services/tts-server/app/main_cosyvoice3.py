@@ -69,7 +69,10 @@ SAMPLE_RATE = 24000
 DEFAULT_SPK_ID = "default_zh_female"
 DEFAULT_PROMPT_WAV = os.path.join(COSYVOICE_DIR, "asset/zero_shot_prompt.wav")
 # 此参考音频对应的文本（CosyVoice repo runtime/python/fastapi/client.py 默认值）
-DEFAULT_PROMPT_TEXT = "希望你以后能够做的比我还好呦。"
+# v3 关键差异：LLM `inference()` 硬断言输入序列中含 <|endofprompt|>（token 151646）；
+# v3 frontend.text_normalize / _extract_text_token 都不自动添加；caller 必须在
+# prompt_text 末尾显式拼上。v2 不要求。
+DEFAULT_PROMPT_TEXT = "希望你以后能够做的比我还好呦。<|endofprompt|>"
 
 DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", DEFAULT_SPK_ID)
 
