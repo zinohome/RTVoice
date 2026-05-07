@@ -1,0 +1,205 @@
+# RTVoice 架构文档
+
+> **本文档面向：** 想了解 RTVoice 内部如何工作的开发者、新贡献者、架构 reviewer。
+> **配合阅读：** [README.md](./README.md)（高层概览）、[OPERATIONS.md](./OPERATIONS.md)（运维细节）、[ENGINES.md](./ENGINES.md)（选型对比）。
+
+RTVoice 是 voice services platform，对外提供 3 个对等 service（STT / TTS / Realtime Voice）。本文档分章节描述各 service 的内部实现、跨服务关注点（鉴权 / GPU / 容错）、技术栈选型与设计决策日志。
+
+---
+
+## §1 Platform Overview
+
+```mermaid
+graph TB
+    subgraph "Clients"
+        APP[Client App<br/>CozyVoice / Browser / Python]
+        OP[Admin / Operator]
+    end
+
+    subgraph "RTVoice Platform"
+        subgraph "Edge"
+            CADDY[Caddy TLS<br/>📦 可选<br/>仅公网/跨机时启]
+            TS[token-server<br/>JWT for LiveKit 高级模式]
+        end
+
+        subgraph "Public Services (对外接口)"
+            STT[STT Service<br/>WS /asr]
+            TTS[TTS Service<br/>HTTP+WS /tts/*]
+            RTV[Realtime Voice<br/>POST /sessions +<br/>WS /v1/realtime]
+            LK[LiveKit SFU<br/>可选高级模式]
+            ADM[Admin API<br/>/voices /quota /audit]
+        end
+
+        subgraph "Admin"
+            WEB[Management Web UI<br/>SP7]
+        end
+
+        subgraph "Internal Components"
+            GW[Realtime Gateway<br/>WS ↔ agent bridge]
+            AW[agent-worker pool<br/>不对外暴露]
+            STTE[sherpa-onnx GPU]
+            TTSE[Fun-CosyVoice 3 GPU]
+            LLM[Ollama / vLLM]
+        end
+
+        subgraph "Storage"
+            VOL[Voice clones<br/>named volume]
+            DB[Audit DB<br/>SP5]
+        end
+    end
+
+    APP -.HTTP/WS.-> CADDY
+    APP -. WebRTC 高级模式.-> LK
+    OP -.浏览器.-> WEB
+    WEB -.HTTP.-> ADM
+
+    CADDY --> STT & TTS & RTV & ADM
+    RTV --> GW
+    GW -.dispatch.-> AW
+    LK -.alt path.-> AW
+    AW --> STT & TTS & LLM
+    STT --> STTE
+    TTS --> TTSE
+    TTS --> VOL
+    ADM --> VOL
+    ADM --> DB
+```
+
+**关键观察:**
+
+- **3 个 service 平等**：STT / TTS / Realtime Voice 都是 public API surface
+- **Realtime Voice 双路径**：默认 WS gateway（OpenAI Realtime 风格 / server-to-server 友好）；LiveKit 可选高级模式（end-user 跨公网移动场景）
+- **agent-worker = 内部组件**：客户端永远不直接接触；只通过 Realtime Gateway 间接调度
+- **Caddy 可选**：仅公网或不信任内网时启用；同机 docker network 部署不需要
+- **Storage 层**：voice clones 是 named volume；audit DB 在 SP5 引入
+
+---
+
+## §2 STT Service
+
+### 接口签名
+
+```
+WS /asr
+  client → server: binary frames (PCM int16 LE 16kHz mono)
+                    + text "EOS" (触发 final)
+  server → client: JSON events
+                    {"type":"partial", "text":"..."}
+                    {"type":"final", "text":"..."}
+                    {"type":"error", "message":"..."}
+```
+
+### 内部组件
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as WS Handler
+    participant R as sherpa-onnx<br/>OnlineRecognizer
+    C->>W: connect /asr (Bearer auth)
+    W->>R: create_stream()
+    loop 每 50ms 单 coroutine 周期
+        C->>W: PCM bytes
+        W->>R: accept_waveform(pcm)
+        W->>R: decode_stream() → partial text
+        W->>C: {"type":"partial",...}
+    end
+    C->>W: text "EOS"
+    W->>R: input_finished() + final decode
+    W->>C: {"type":"final",...}
+    R-->>W: 自动 reset，等下一句
+```
+
+### 关键设计权衡
+
+- **单 coroutine 处理**：sherpa-onnx Stream 不是 thread-safe；旧版 v0.5.2 用 decode_loop + EOS handler 两个 task 并发访问 stream 导致 native crash。v0.5.3 改单 coroutine：receive WS msg（带超时）→ accept_waveform 或 EOS 处理 → decode → emit partial，全程一个协程操作 stream，无并发无 race。
+- **endpoint detection 关闭**：sherpa 自身的 endpoint 检测会异步 reset stream，与我们的 EOS 控制冲突；统一由客户端发 "EOS" 控制 final 时机。
+
+### 容错
+
+- 客户端 WS 断 → 服务端释放 stream
+- 服务端 WS 重启 → 客户端 STTClient 走 5 次指数退避重连（1→2→4→8→16s），重连后用新 stream（当前 utterance 数据丢失，下一轮恢复正常）
+
+### 不在范围
+
+- 多语言切换（默认中英文 bilingual）：未来用户可换 sherpa-onnx 模型；具体见 [ENGINES.md](./ENGINES.md)
+- 说话人识别 / diarization：业界另起方案，本平台不内嵌
+
+---
+
+## §3 TTS Service
+
+### 接口签名
+
+```
+HTTP POST /tts/stream
+  request body: JSON {"text":"...", "voice":"...", "speed":1.0}
+  response: chunked transfer, binary PCM int16 LE 24kHz mono
+  headers: X-Sample-Rate=24000, X-Channels=1, X-Format=pcm-int16-le
+
+WS /tts/stream_ws
+  client → server:
+    text frame 1 (JSON metadata): {"voice":"...","speed":1.0}
+    text frame N: 文本增量（可流式喂入）
+    text "EOS" (触发结束)
+  server → client:
+    binary PCM chunks
+    text {"type":"done","chunks":N} 末帧
+    或 text {"type":"error","message":"..."}
+```
+
+### 内部组件 + 双向流式数据流
+
+```mermaid
+sequenceDiagram
+    participant C as Client (WS)
+    participant H as WS Handler<br/>(asyncio.Lock)
+    participant Q as text_q (sync queue)
+    participant CV as CosyVoice 3<br/>(GPU 单实例)
+    C->>H: connect + JSON metadata
+    H->>H: acquire _inference_lock
+    Note over H: reset model.token_hop_len=25
+    par feed text
+        C->>H: text frames (流式)
+        H->>Q: text_q.put(chunk)
+    and run inference
+        H->>CV: inference_zero_shot(text_gen, prompt_wav, ...)
+        loop 每收到 5+ tokens
+            CV->>CV: append text token / wait_for_more
+            CV->>H: yield {tts_speech: tensor}
+            H->>C: binary PCM chunk
+        end
+    end
+    C->>H: text "EOS"
+    H->>Q: text_q.put(None)
+    CV->>H: yield (final tail)
+    H->>C: binary PCM chunk + done event
+    H->>H: release _inference_lock
+```
+
+### 关键设计权衡
+
+- **asyncio.Lock 串行化（v0.7.2 修复）**：CosyVoice 单 GPU model 实例并发调用会污染内部 state。所有 inference 入口（HTTP `_synthesize_stream` 和 WS `tts_stream_ws`）都包在 `async with _inference_lock`，N 路并发自动排队。Trade-off：吞吐受 GPU 单实例限制（baseline 单路 ~1.5s，5 路并发 ~6s 串行）。
+- **CosyVoice instance-attr 重置规约**：`model.token_hop_len` 在 v3 内部 stream 路径单调递增（25→50→100），跨 inference 共享。每路 inference 开始前手动 `model.token_hop_len = 25` reset。
+- **HTTP path generator wrap（v0.7.3 修复）**：CosyVoice 3 在 `tts_text=str` + 短文本下走"等满 hop_len 才 yield"的旧路径，遇到边界 bug（hifigan F0 kernel/input mismatch）。HTTP path 包成 single-element generator → 走稳定的"边收边 decode"路径。
+- **prompt_text 必须含 `<|endofprompt|>`**：CosyVoice 3 LLM `inference()` 硬断言（v3 frontend 不自动加，caller 必须显式拼）。
+
+### Voice Clone
+
+```
+POST /voices/add  (multipart, TTS_ADMIN_API_KEY 鉴权)
+  - file: 16kHz mono wav (3-30 秒)
+  - spk_id: 新音色 ID
+  - prompt_text: 参考音对应的文字 (≥3 秒发音内容)
+↓
+add_zero_shot_spk() 注册 → spk2info.pt 持久化到 named volume
+↓
+重启自动 reload，POST /tts/stream voice=新id 即可用
+
+DELETE /voices/{spk_id}  (默认音色保护，不可删)
+```
+
+### 容错
+
+- HTTP path: `request.is_disconnected()` 监测，client 断则停止推理
+- WS path: barge-in `asyncio.shield(ws.aclose, timeout=2)` 让 close frame 真发出；server 端 `send_bytes` 接 `(WebSocketDisconnect, RuntimeError)` 双异常防 starlette send-after-close trap

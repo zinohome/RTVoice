@@ -1,414 +1,454 @@
-# RTVoice 架构
+# RTVoice 架构文档
 
-本文档描述 RTVoice 实时语音对话系统的组件、数据流、关键时序、状态机与性能预算。
-读完本文档应能回答：**一段用户音频从麦克风到听到回复，每一比特经过了哪些进程，何时被消费、何时被产生、谁在控制什么**。
+> **本文档面向：** 想了解 RTVoice 内部如何工作的开发者、新贡献者、架构 reviewer。
+> **配合阅读：** [README.md](./README.md)（高层概览）、[OPERATIONS.md](./OPERATIONS.md)（运维细节）、[ENGINES.md](./ENGINES.md)（选型对比）。
 
-配套文档：[SECURITY.md](./SECURITY.md)、[DEPLOY.md](./DEPLOY.md)
-
----
-
-## 1. 设计目标与非目标
-
-### 1.1 目标
-
-| # | 目标 | 验收标准 |
-|---|---|---|
-| G1 | 实时语音对话 | 端到端延迟（用户说完到听到回复）≤ 1.2s p95 |
-| G2 | 流式合成 | TTS 首包播放 ≤ 300ms（从 LLM 第一个 token 起算） |
-| G3 | Barge-in | 用户开始说话后 ≤ 200ms 停止当前 TTS 播放 |
-| G4 | 完全本地 | 无外部 API 依赖，断网可用 |
-| G5 | 单机 GPU 跑得动 | 总显存 ≤ 10GB（3060 12GB 留余量） |
-| G6 | 工程可维护 | 引擎可换（STT/TTS/LLM 独立服务），配置 dev/prod 切换 |
-
-### 1.2 非目标
-
-- **不**追求音色克隆质量（那是另一种产品形态，见 GPT-SoVITS 备选）
-- **不**支持多人同时对话同一个 agent（每个房间一个 agent worker，多人对话需扩展）
-- **不**做长期记忆/RAG（先做对话本身，记忆是后续扩展）
-- **不**做移动端 SDK（先做浏览器/桌面客户端）
+RTVoice 是 voice services platform，对外提供 3 个对等 service（STT / TTS / Realtime Voice）。本文档分章节描述各 service 的内部实现、跨服务关注点（鉴权 / GPU / 容错）、技术栈选型与设计决策日志。
 
 ---
 
-## 2. 组件全景
-
-### 2.1 部署单元
+## §1 Platform Overview
 
 ```mermaid
 graph TB
-    subgraph 客户端
-        Browser["浏览器<br/>(livekit-client.js)"]
+    subgraph "Clients"
+        APP[Client App<br/>CozyVoice / Browser / Python]
+        OP[Admin / Operator]
     end
 
-    subgraph 边界服务
-        TokenSrv["token-server<br/>(FastAPI)<br/>端口 8000"]
-        LK["livekit-server<br/>(Go SFU)<br/>TCP 7880/7881<br/>UDP 50000-60000"]
+    subgraph "RTVoice Platform"
+        subgraph "Edge"
+            CADDY[Caddy TLS<br/>📦 可选<br/>仅公网/跨机时启]
+            TS[token-server<br/>JWT for LiveKit 高级模式]
+        end
+
+        subgraph "Public Services (对外接口)"
+            STT[STT Service<br/>WS /asr]
+            TTS[TTS Service<br/>HTTP+WS /tts/*]
+            RTV[Realtime Voice<br/>POST /sessions +<br/>WS /v1/realtime]
+            LK[LiveKit SFU<br/>可选高级模式]
+            ADM[Admin API<br/>/voices /quota /audit]
+        end
+
+        subgraph "Admin"
+            WEB[Management Web UI<br/>SP7]
+        end
+
+        subgraph "Internal Components"
+            GW[Realtime Gateway<br/>WS ↔ agent bridge]
+            AW[agent-worker pool<br/>不对外暴露]
+            STTE[sherpa-onnx GPU]
+            TTSE[Fun-CosyVoice 3 GPU]
+            LLM[Ollama / vLLM]
+        end
+
+        subgraph "Storage"
+            VOL[Voice clones<br/>named volume]
+            DB[Audit DB<br/>SP5]
+        end
     end
 
-    subgraph 智能体
-        Agent["agent-worker<br/>(Python, livekit-agents)<br/>VAD + 编排状态机"]
-    end
+    APP -.HTTP/WS.-> CADDY
+    APP -. WebRTC 高级模式.-> LK
+    OP -.浏览器.-> WEB
+    WEB -.HTTP.-> ADM
 
-    subgraph 引擎服务
-        STT["stt-server<br/>(Python + sherpa-onnx)<br/>WS 9090"]
-        TTS["tts-server<br/>(Python + CosyVoice 2)<br/>HTTP 9880"]
-        LLM["llm-server<br/>(vLLM / Ollama)<br/>HTTP 8001"]
-    end
-
-    Browser -- "1. HTTP: 申请 token" --> TokenSrv
-    Browser -- "2. WebRTC: 加入房间" --> LK
-    Agent -- "3. WS: 也加入同一房间" --> LK
-    Agent -- "4. 收音频流" --> LK
-    Agent -- "5. WS 流式" --> STT
-    Agent -- "6. HTTP 流式" --> LLM
-    Agent -- "7. HTTP 流式" --> TTS
-    Agent -- "8. 推音频流" --> LK
-    LK -- "9. WebRTC: 推回放" --> Browser
+    CADDY --> STT & TTS & RTV & ADM
+    RTV --> GW
+    GW -.dispatch.-> AW
+    LK -.alt path.-> AW
+    AW --> STT & TTS & LLM
+    STT --> STTE
+    TTS --> TTSE
+    TTS --> VOL
+    ADM --> VOL
+    ADM --> DB
 ```
 
-### 2.2 组件职责
+**关键观察:**
 
-| 组件 | 进程数 | 语言 | GPU | 职责 |
-|---|---|---|---|---|
-| **livekit-server** | 1 | Go | ❌ | WebRTC SFU，房间/媒体路由，鉴权 |
-| **token-server** | 1 | Python | ❌ | 验证客户端身份，签发 LiveKit JWT |
-| **agent-worker** | 1+ | Python | ❌（VAD CPU 即可） | 加入房间，运行编排状态机：VAD → STT → LLM → TTS，处理 turn-taking 和 barge-in |
-| **stt-server** | 1 | Python | ✅（生产） | 流式 ASR，WS 协议，输入 PCM 流 / 输出 partial+final 文本 |
-| **tts-server** | 1 | Python | ✅（生产） | 流式 TTS，HTTP chunked，输入文本 / 输出 PCM 流 |
-| **llm-server** | 1 | Python | ✅（生产） | OpenAI 兼容 API，流式 chat completion |
-
-### 2.3 为什么这样切分
-
-- **STT/TTS/LLM 独立成进程**：模型加载慢（10-30s），容器化后崩溃重启不影响 agent；依赖冲突大（torch 版本各家不一），独立镜像更干净；生产可独立 scale。
-- **agent-worker 不持有大模型**：状态机和模型解耦，便于换引擎；agent 重启 < 1s 不影响用户。
-- **代价**：进程间多 1-2 跳网络（同主机 docker network ~1-2ms，可忽略）。
+- **3 个 service 平等**：STT / TTS / Realtime Voice 都是 public API surface
+- **Realtime Voice 双路径**：默认 WS gateway（OpenAI Realtime 风格 / server-to-server 友好）；LiveKit 可选高级模式（end-user 跨公网移动场景）
+- **agent-worker = 内部组件**：客户端永远不直接接触；只通过 Realtime Gateway 间接调度
+- **Caddy 可选**：仅公网或不信任内网时启用；同机 docker network 部署不需要
+- **Storage 层**：voice clones 是 named volume；audit DB 在 SP5 引入
 
 ---
 
-## 3. 数据流
+## §2 STT Service
 
-### 3.1 三种数据流
-
-| 流类型 | 方向 | 协议 | 编码 | 速率 |
-|---|---|---|---|---|
-| **上行音频** | Browser → LiveKit → agent → STT | WebRTC → 内部 PCM | Opus → PCM 16kHz mono | ~32kbps Opus → 256kbps PCM |
-| **下行音频** | TTS → agent → LiveKit → Browser | 内部 PCM → WebRTC | PCM 24kHz mono → Opus | ~384kbps PCM → ~32kbps Opus |
-| **文本/控制** | agent ↔ STT/LLM/TTS | HTTP/WS | JSON / SSE | 极低 |
-
-### 3.2 上行音频路径（用户说话）
+### 接口签名
 
 ```
-麦克风
-  │ 48kHz float32 (浏览器原生)
-  ▼
-livekit-client.js (浏览器)
-  │ Opus 编码 + RTP 封包
-  ▼ WebRTC (UDP 50000-60000)
-livekit-server (SFU)
-  │ Opus 帧转发，不解码
-  ▼ WebRTC
-agent-worker (livekit-agents Python SDK)
-  │ Opus 解码 → PCM 16kHz mono int16 (重采样)
-  │
-  ├─► silero-vad (CPU)
-  │     │ 30ms 帧 → speech/silence 分类
-  │     ▼
-  │   触发 turn 边界事件
-  │
-  └─► stt-server (WS)
-        │ PCM 320ms chunk
-        ▼
-      sherpa-onnx Paraformer 流式
-        │
-        ▼ partial 文本 → final 文本
+WS /asr
+  client → server: binary frames (PCM int16 LE 16kHz mono)
+                    + text "EOS" (触发 final)
+  server → client: JSON events
+                    {"type":"partial", "text":"..."}
+                    {"type":"final", "text":"..."}
+                    {"type":"error", "message":"..."}
 ```
 
-### 3.3 下行音频路径（agent 说话）
-
-```
-LLM 流式输出 token
-  │ "你好，"
-  ▼
-agent 文本切句缓冲（按标点切，最少 5 字）
-  │
-  ▼
-tts-server (HTTP POST /tts/stream)
-  │ 输入：句子文本 + 音色 ID
-  ▼
-CosyVoice 2 流式
-  │ 边推理边吐 PCM 24kHz mono int16
-  ▼ HTTP chunked transfer
-agent-worker
-  │ 重采样 24k → 48k
-  │ 推入 livekit AudioSource
-  ▼
-livekit-server (SFU)
-  │ Opus 编码 + RTP
-  ▼ WebRTC
-浏览器播放
-```
-
-### 3.4 关键缓冲点
-
-| 位置 | 缓冲量 | 用途 |
-|---|---|---|
-| livekit-client jitter buffer | ~50ms | 抗网络抖动 |
-| agent VAD 滑动窗 | 500ms | 判断 turn 结束 |
-| agent STT chunk | 320ms | sherpa-onnx 流式步长 |
-| agent → TTS 句子缓冲 | 1 句 | 等够标点再合成 |
-| TTS → 播放 chunk | 200ms | 平滑播放，留余量 |
-
----
-
-## 4. 关键时序
-
-### 4.1 正常对话一轮
+### 内部组件
 
 ```mermaid
 sequenceDiagram
-    participant U as 用户
-    participant B as 浏览器
-    participant LK as LiveKit
-    participant A as Agent
-    participant V as VAD
-    participant S as STT
-    participant L as LLM
-    participant T as TTS
-
-    U->>B: 说"今天天气怎么样"
-    B->>LK: WebRTC 音频流
-    LK->>A: 转发音频帧
-    A->>V: 喂 30ms 帧
-    V-->>A: speech start (30ms 后)
-    A->>S: 开 WS，流式 chunk
-    S-->>A: partial: "今天"
-    S-->>A: partial: "今天天气"
-    U->>B: 说完
-    V-->>A: speech end (静音 500ms 后)
-    A->>S: flush
-    S-->>A: final: "今天天气怎么样"
-    A->>L: chat.completions stream
-    L-->>A: token: "今"
-    L-->>A: token: "天"
-    Note over A: 缓冲到标点或 5 字
-    L-->>A: token: "晴" "，"
-    A->>T: POST /tts/stream "今天晴，"
-    T-->>A: PCM chunk 1
-    A->>LK: 推音频
-    LK->>B: 播放
-    L-->>A: 继续 token...
-    Note over A,T: 第二句并行合成
+    participant C as Client
+    participant W as WS Handler
+    participant R as sherpa-onnx<br/>OnlineRecognizer
+    C->>W: connect /asr (Bearer auth)
+    W->>R: create_stream()
+    loop 每 50ms 单 coroutine 周期
+        C->>W: PCM bytes
+        W->>R: accept_waveform(pcm)
+        W->>R: decode_stream() → partial text
+        W->>C: {"type":"partial",...}
+    end
+    C->>W: text "EOS"
+    W->>R: input_finished() + final decode
+    W->>C: {"type":"final",...}
+    R-->>W: 自动 reset，等下一句
 ```
 
-### 4.2 Barge-in（用户打断）
+### 关键设计权衡
+
+- **单 coroutine 处理**：sherpa-onnx Stream 不是 thread-safe；旧版 v0.5.2 用 decode_loop + EOS handler 两个 task 并发访问 stream 导致 native crash。v0.5.3 改单 coroutine：receive WS msg（带超时）→ accept_waveform 或 EOS 处理 → decode → emit partial，全程一个协程操作 stream，无并发无 race。
+- **endpoint detection 关闭**：sherpa 自身的 endpoint 检测会异步 reset stream，与我们的 EOS 控制冲突；统一由客户端发 "EOS" 控制 final 时机。
+
+### 容错
+
+- 客户端 WS 断 → 服务端释放 stream
+- 服务端 WS 重启 → 客户端 STTClient 走 5 次指数退避重连（1→2→4→8→16s），重连后用新 stream（当前 utterance 数据丢失，下一轮恢复正常）
+
+### 不在范围
+
+- 多语言切换（默认中英文 bilingual）：未来用户可换 sherpa-onnx 模型；具体见 [ENGINES.md](./ENGINES.md)
+- 说话人识别 / diarization：业界另起方案，本平台不内嵌
+
+---
+
+## §3 TTS Service
+
+### 接口签名
+
+```
+HTTP POST /tts/stream
+  request body: JSON {"text":"...", "voice":"...", "speed":1.0}
+  response: chunked transfer, binary PCM int16 LE 24kHz mono
+  headers: X-Sample-Rate=24000, X-Channels=1, X-Format=pcm-int16-le
+
+WS /tts/stream_ws
+  client → server:
+    text frame 1 (JSON metadata): {"voice":"...","speed":1.0}
+    text frame N: 文本增量（可流式喂入）
+    text "EOS" (触发结束)
+  server → client:
+    binary PCM chunks
+    text {"type":"done","chunks":N} 末帧
+    或 text {"type":"error","message":"..."}
+```
+
+### 内部组件 + 双向流式数据流
 
 ```mermaid
 sequenceDiagram
-    participant U as 用户
-    participant A as Agent
-    participant V as VAD
-    participant L as LLM
-    participant T as TTS
-    participant LK as LiveKit
-
-    Note over A: 正在播放回复"...因此我建议..."
-    U->>V: 开始说话
-    V-->>A: speech start
-    Note over A: 状态: speaking → interrupted
-    A->>L: cancel stream (close conn)
-    A->>T: cancel stream (close conn)
-    A->>LK: 清空音频发送队列
-    A->>A: 丢弃未发送 PCM buffer
-    Note over A: ≤ 200ms 内 TTS 静音
-    Note over A: 进入新一轮 listen
+    participant C as Client (WS)
+    participant H as WS Handler<br/>(asyncio.Lock)
+    participant Q as text_q (sync queue)
+    participant CV as CosyVoice 3<br/>(GPU 单实例)
+    C->>H: connect + JSON metadata
+    H->>H: acquire _inference_lock
+    Note over H: reset model.token_hop_len=25
+    par feed text
+        C->>H: text frames (流式)
+        H->>Q: text_q.put(chunk)
+    and run inference
+        H->>CV: inference_zero_shot(text_gen, prompt_wav, ...)
+        loop 每收到 5+ tokens
+            CV->>CV: append text token / wait_for_more
+            CV->>H: yield {tts_speech: tensor}
+            H->>C: binary PCM chunk
+        end
+    end
+    C->>H: text "EOS"
+    H->>Q: text_q.put(None)
+    CV->>H: yield (final tail)
+    H->>C: binary PCM chunk + done event
+    H->>H: release _inference_lock
 ```
 
-### 4.3 错误场景
+### 关键设计权衡
+
+- **asyncio.Lock 串行化（v0.7.2 修复）**：CosyVoice 单 GPU model 实例并发调用会污染内部 state。所有 inference 入口（HTTP `_synthesize_stream` 和 WS `tts_stream_ws`）都包在 `async with _inference_lock`，N 路并发自动排队。Trade-off：吞吐受 GPU 单实例限制（baseline 单路 ~1.5s，5 路并发 ~6s 串行）。
+- **CosyVoice instance-attr 重置规约**：`model.token_hop_len` 在 v3 内部 stream 路径单调递增（25→50→100），跨 inference 共享。每路 inference 开始前手动 `model.token_hop_len = 25` reset。
+- **HTTP path generator wrap（v0.7.3 修复）**：CosyVoice 3 在 `tts_text=str` + 短文本下走"等满 hop_len 才 yield"的旧路径，遇到边界 bug（hifigan F0 kernel/input mismatch）。HTTP path 包成 single-element generator → 走稳定的"边收边 decode"路径。
+- **prompt_text 必须含 `<|endofprompt|>`**：CosyVoice 3 LLM `inference()` 硬断言（v3 frontend 不自动加，caller 必须显式拼）。
+
+### Voice Clone
+
+```
+POST /voices/add  (multipart, TTS_ADMIN_API_KEY 鉴权)
+  - file: 16kHz mono wav (3-30 秒)
+  - spk_id: 新音色 ID
+  - prompt_text: 参考音对应的文字 (≥3 秒发音内容)
+↓
+add_zero_shot_spk() 注册 → spk2info.pt 持久化到 named volume
+↓
+重启自动 reload，POST /tts/stream voice=新id 即可用
+
+DELETE /voices/{spk_id}  (默认音色保护，不可删)
+```
+
+### 容错
+
+- HTTP path: `request.is_disconnected()` 监测，client 断则停止推理
+- WS path: barge-in `asyncio.shield(ws.aclose, timeout=2)` 让 close frame 真发出；server 端 `send_bytes` 接 `(WebSocketDisconnect, RuntimeError)` 双异常防 starlette send-after-close trap
+
+---
+
+## §4 Realtime Voice Service
+
+### 接口签名（默认 WS gateway 模式）
+
+```
+HTTP POST /sessions
+  request body: {"voice":"...", "prompt":"...", ...}
+  response: {"session_id":"...", "ws_url":"ws://.../v1/realtime/{id}"}
+
+WS /v1/realtime/{session_id}
+  client → server:
+    text frame {"type":"session.update", ...}     (可选，热改 voice/prompt)
+    binary frame: PCM int16 LE 16kHz mono         (用户音频)
+    text "audio.eos"                               (用户发言结束)
+  server → client:
+    text {"type":"transcript.partial", "text":"..."}    (STT 中间结果)
+    text {"type":"transcript.final",   "text":"..."}    (STT 最终)
+    text {"type":"response.text",       "text":"..."}   (agent 回复文本，逐 token / 逐句)
+    binary frames                                       (agent 回复 PCM 24kHz mono)
+    text {"type":"response.done"}                       (本轮回复结束)
+    text {"type":"error", "message":"..."}
+```
+
+### 数据流（默认 WS gateway 模式）
 
 ```mermaid
 sequenceDiagram
-    participant A as Agent
-    participant T as TTS
-    participant LK as LiveKit
-
-    A->>T: POST /tts/stream
-    T--xA: HTTP 500 / 连接断
-    Note over A: 状态机: tts_error
-    A->>A: 切到 fallback（mock TTS / 提示音）
-    A->>LK: 推 "抱歉，请稍等" 预录音频
-    A->>A: 异步重连 TTS（指数退避）
+    participant C as Client
+    participant G as Realtime Gateway
+    participant AW as agent-worker
+    participant STT as STT engine
+    participant LLM as LLM (Ollama/vLLM)
+    participant TTS as TTS engine
+    C->>G: POST /sessions {voice, prompt}
+    G->>AW: spawn / dispatch worker
+    G->>C: 200 {session_id, ws_url}
+    C->>G: WS connect /v1/realtime/{id}
+    G->>AW: bind ws session
+    loop 用户说一句
+        C->>G: PCM bytes
+        G->>AW: forward PCM
+        AW->>STT: feed PCM
+        STT->>AW: partial / final
+        AW->>G: transcript events
+        G->>C: {"type":"transcript.partial",...}
+        C->>G: "audio.eos"
+        AW->>STT: EOS, get final
+        AW->>LLM: prompt + memory + final
+        LLM-->>AW: tokens (流式)
+        AW->>G: response.text events
+        G->>C: text events
+        AW->>TTS: text chunks (streaming)
+        TTS-->>AW: PCM chunks
+        AW->>G: PCM
+        G->>C: binary PCM
+        AW->>G: response.done
+        G->>C: response.done
+    end
 ```
 
----
-
-## 5. Agent 状态机
+### 数据流（可选 LiveKit 高级模式）
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Idle: agent 加入房间
-    Idle --> Listening: VAD speech_start
-    Listening --> Thinking: VAD speech_end + STT final
-    Listening --> Idle: VAD 仅噪音 (无 STT 输出)
-    Thinking --> Speaking: LLM 第一个 token + TTS 首包
-    Speaking --> Interrupted: VAD speech_start (barge-in)
-    Speaking --> Idle: TTS 播放完
-    Interrupted --> Listening: 取消 LLM/TTS 完成
-    Thinking --> Idle: LLM 错误 + 错误提示播放完
-    Speaking --> Idle: TTS 错误 + fallback 播放完
+sequenceDiagram
+    participant C as Client (LiveKit SDK)
+    participant TS as token-server
+    participant LK as LiveKit SFU
+    participant AW as agent-worker
+    C->>TS: POST /token {identity, room}
+    TS->>C: JWT
+    C->>LK: WebRTC connect (token)
+    LK->>AW: agent joined room (内部触发)
+    Note over C,LK: 双向 WebRTC 媒体流 (UDP)
+    Note over AW: agent 内部走 STT/LLM/TTS pipeline<br/>把 PCM 推回 LK，LK 转给 client
 ```
 
-### 5.1 状态定义
+### Session 生命周期（抽象，详细 SP2 设计）
 
-| 状态 | 含义 | 进入条件 | 退出条件 |
-|---|---|---|---|
-| **Idle** | 等待用户说话 | 上一轮结束 | VAD 检测到语音 |
-| **Listening** | 用户说话中，STT 流式转写 | VAD speech_start | VAD speech_end |
-| **Thinking** | LLM 推理中，等首 token | STT final | LLM 第一个 token 到达 |
-| **Speaking** | TTS 播放回复 | TTS 首包 | TTS 队列耗尽 |
-| **Interrupted** | 处理 barge-in 取消 | Speaking 中 VAD speech_start | LLM/TTS 取消完成 |
-
-### 5.2 不变式（Invariants）
-
-- 同时只有一个 LLM stream 活跃
-- 同时只有一个 TTS stream 活跃
-- Speaking 状态下，VAD 检测必须仍在跑（用于检测 barge-in）
-- 切状态时，旧状态的 inflight 资源必须显式 cancel，不能仅靠 GC
-
----
-
-## 6. 性能预算
-
-### 6.1 端到端延迟分解（生产 3060 目标）
-
-| 阶段 | 预算 | 说明 |
-|---|---|---|
-| 用户说完 → VAD 判定 turn end | 300-500ms | 静音窗口决定，可调 |
-| STT final 输出 | 50-150ms | 流式 partial 已在前面，final 仅尾巴 |
-| LLM 首 token | 200-400ms | Qwen2.5-3B Q4，3060 实测 |
-| TTS 首包 | 150-250ms | CosyVoice 2 流式 |
-| 网络回传播放 | 50-100ms | 同机 docker + WebRTC |
-| **合计 p95** | **≈ 1.0s** | |
-
-### 6.2 显存预算（生产）
-
-| 组件 | 显存 | 备注 |
-|---|---|---|
-| stt-server (sherpa-onnx + Paraformer) | ~500MB | ONNX Runtime |
-| tts-server (CosyVoice 2-0.5B) | ~4GB | fp16 |
-| llm-server (Qwen2.5-3B Q4) | ~3GB | vLLM with Q4 |
-| KV cache + 余量 | ~2-3GB | 长上下文增长 |
-| **合计** | **~10GB** | 3060 12GB 留 2GB 缓冲 |
-
-### 6.3 CPU/内存预算
-
-| 组件 | CPU | RAM |
-|---|---|---|
-| livekit-server | 0.5 core | 256MB |
-| token-server | 0.1 core | 128MB |
-| agent-worker (VAD + 编排) | 1 core | 512MB |
-| stt-server | 1 core (推理在 GPU) | 1GB |
-| tts-server | 1 core (推理在 GPU) | 2GB |
-| llm-server | 1 core (推理在 GPU) | 2GB |
-| **合计** | **~5 core** | **~6GB** |
-
----
-
-## 7. 网络与端口
-
-### 7.1 端口映射
-
-| 端口 | 协议 | 服务 | 暴露范围 |
-|---|---|---|---|
-| 8000 | TCP | token-server | dev: 127.0.0.1 / prod: 用户决定 |
-| 7880 | TCP | livekit-server signaling | dev: 127.0.0.1 / prod: 公网（必须） |
-| 7881 | TCP | livekit-server WHIP/RTC TCP | 同上 |
-| 50000-60000 | UDP | livekit-server WebRTC media | 同上 |
-| 9090 | WS | stt-server | 内部 docker network |
-| 9880 | HTTP | tts-server | 内部 docker network |
-| 8001 | HTTP | llm-server | 内部 docker network |
-
-### 7.2 防火墙要求（生产）
-
-- TCP 7880/7881 + UDP 50000-60000 必须对客户端可达
-- 8000 token-server 对客户端可达
-- 其余端口仅 docker bridge 内部
-
-### 7.3 NAT/STUN
-
-- 同 LAN：LiveKit 直接打 UDP，无 STUN 需要
-- 跨网络：需配 STUN server（默认 google STUN，或自建 coturn）
-
----
-
-## 8. 配置切换矩阵
-
-| 项 | dev profile | prod profile |
-|---|---|---|
-| STT 模型 | sherpa-onnx CPU + Paraformer-tiny | sherpa-onnx GPU + Paraformer-large |
-| TTS 引擎 | mock（吐 sine wave 或预录） | CosyVoice 2-0.5B GPU |
-| LLM | mock（固定回复 "好的"） 或 Ollama 1.5B | vLLM + Qwen2.5-3B Q4 |
-| LiveKit 绑定 | 127.0.0.1 | 0.0.0.0（用户确认） |
-| GPU | 无 | device_ids: [0] |
-| 日志级别 | DEBUG | INFO |
-| 镜像 tag | `:dev` | pinned `:vX.Y.Z` |
-
----
-
-## 9. 失败模式
-
-| 故障 | 检测 | 影响 | 处置 |
-|---|---|---|---|
-| STT 服务挂 | agent WS 断连 | 无法转写 | agent 切 fallback 提示，重连指数退避 |
-| TTS 服务挂 | agent HTTP 失败 | 无声 | 播放预录提示音"系统忙"，重连 |
-| LLM 服务挂 | agent HTTP 失败 | 无回复 | 播放"模型加载中" |
-| LiveKit 挂 | agent join 失败 | 全瘫 | 容器自动重启，客户端重连 |
-| GPU OOM | CUDA 报错 | TTS/LLM 中断 | 切到下一个请求，监控告警 |
-| Barge-in 状态泄漏 | 旧 stream 还在吐数据 | 双声道叠加 | 状态机强制 reset，丢弃旧 stream 输出 |
-| VAD 误触发 | speech_start 频繁 | 对话频繁打断 | 调高 VAD threshold + 最小语音时长 |
-| WebRTC 弱网 | 客户端音频丢帧 | 转写错乱 | LiveKit 自带 RED/FEC，配置开启 |
-
----
-
-## 10. 可观测性（v1 简版）
-
-- 每个服务输出结构化日志（JSON line）
-- agent 在每轮对话末尾输出一行 metric：
-
-```json
-{
-  "round_id": "uuid",
-  "stt_first_partial_ms": 120,
-  "stt_final_ms": 850,
-  "llm_first_token_ms": 280,
-  "tts_first_chunk_ms": 200,
-  "end_to_end_ms": 1100,
-  "barge_in": false
-}
+```
+create → active → idle → expire
+   ↓        ↓       ↓       ↓
+  worker  双向流  超时   清理 memory
+  分配          倒计时  释放 worker
 ```
 
-- v1 不接 Prometheus，先用 `docker logs | jq` 看；v2 再考虑 metrics 端点。
+详细 session API、memory 模型（追加 / 滑窗 / 摘要 / 持久化）、prompt 透传规则属于 SP2/SP3 设计范围，不在本架构文。
+
+### 关键设计权衡
+
+- **WS gateway 默认 vs LiveKit 备选（D-2026-05-07.4）**：server-to-server 场景下 TCP/WS 与 UDP/WebRTC 延迟差异 < 1ms（同 LAN/同机部署），WS gateway 集成简化压倒性优势。LiveKit 仅在末端用户跨公网移动场景保留。
+- **agent-worker = 内部 implementation（D-2026-05-07.3）**：客户端永远只看到 WS gateway endpoint，不接触 agent-worker；保留我们内部演进自由。
+- **同进程调用 vs HTTP 调用内部 STT/TTS**：当前 agent-worker 通过 HTTP/WS 调内部 STT/TTS server（即使在同一 docker network 也走 HTTP）。代价是几 ms 序列化延迟；好处是 STT/TTS service 同时给外部客户端用，agent-worker 只是其中一个 client。**这与 platform 定位一致**。
 
 ---
 
-## 11. 演进路线
+## §5 跨服务关注点
 
-| 版本 | 范围 |
+### 鉴权三层
+
+| 层 | env | 用途 |
+|---|---|---|
+| Client API key | `RTVOICE_API_KEY` | STT WS / TTS HTTP+WS / Realtime Voice 的 client 调用 Bearer 鉴权（留空 = dev 模式无鉴权）|
+| Admin key | `TTS_ADMIN_API_KEY` | `/voices/add /voices/{id} /quota` 等高权限管理操作（留空 = admin 端点禁用）|
+| LiveKit JWT | token-server | 仅 LiveKit 高级模式；token-server 用 `LIVEKIT_API_KEY/SECRET` 签 JWT |
+
+### TLS（可选）
+
+- 同机 docker network：不需要
+- 同机 127.0.0.1 bind：不需要
+- LAN 跨机（信任）：可选
+- LAN 跨机（半信任）：建议（Caddy `tls internal` 自签）
+- **公网暴露：必须**（Caddy + Let's Encrypt）
+
+### GPU 显存预算（按 LLM 选型）
+
+| 场景 | sherpa | CosyVoice 3 | LLM | 总计 | 12GB 余量 |
+|---|---|---|---|---|---|
+| dev (Q4 1.5B) | 1G | 5.5G | 1.5G | **8G** | 4G ✓ 宽裕 |
+| prod (Q4 3B) | 1G | 5.5G | 3G | **9.5G** | 2.5G ✓ |
+| prod (Q4 7B) | 1G | 5.5G | 5G | **11.5G** | 0.5G ⚠️ 边缘 |
+
+> 多并发 session 时，agent-worker 数 × 每路 STT/TTS 占用要分别累加；详 SP2 设计。
+
+### 容错矩阵
+
+完整列表见 [OPERATIONS.md §1](./OPERATIONS.md)。本文不重复，关键摘要：
+
+- LiveKit room 断 → 5 次指数退避重连
+- STT 长连接 → 自愈 reconnect loop
+- LLM 流式 → httpx per-chunk timeout + 0-token fallback
+- TTS WS barge-in → `shield(aclose)` + server 接 RuntimeError
+- CosyVoice multi-concurrency → asyncio.Lock 串行 + `token_hop_len` reset
+
+### 监控
+
+每个 service 暴露 Prometheus `/metrics`：
+
+| Service | 关键指标 |
 |---|---|
-| v0.1 | 骨架：LiveKit + token + 加入房间 + echo（不接引擎） |
-| v0.2 | 接 mock STT/TTS/LLM，跑通状态机 |
-| v0.3 | 接 sherpa-onnx CPU 实 STT |
-| v0.4 | 接 Ollama / Kokoro 真 LLM/TTS（CPU 可跑的） |
-| v0.5 | 生产覆盖：vLLM + CosyVoice 2 + sherpa-onnx GPU 配置 |
-| v0.6 | 在生产机首次部署，性能调优 |
-| v0.7+ | 多音色、长记忆、Function calling |
+| token-server | `rtvoice_tokens_issued_total`, `rtvoice_token_auth_failures_total{reason}` |
+| stt-server | `rtvoice_stt_ws_connections_active`, `rtvoice_stt_decode_seconds` |
+| tts-server | `rtvoice_tts_phrases_total`, `rtvoice_tts_ttfb_seconds`, `rtvoice_tts_phrase_rtf` |
+| agent-worker | `rtvoice_round_seconds`, `rtvoice_first_audio_seconds`, `rtvoice_agent_state` |
+
+可选 `--profile monitoring` 起 Prometheus + Grafana stack（21 panels dashboard）。详 `monitoring/README.md`。
 
 ---
 
-## 12. 决策记录（ADR 摘要）
+## §6 技术栈选型
 
-| # | 决策 | 替代方案 | 选择理由 |
+| 组件 | 选型 | 替代方案 | 为什么这个 |
 |---|---|---|---|
-| ADR-1 | 用 livekit-agents 而非 pipecat / 自建 | pipecat（更轻）、自建（最自由） | WebRTC 弱网抗性；用户明确选择 |
-| ADR-2 | TTS 用 CosyVoice 2 而非 GPT-SoVITS / Fish-Speech | GPT-SoVITS（克隆王）、Fish-Speech（最强） | 流式延迟 150ms 是 voice agent 必需；3060 显存够 |
-| ADR-3 | STT 用 sherpa-onnx 而非 faster-whisper | faster-whisper（whisper 系准） | 原生流式架构；中文 Paraformer 模型质量 |
-| ADR-4 | 引擎独立成服务而非内嵌 agent 进程 | 内嵌（少 1 跳网络） | 模型加载慢、依赖冲突、独立崩溃恢复 |
-| ADR-5 | 开发机 mock 而非远程接生产 GPU | 接远程 GPU（更真实） | 安全契约；避免开发机污染生产 |
+| **SFU/WebRTC** | LiveKit `livekit/livekit-server:v1.11.0` | Daily / Janus / Mediasoup | 文档 + 多语言 SDK 最完整，开源活跃，docker image 直接用 |
+| **STT** | sherpa-onnx Streaming Zipformer 中英文 | whisper / faster-whisper | 真流式（whisper 系是分块伪流式）+ GPU 兼容性 + 模型小 |
+| **TTS** | Fun-CosyVoice 3 (0.5B GPU) | Kokoro / XTTS-v2 / ElevenLabs | v3 双向流式（边收文本边吐音频）+ 中文 SOTA + 完全本地 + 音色克隆 |
+| **LLM** | Ollama (dev) / vLLM (prod) | 直接 transformers / llama.cpp | OpenAI API 兼容 + 开箱即用模型管理 + 易切换 |
+| **Web 框架** | FastAPI + uvicorn | Flask / aiohttp | async-first + Pydantic 校验 + WS 原生支持 |
+| **TLS Proxy** | Caddy 2.8 | nginx + certbot | 自动 ACME + 配置 1/10 体积 |
+| **监控** | Prometheus + Grafana | Datadog / NewRelic | 自托管 + 文本协议 + 无供应商绑定 |
+| **WS 客户端** | `websockets` (Python) | `aiohttp` / `httpx-ws` | 协议合规 + maintainer 活跃 |
+
+详细对比见 [ENGINES.md](./ENGINES.md)。
+
+> **第三方依赖**：LiveKit Server / SDK、sherpa-onnx、Fun-CosyVoice、Ollama 都是开源项目；我们用而**不重新发明**。RTVoice 的价值在于把这些组合成 platform。
+
+---
+
+## §7 设计决策日志
+
+每条记录格式：`D-YYYY-MM-DD.N · 决策标题`，含背景、决定、替代方案、理由。按时间倒序。
+
+### D-2026-05-07.6 · Caddy TLS 标"可选"
+
+**决策**：架构图 Caddy 用虚线 + "📦 可选" 标注；明确公网必须、内网可选、同机不需要。
+
+**理由**：Bearer auth (`RTVOICE_API_KEY`) 是独立鉴权层，Caddy 只解决传输加密。不应让读者误以为"不开 Caddy 就跑不起来"。
+
+### D-2026-05-07.5 · API 规范延后到 SP1.5
+
+**决策**：SP1 仅做叙事重构；路径风格 / 错误码 / 版本 / 鉴权统一规则 / capability discovery 留 SP1.5 独立 sub-project。
+
+**理由**：API 规范影响后续 SP2-7 的设计，需要专注；与 SP1 改文档不冲突。
+
+### D-2026-05-07.4 · WS gateway primary, LiveKit 备选
+
+**决策**：Realtime Voice service 默认走 `WS /v1/realtime`（OpenAI Realtime 风格）；LiveKit endpoint 保留作 advanced mode（仅末端 user 跨公网移动）。
+
+**替代**：纯 LiveKit (v0.7 现状) - 集成方多 SDK 依赖；纯 WS gateway 删 LiveKit - 失去末端跨公网韧性。
+
+**理由**：server-to-server 场景下 TCP/WS 与 UDP/WebRTC 延迟差异 < 1ms（同 LAN/同机），WS gateway 集成简化优势压倒性。
+
+### D-2026-05-07.3 · agent-worker = Model A 内部 implementation detail
+
+**决策**：agent-worker 是 Realtime Voice service 的内部 worker，客户端永远不直接接触；只在 §运维 / §概念 出现，不在 §集成。
+
+**替代**：Model B reference impl（公开 worker 协议）/ Model C default tenant + 渐进 multi-tenant。
+
+**理由**：保留内部演进自由；与 OpenAI Realtime / Vapi / Twilio 行业惯例一致；客户体验最简。
+
+### D-2026-05-07.2 · README 多受众分章节
+
+**决策**：README 第一屏 5 行 pitch + 60 秒 try + 3 service cards；后段分 §集成 / §部署 / §概念 / §Roadmap。
+
+**理由**：3 类受众（集成方 / 运维 / 好奇者）混合入口流量，单视角 README 都不友好。
+
+### D-2026-05-07.1 · 三个 service 完全平铺
+
+**决策**：3 service 同等大小 cards；feature/API list 等篇幅；不分层（不写 STT/TTS 是底层、Realtime 上层）。
+
+**理由**：用户期望"3 service 一等公民"，不让 Realtime 显得独立优越。
+
+### D-2026-05-06.4 · CosyVoice 3 与 v0.6 镜像并存可瞬切回滚
+
+**决策**：v0.7 baseline 通过 `Dockerfile.cosyvoice3` + 单独 image tag 引入；v0.6 image 保留；切换由 `.env` `TTS_DOCKERFILE/TTS_IMAGE` 控制。
+
+**理由**：模型 ~5.6GB + 依赖大，rebuild 高成本；保留双镜像 = 回滚秒级。
+
+### D-2026-05-06.3 · CosyVoice 3 prompt_text 必须含 `<|endofprompt|>`
+
+**决策**：在 `main_cosyvoice3.py::DEFAULT_PROMPT_TEXT` 末尾显式拼 `<|endofprompt|>` token。
+
+**理由**：CosyVoice 3 LLM `inference()` 硬断言 token 151646 必须在输入序列；v3 frontend 不自动添加。这是 vendor undocumented contract，prod 实测才发现。
+
+### D-2026-05-06.2 · ubuntu22.04 + cuda devel base image
+
+**决策**：Dockerfile.cosyvoice3 用 `nvidia/cuda:12.6.3-devel-ubuntu22.04`（不用 ubuntu24.04 + deadsnakes PPA，不用 runtime image）。
+
+**理由**：devel 自带 nvcc 12.6（deepspeed 探测 CUDA 必需）；ubuntu22.04 默认 python3=3.10.12（CosyVoice 兼容）；deadsnakes PPA 国内 TLS 握手频繁失败。
+
+### D-2026-05-04.1 · CosyVoice 用 inference_zero_shot 不用 inference_sft
+
+**决策**：CosyVoice 2 model 在 `add_zero_shot_spk` 注册的是 zero-shot schema（`llm_embedding/flow_embedding`），与 SFT 路径 schema (`embedding`) 不兼容。统一用 `inference_zero_shot(zero_shot_spk_id=...)`。
+
+**理由**：v2 0.5B 不带 SFT spk2info.pt，无法走 inference_sft；强行走会 KeyError。
+
+---
+
+## 历史 / 进一步阅读
+
+- [README.md](./README.md) — 高层概览
+- [OPERATIONS.md](./OPERATIONS.md) — 运维细节、容错矩阵、build 性能
+- [DEPLOY.md](./DEPLOY.md) — 部署步骤
+- [ENGINES.md](./ENGINES.md) — 引擎对比详细
+- [CHANGELOG.md](./CHANGELOG.md) — 版本演进
+- [SECURITY.md](./SECURITY.md) — 安全契约
+- [PROD_VALIDATION.md](./PROD_VALIDATION.md) — v0.7 prod 实测报告
