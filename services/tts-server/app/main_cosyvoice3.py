@@ -289,16 +289,18 @@ async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: st
     t_start = time.time()
     audio_samples_total = 0
 
+    # v0.7.3：HTTP path 用 single-element generator 喂 v3（不传 str）。
+    # str input 走 v3 内部 model.tts(stream=True) 的"满足 token_hop_len 才 yield"
+    # 路径，短文本会触发"yield 0.04s 残尾"+ 偶尔 hifigan F0 kernel/input mismatch
+    # 的 deep bug。走 generator 路径更稳（A 测 5/5 验过）。
+    def text_gen():
+        yield req.text
+
     def producer():
         nonlocal audio_samples_total
         try:
-            # 用 inference_zero_shot 而非 inference_sft：
-            # - CosyVoice 2-0.5B 不带 SFT spk2info.pt（schema: 'embedding'）
-            # - 启动时 add_zero_shot_spk 注册的是 zero-shot schema (llm_embedding/flow_embedding)
-            # - inference_zero_shot 在 zero_shot_spk_id != '' 时走 spk2info 缓存路径，
-            #   prompt_text/prompt_wav 此时被 frontend 忽略（仍需传值占位）
             for output in _cosyvoice.inference_zero_shot(
-                req.text,
+                text_gen(),
                 DEFAULT_PROMPT_TEXT,    # 占位；spk_id 非空时不使用
                 DEFAULT_PROMPT_WAV,     # 占位；spk_id 非空时不使用
                 zero_shot_spk_id=voice,
