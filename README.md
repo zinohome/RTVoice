@@ -1,159 +1,122 @@
 # RTVoice
 
-本地部署的实时语音对话系统（Voice Agent），目标场景类似 ChatGPT 语音模式：低延迟、流式、可打断。
+**RTVoice** —— self-hosted 语音服务平台，三个 service 一等公民：
 
-- **STT**：sherpa-onnx + Paraformer 中文流式
-- **TTS**：CosyVoice 2-0.5B 流式（生产）/ mock（开发）
-- **LLM**：Qwen2.5-3B（生产）/ mock 或 Ollama 1.5B（开发）
-- **编排**：livekit-agents + LiveKit WebRTC SFU
-- **部署**：Docker Compose，dev/prod profile 切换
-- **目标硬件**：单卡 NVIDIA RTX 3060 12GB
+1. **STT 服务** —— 实时流式转写（sherpa-onnx，WebSocket）
+2. **TTS 服务** —— 流式合成 + 音色克隆（Fun-CosyVoice 3，HTTP + WebSocket）
+3. **Realtime Voice 服务** —— 端到端语音对话（默认 WebSocket gateway / 可选 LiveKit；本地 LLM；支持 prompt+memory + 同步 transcript + 换音色）
 
-> **状态：v0 文档与脚手架阶段**，尚未启动任何服务。
+全栈本地推理，单 GPU ≤ 12GB（RTX 3060/4060 适配），docker-compose 一键启停。
+
+通过标准 HTTP / WebSocket API 给任意应用接入；内置鉴权、审计开关、用量监控、管理 Web UI。
 
 ---
 
-## 文档（动手前请按顺序读）
+## ⚡ 60 秒试一下
 
-| 文档 | 内容 |
+```bash
+git clone https://github.com/zinohome/RTVoice.git
+cd RTVoice
+cp .env.example .env       # 默认 dev 配置已可用
+docker compose --profile dev up -d
+```
+
+服务起来后:
+
+| 想试什么 | 怎么试 |
 |---|---|
-| [SECURITY.md](./SECURITY.md) | 安全契约：禁止行为、生产迁移协议、回滚策略 |
-| [DEPLOY.md](./DEPLOY.md) | 部署手册：开发机 / 生产机流程、备份、故障排查 |
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | 系统设计：组件、数据流、状态机、性能预算、ADR |
-| [ENGINES.md](./ENGINES.md) | 引擎选型：STT/TTS/LLM 候选对比、选型理由、降级策略 |
-| [CHANGELOG.md](./CHANGELOG.md) | 版本历史：v0.0-v0.5.1 详细 release notes + 经验教训摘录 |
-| [monitoring/README.md](./monitoring/README.md) | 可选 Prometheus + Grafana 监控栈（21 panel dashboard） |
+| **STT**（语音转文字）| [测试页](http://127.0.0.1:8000/) 录一段；或编程方式见 [STT 集成示例](./COZYVOICE_INTEGRATION.md#stt) |
+| **TTS**（文字转语音）| `curl -X POST http://127.0.0.1:9880/tts/stream -d '{"text":"你好"}' \| ffplay -f s16le -ar 24000 -` |
+| **Realtime 对话**| 浏览器 [测试页](http://127.0.0.1:8000/) → 加入语音 → 说话 |
+
+**首次启动注意**：LLM (Ollama) 需要 `ollama pull qwen2.5:1.5b`（约 1GB）。完整下好后约 3-5 分钟可对话。prod GPU 部署见 [DEPLOY.md](./DEPLOY.md)。
 
 ---
 
-## 目录结构
+## What's in the box
 
-```
-RTVoice/
-├── SECURITY.md
-├── DEPLOY.md
-├── ARCHITECTURE.md
-├── README.md
-├── .gitignore
-├── .env.example
-├── docker-compose.yml             # (TODO) 公共定义
-├── docker-compose.dev.yml         # (TODO) 开发覆盖
-├── docker-compose.prod.yml        # (TODO) 生产覆盖
-├── services/
-│   ├── token-server/              # FastAPI，发 LiveKit JWT
-│   ├── agent-worker/              # livekit-agents Python worker
-│   ├── stt-server/                # sherpa-onnx 流式 ASR 服务
-│   └── tts-server/                # CosyVoice 流式 TTS 服务
-├── livekit/                       # livekit-server 配置
-├── scripts/                       # 部署/备份脚本
-└── docs/                          # 补充文档
-```
+### 🎤 STT — 流式语音识别
 
----
+- **接口**：WS `/asr`
+- **引擎**：sherpa-onnx Streaming Zipformer 中英文
+- **协议**：PCM int16 LE 16kHz mono in → JSON `{partial,final,error}` events out
+- **场景**：实时转写、麦克风听写、对话录音
+- → [集成示例](./COZYVOICE_INTEGRATION.md#stt) · [API spec](./docs/api/stt.md)（即将上线）
 
-## Quick Start
+### 🔊 TTS — 流式语音合成 + 音色克隆
 
-需要 Docker 24+（含 compose v2）。**不需要** Python / NodeJS / NVIDIA 驱动（dev 是 CPU）。
+- **接口**：HTTP POST `/tts/stream`（单次）+ WS `/tts/stream_ws`（双向流式）
+- **引擎**：Fun-CosyVoice 3 (0.5B GPU)
+- **协议**：text in（HTTP body 或 WS 流）→ chunked PCM int16 LE 24kHz mono out
+- **特性**：音色克隆（POST /voices/add）、speed 0.5-2.0
+- → [集成示例](./COZYVOICE_INTEGRATION.md#tts) · [API spec](./docs/api/tts.md)（即将上线）
 
-```bash
-# 1. 克隆 + 进入目录
-git clone git@github.com:zinohome/RTVoice.git && cd RTVoice
+### 💬 Realtime Voice — 实时语音对话
 
-# 2. 配置环境变量
-cp .env.example .env
-# 生成两个强密钥（任一发行版有 python3 即可）：
-echo "LIVEKIT_API_SECRET=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" >> .env.tmp
-echo "APP_API_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" >> .env.tmp
-# 把上面两行填回 .env，覆盖默认值，删掉 .env.tmp
-
-# 3. 一键启动（首次会拉取镜像 + ollama 拉 Qwen2.5-1.5B 约 5 分钟）
-./scripts/dev-up.sh
-
-# 4. 浏览器测试
-# 打开 http://127.0.0.1:8000，点"加入房间" → "开麦克风" → 说话
-# (DEV_AUTO_INJECT_KEY=true 会自动填 API key 到表单)
-
-# 5. 停止
-./scripts/dev-down.sh                # 仅停容器，保留模型卷（推荐）
-./scripts/dev-down.sh --wipe         # 连模型一起删（需输入 YES I AM SURE）
-```
-
-### 验证服务健康
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
-# 期望看到 6 个服务全 healthy:
-#   livekit-server / token-server / stt-server / llm-server / tts-server / agent-worker
-```
-
-### 看 agent 实时日志
-
-```bash
-docker logs -f rtvoice-agent
-# 期望事件流（说话 → agent 回复）：
-#   [VAD] speech_start
-#   [STT final] '<你说的话>'
-#   [phrase 1] '<LLM 第一句回复>'
-#   [ROUND METRIC] {phrases: 2, first_audio_ms: 1450, round_ms: 4200}
-```
-
-### 生产部署（RTX 3060 12GB 服务器）
-
-详细步骤见 [DEPLOY.md](./DEPLOY.md)。简版：
-
-```bash
-# 1. 在生产服务器上 git pull 此仓库 + 配置 .env（强随机 + 公网 URL）
-# 2. 只读探查
-./scripts/prod-deploy.sh --inspect
-# 3. 备份现有数据卷
-./scripts/prod-deploy.sh --backup
-# 4. 拉镜像 + 渐进部署（每服务 healthcheck 后再继续）
-./scripts/prod-deploy.sh --apply
-```
+- **接口**：HTTP POST `/sessions` 创建 + WS `/v1/realtime/{session_id}` 连接
+- **协议**：客户端发 PCM in / 收 PCM + transcript events out（OpenAI Realtime 风格）
+- **引擎**：内部 STT (sherpa) + LLM (Ollama / vLLM) + TTS (Fun-CosyVoice 3)
+- **特性**：双向流式、prompt+memory、同步 transcript、换音色、barge-in
+- **高级模式**：LiveKit endpoint 可选保留（适合 end-user 跨公网移动场景）
+- → [集成示例](./COZYVOICE_INTEGRATION.md#realtime) · [API spec](./docs/api/sessions.md)（即将上线）
 
 ---
 
-## 演进路线
+## 🔌 集成 (Integration)
 
-| 版本 | 范围 | 状态 |
-|---|---|---|
-| v0.0 | 文档三件套 + 脚手架 | ✅ |
-| v0.1 | LiveKit + token-server，浏览器加入房间 | ⏳ |
-| v0.2 | mock STT/TTS/LLM 跑通状态机 | ⏳ |
-| v0.3 | 接 sherpa-onnx CPU 实 STT | ⏳ |
-| v0.4 | 接 Ollama / Kokoro 真引擎（CPU 可跑） | ⏳ |
-| v0.5 | 生产覆盖：vLLM + CosyVoice 2 + sherpa GPU | ⏳ |
-| v0.6 | 生产机首次部署 + 性能调优 | ⏳ |
+给客户端 / 应用开发者：怎么把 RTVoice 接到你的项目。
 
-详见 [ARCHITECTURE.md §11](./ARCHITECTURE.md)。
+- 完整集成手册：[COZYVOICE_INTEGRATION.md](./COZYVOICE_INTEGRATION.md)
+- API spec（路径/鉴权/错误码统一规范）：`docs/api/`（即将上线，SP1.5）
+- 客户端示例代码：Python、curl、JavaScript（在 COZYVOICE_INTEGRATION 里）
+- 鉴权：Bearer token（[SECURITY.md](./SECURITY.md)）
+- 部署拓扑选择（同机 docker network / 跨机 TLS / 公网 LE）：见集成手册 §1
 
 ---
 
-## 关键决策摘要
+## 🛠 部署 (Deployment)
 
-- **为什么 livekit-agents 而非 pipecat**：WebRTC 传输层抗弱网，用户场景要求远程访问鲁棒性
-- **为什么 CosyVoice 2 而非 GPT-SoVITS**：流式 TTFB 150ms，3060 跑得动；voice agent 流式是必选项
-- **为什么独立成多服务**：模型加载慢、依赖冲突大、独立崩溃恢复
-- **为什么开发机 mock 而非接生产 GPU**：安全契约；开发污染不影响生产
+给运维 / 部署人员：怎么把 RTVoice 跑起来。
 
-完整 ADR 见 [ARCHITECTURE.md §12](./ARCHITECTURE.md)。
-
----
-
-## 性能目标
-
-| 指标 | 目标（生产） |
-|---|---|
-| 端到端延迟 p95 | ≤ 1.2s |
-| TTS 首包 | ≤ 300ms |
-| Barge-in 响应 | ≤ 200ms |
-| 总显存 | ≤ 10GB |
+- **首次部署**：[DEPLOY.md](./DEPLOY.md)
+- **运维手册**（容错矩阵 / 排障 / 升级路径 / build 性能）：[OPERATIONS.md](./OPERATIONS.md)
+- **硬件要求**：单 GPU ≤ 12GB（RTX 3060/4060 实测 OK）；CPU only 模式仅 dev 用（性能不足）
+- **监控**：可选启 `--profile monitoring` 起 Prometheus + Grafana
+- **安全**：[SECURITY.md](./SECURITY.md)（公网部署必读）
+- **生产实测报告**：[PROD_VALIDATION.md](./PROD_VALIDATION.md)
 
 ---
 
-## 安全提示
+## 📚 概念 (Concepts)
 
-- 所有服务**默认绑定 `127.0.0.1`**，公网暴露需在 `.env` 显式开启
-- `.env` **绝不提交**，已在 `.gitignore`
-- LiveKit API Secret 在生产机和开发机**不要复用**
-- 生产机操作前必读 [SECURITY.md](./SECURITY.md)
+给好奇者 / 新贡献者：RTVoice 怎么工作。
+
+- **完整架构**：[ARCHITECTURE.md](./ARCHITECTURE.md)
+- **引擎选型对比**（为什么用 sherpa / CosyVoice / vLLM）：[ENGINES.md](./ENGINES.md)
+- **设计决策与教训**：[OPERATIONS.md §1 容错矩阵](./OPERATIONS.md) + [ARCHITECTURE.md §7 决策日志](./ARCHITECTURE.md)
+- **版本史**：[CHANGELOG.md](./CHANGELOG.md)
+
+---
+
+## 🗺 现状 / Roadmap
+
+**已完成**（v0.7）：3 service 单 tenant 可用 + 容错完备 + 双向流式 TTS
+
+**进行中**（platform-first 重构 sub-projects）：
+
+- SP1 ✅ 平台定位 + 文档骨架（你现在看到的就是）
+- SP1.5 API 规范 + OpenAPI
+- SP2 Multi-tenant Realtime session（动态 session）
+- SP3 prompt + memory + 同步 transcript
+- SP4 音色克隆 + 语气语调暴露
+- SP5 审计 + 对话记录持久化
+- SP6 用量追踪 + 限流
+- SP7 Management Web UI
+
+详见 [CHANGELOG.md](./CHANGELOG.md) Unreleased 段。
+
+---
+
+## License & 贡献
+
+[LICENSE](./LICENSE) · [CONTRIBUTING.md](./CONTRIBUTING.md)
