@@ -59,20 +59,26 @@ RUN pip install -r requirements.txt
 COPY requirements.cosyvoice.txt /tmp/server-requirements.txt
 RUN pip install -r /tmp/server-requirements.txt
 
-# 我们的服务代码
-WORKDIR /app
-COPY app /app/app
-
-# 入口脚本：首次运行下载模型（~5GB → named volume，重启秒起）
-COPY entrypoint-cosyvoice3.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# 非 root（uid 1001 与 stt-server-gpu 一致）
-# 关键：mkdir 显式创建 mount point 后 chown，让 docker 第一次挂载空 named volume
-# 时继承 1001 ownership——entrypoint 以 appuser 写入 modelscope 下载才能成功
+# --- 缓存边界（v0.7.1）：把"重型 chown -R"放在 COPY app 之前 ---
+# 之前 chown -R /app /opt/venv /opt/CosyVoice 在 COPY app 之后 → code 一改
+# cache 失效，60GB+ recursive chown 跑 ~215s = 3.5min/次。现在只 chown
+# 大目录一次（pip install 之后立刻），后续 COPY 用 --chown 内联设置；code
+# rebuild 只重做最末几层，少 3+min。
+# 关键：mkdir 显式创建 mount point 后 chown，让 docker 第一次挂载空 named
+# volume 时继承 1001 ownership——entrypoint 以 appuser 写入 modelscope 下载
+# 才能成功
 RUN useradd -u 1001 -m appuser \
  && mkdir -p /opt/CosyVoice/pretrained_models \
- && chown -R appuser:appuser /app /opt/venv /opt/CosyVoice
+ && chown -R appuser:appuser /opt/venv /opt/CosyVoice
+
+# 入口脚本（小，少改动）
+COPY --chown=appuser:appuser entrypoint-cosyvoice3.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# 我们的服务代码（最常改动；--chown 内联避免后续单独 chown）
+WORKDIR /app
+COPY --chown=appuser:appuser app /app/app
+
 USER appuser
 
 EXPOSE 9880
