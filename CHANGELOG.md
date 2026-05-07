@@ -12,9 +12,119 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 ## [Unreleased]
 
 待规划：
-- v0.6：迁移到 `livekit-agents` 框架的 `AgentSession` + 框架级 turn detection
-- v0.6：CosyVoice 2 GPU 服务化（替换 Kokoro CPU prod TTS）
-- v0.7+：多音色配置 / 长上下文记忆 / function calling
+- agent-worker 把 LLM token 流直接喂 v0.7 inference_zero_shot generator（享受 150ms 真端到端）
+- v0.7 prod GPU 实测 + tweak
+- 多 agent 实例 / function calling / 长上下文记忆
+
+---
+
+## [0.7.0] — 2026-05-06 — `af919a4` `b658573` `c54f963`
+
+Fun-CosyVoice 3 GPU 变体，与 v0.6 (CosyVoice 2) 并存；新增 WebSocket 双向流式协议。
+
+### Added
+- `services/tts-server/Dockerfile.cosyvoice3` + `app/main_cosyvoice3.py` + `entrypoint-cosyvoice3.sh`
+  - 模型：`FunAudioLLM/Fun-CosyVoice3-0.5B-2512`（~5.6GB，跳过 `llm.rl.pt`）
+  - 类切换 `CosyVoice2` → `CosyVoice3`；构造器去掉 `load_jit`；其余公开 API 不变
+  - admin endpoints (POST/DELETE /voices) Q2 全套继承
+- WebSocket `/tts/stream_ws`（仅 v0.7 端点）
+  - 协议：首帧 JSON metadata → 文本增量帧 N 个 → "EOS"
+  - 服务端 binary PCM chunks + 末帧 `{"type":"done"}`
+  - 三路 Bearer 鉴权与 STT 一致
+  - 同步 generator 桥（async ws msg → sync queue → CosyVoice3 → async pcm queue）
+- `/info` 加 `text_streaming: true` 让 agent-worker 自动检测能力
+- `tts_client.py::open_ws()` + `TTSWSStream` 类（send_text / eos / audio_chunks / aclose）
+- agent-worker `_run_pipeline_ws()`：能力探测命中即走 ws 路径；失败本轮放弃下轮重试
+- `.env.example` 加 v0.7 切换文档（TTS_DOCKERFILE / TTS_IMAGE / TTS_MEM_LIMIT / SKIP_RL_MODEL）
+
+### Changed
+- 协议层向后兼容：v0.6 `POST /tts/stream` 仍然保留，agent 通过 capability 探测选择路径
+
+### Fixed (`c54f963`)
+- 服务端 `/tts/stream_ws`：client abrupt close 后 `send_bytes` 抛 `RuntimeError`（不是 `WebSocketDisconnect`），原 except 没接住 → 循环不 break。修复：合并捕获两种异常。
+- 客户端 barge-in：`finally` 里 `await ws.aclose()` 在外层 task.cancel 时被中断 → close frame 发不出 → server 浪费 GPU。修复：`asyncio.shield(asyncio.wait_for(aclose, timeout=2))`。
+
+### Notes
+- v0.7 与 v0.6 镜像 / named volume 各自独立，**回滚秒级**（删 .env 三行 + restart）
+- WebSocket 设计选择：metadata 用 JSON、文本块纯文本、控制信号 sentinel "EOS"。三种语义共用 text frame，靠"首帧必须 JSON" + "EOS 三字符"区分。简单且 wireshark 友好。
+- CosyVoice 3 内部支持 `tts_text=Generator`，所以未来 agent 把 LLM token 流直接当 generator 传入即可享受 150ms 真端到端，不需要再改 server。
+- API 不变 + 引擎重写：协议层零工作量，仅 5 处 mechanical 修改。
+
+### 验证（autonomous）
+- ✅ 5 条 ws 协议断言（/info、no-auth handshake reject、happy path、subprotocol、bad voice）
+- ✅ 2 条 barge-in 场景（abrupt close mid-stream + 立即 recovery 不 crash）
+- ✅ 11 条 admin endpoint 回归（与 v0.6 等价）
+- ⏳ 真 CosyVoice 3 推理性能 + 150ms 端到端延迟 + TensorRT 10.13 pin 兼容性 → prod GPU 实测
+
+---
+
+## [0.6.2] — 2026-05-06 — `4ad21fc` `82b8628` `3fc9fa1`
+
+容错矩阵收尾批次：LLM 流式硬化 + STT 自动重连 + OPERATIONS.md 文档。
+
+### Added
+- LLM 客户端三类硬化（`4ad21fc`）：
+  - `httpx.Timeout(connect=10, read=30)` 替代 SDK 默认；`read` 在流式下天然变 per-chunk timeout
+  - 0 token 回复（连接成功但 LLM 没说话）→ yield `LLM_FALLBACK_REPLY` 让 agent 不沉默
+  - 已发部分 token 后异常 → 截断（不拼 fallback，避免半句续接很怪）
+  - 新 env：`LLM_CONNECT_TIMEOUT_S` / `LLM_READ_TIMEOUT_S` / `LLM_FALLBACK_REPLY`
+- STT 客户端长连接自愈（`82b8628`）：
+  - 初次 connect：5 次指数退避（1→2→4→8→16s）
+  - reader 检测 ConnectionClosed → finally 调度后台重连任务（asyncio lock 单飞）
+  - 重连期 feed 静默 drop、request_final 立刻返空串
+  - close() 先停 reconnect 再断 ws
+  - 新 env：`STT_CONNECT_RETRIES` / `STT_CONNECT_BACKOFF_INITIAL_S` / `STT_CONNECT_BACKOFF_MAX_S`
+- `OPERATIONS.md` 263 行（`3fc9fa1`）：容错矩阵 + 环境变量速查 + 升级路径 + 排障 cookbook
+
+### Notes
+- "agent silently goes deaf" 是 STT 长连接最致命的失败模式；必须有 reconnect。LLM/TTS 短期 RPC 单次重试就够，STT 必须 reconnect loop。
+- 重连后 sherpa-onnx 是新 stream → 当前 utterance 数据丢失。这是用"丢局部"换"全局可用性"的合理权衡：用户被 agent 没听见会自然重复，比"半句拼半句"产出乱七八糟好得多。
+- 错误恢复有时不是叠加而是**停止**：半句"今天天气"后接"抱歉没听清"会让用户更困惑；保持半句让对方自然要重复才是更好的对话恢复。
+- httpx `read` timeout 用作 per-chunk timeout 比手写 `asyncio.wait_for(__anext__)` 优雅——底层 socket 已在做这个监控。
+
+### 验证（autonomous）
+- ✅ 5 条 LLM 硬化场景（happy / empty / connect-error / mid-stream-error / cancel）
+- ✅ 4 条 STT 重连场景（handshake-retry / drop+reconnect / feed-during-reconnect / total-failure-raises）
+- ⏳ prod 真实容器抖动场景下重连/timeout 的实际触发率与日志噪音
+
+---
+
+## [0.6.1] — 2026-05-06 — `2ce1621` `4bff9f0` `5da290a`
+
+"v0.6 三件套"：LLM prompt 提到 env、CosyVoice voice clone admin API、STT/TTS 对外鉴权 + TLS 模板。让 RTVoice 能给"另一个 RealTime 项目"调用，并允许在不 rebuild 镜像的情况下定制对话风格 / 声音。
+
+### Added — Q1 LLM prompt env-driven (`2ce1621`)
+- `llm_client.py`：`SYSTEM_PROMPT` 改读 `AGENT_SYSTEM_PROMPT` env，留空走默认 30 字短回复
+- `AGENT_LLM_MAX_TOKENS` env（默认 80）控制 LLM 上限
+- `docker-compose.yml` 透传两个 env；改 prompt 只需改 .env + restart agent-worker
+
+### Added — Q2 CosyVoice voice clone admin API (`4bff9f0`)
+- `POST /voices/add`：multipart 上传 reference wav + spk_id + prompt_text → `add_zero_shot_spk` + `save_spkinfo` 持久化
+- `DELETE /voices/{spk_id}`：默认音色保护；删除时同步 spk2info.pt + voices/<id>.wav
+- `TTS_ADMIN_API_KEY` Bearer 鉴权（留空 = endpoints 禁用）
+- 原始 wav 另存到 `voices/` 子目录便于审计/重建（同 named volume）
+- spk_id 路径穿越防护 + wav 大小上限（5MB 默认）
+- `requirements.cosyvoice.txt` 加 `python-multipart`
+
+### Added — Q3 Bearer auth + TLS 模板 (`5da290a`)
+- `RTVOICE_API_KEY` 统一鉴权 STT/TTS：
+  - STT WS：三路 Bearer（Authorization header / `Sec-WebSocket-Protocol: bearer.<KEY>` / `?token=<KEY>` 兜底），失败 close code 4401
+  - TTS HTTP：`/tts/stream` + `/voices` 加 FastAPI Depends 校验
+  - agent-worker 的 STTClient/TTSClient 配套传 api_key
+  - 留空 = 鉴权关闭（dev 默认）；prod 公网暴露必填
+- `docker-compose.api.yml` override：把 STT 9090 + TTS 9880 bind 到宿主
+- `docker-compose.tls.yml` + `caddy/Caddyfile`：Caddy 反代 + 自动 TLS（公网 LE 或内网 'tls internal' 自签）
+
+### Notes
+- 这个 v0.6.1 的核心目标用户是"另一个项目"复用 STT/TTS 引擎
+- `/voices/add` 用 spk2info.pt 持久化走 CosyVoice 内置 `save_spkinfo()`（写 model dir = named volume），重启自动 reload
+- WS 三路 Bearer 因为浏览器不能轻易加 header；subprotocol 是 WebSocket 标准字段不会被中间代理 strip
+
+### 验证（autonomous）
+- ✅ 11 条 admin endpoint 断言（auth / 校验 / add / delete / wav cleanup）
+- ✅ 6 条 HTTP auth 断言（无 token / 错 token / 正确 token × 3 个端点）
+- ✅ 4 条 STT WS auth 断言（header / subprotocol / query / empty bypass）
+- ⏳ Caddy TLS 在公网域名下的 cert auto-renew
 
 ---
 
