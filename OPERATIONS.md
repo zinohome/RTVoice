@@ -1,7 +1,7 @@
 # RTVoice 运维手册
 
 面向**已经部署 RTVoice 的运维者**：怎么升级、怎么排障、各组件失败时会怎么自愈。
-新部署看 [DEPLOY.md](./DEPLOY.md)；安全契约看 [SECURITY.md](./SECURITY.md)；架构看 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+本文档假定读者熟悉 [README](./README.md) 描述的 platform 三个 service。新部署看 [DEPLOY.md](./DEPLOY.md)；安全契约看 [SECURITY.md](./SECURITY.md)；架构看 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 ---
 

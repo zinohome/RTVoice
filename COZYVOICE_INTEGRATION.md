@@ -1,6 +1,6 @@
 # RTVoice → CozyVoice 集成指南
 
-把 RTVoice 用作 CozyVoice 的本地 STT/TTS 后端。
+本文档示范如何把 RTVoice 集成到任意客户端项目作为本地后端。CozyVoice 是其一示例；其他场景（Discord bot / 客服系统 / 自动化 / 移动 app）参照同样模式。
 
 **对象读者**：CozyVoice 项目的开发者。前提：RTVoice prod 已部署（按 [DEPLOY.md](./DEPLOY.md)），跑在 v0.7.0+。
 

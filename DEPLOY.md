@@ -1,6 +1,6 @@
 # RTVoice 部署手册
 
-本文档说明 RTVoice 项目从开发机到生产机的部署流程、目录约定、配置切换方式与运维操作。
+本文档说明 RTVoice voice services platform 从开发机到生产机的部署流程、目录约定、配置切换方式与运维操作。
 **部署前必读 [SECURITY.md](./SECURITY.md)**。
 
 ---
