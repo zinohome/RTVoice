@@ -25,7 +25,7 @@ docker compose --profile dev up -d
 
 | 想试什么 | 怎么试 |
 |---|---|
-| **STT**（语音转文字）| [测试页](http://127.0.0.1:8000/) 录一段；或编程方式见 [STT 集成示例](./COZYVOICE_INTEGRATION.md#stt) |
+| **STT**（语音转文字）| [测试页](http://127.0.0.1:8000/) 录一段；或编程方式见 [STT 集成示例](./COZYVOICE_INTEGRATION.md) |
 | **TTS**（文字转语音）| `curl -X POST http://127.0.0.1:9880/tts/stream -d '{"text":"你好"}' \| ffplay -f s16le -ar 24000 -` |
 | **Realtime 对话**| 浏览器 [测试页](http://127.0.0.1:8000/) → 加入语音 → 说话 |
 
@@ -41,7 +41,7 @@ docker compose --profile dev up -d
 - **引擎**：sherpa-onnx Streaming Zipformer 中英文
 - **协议**：PCM int16 LE 16kHz mono in → JSON `{partial,final,error}` events out
 - **场景**：实时转写、麦克风听写、对话录音
-- → [集成示例](./COZYVOICE_INTEGRATION.md#stt) · [API spec](./docs/api/stt.md)（即将上线）
+- → [集成示例](./COZYVOICE_INTEGRATION.md) · [API spec](./docs/api/stt.md)（即将上线）
 
 ### 🔊 TTS — 流式语音合成 + 音色克隆
 
@@ -49,7 +49,7 @@ docker compose --profile dev up -d
 - **引擎**：Fun-CosyVoice 3 (0.5B GPU)
 - **协议**：text in（HTTP body 或 WS 流）→ chunked PCM int16 LE 24kHz mono out
 - **特性**：音色克隆（POST /voices/add）、speed 0.5-2.0
-- → [集成示例](./COZYVOICE_INTEGRATION.md#tts) · [API spec](./docs/api/tts.md)（即将上线）
+- → [集成示例](./COZYVOICE_INTEGRATION.md) · [API spec](./docs/api/tts.md)（即将上线）
 
 ### 💬 Realtime Voice — 实时语音对话
 
@@ -58,7 +58,7 @@ docker compose --profile dev up -d
 - **引擎**：内部 STT (sherpa) + LLM (Ollama / vLLM) + TTS (Fun-CosyVoice 3)
 - **特性**：双向流式、prompt+memory、同步 transcript、换音色、barge-in
 - **高级模式**：LiveKit endpoint 可选保留（适合 end-user 跨公网移动场景）
-- → [集成示例](./COZYVOICE_INTEGRATION.md#realtime) · [API spec](./docs/api/sessions.md)（即将上线）
+- → [集成示例](./COZYVOICE_INTEGRATION.md) · [API spec](./docs/api/sessions.md)（即将上线）
 
 ---
 
