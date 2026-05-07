@@ -13,8 +13,66 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 待规划：
 - agent-worker 把 LLM token 流直接喂 v0.7 inference_zero_shot generator（享受 150ms 真端到端）
-- v0.7 prod GPU 实测 + tweak
+- v0.7 prod GPU 实测 + tweak（浏览器端 UX 验证、长稳测试、subjective 音质对比）
 - 多 agent 实例 / function calling / 长上下文记忆
+- v0.6 Dockerfile chown 优化跟随 prod build 验证（仅理论 trust，未实测）
+
+---
+
+## [0.7.1] — 2026-05-07 — `8ed9a4d` `45fbf83` `c7d4556`
+
+Build 性能优化：Dockerfile 层重排让 code-only rebuild 从 ~3.5min 降到 ~1s（240×）。同步把 v0.6 Dockerfile.cosyvoice 也改了，回滚后享受同优化。
+
+### Added
+- `OPERATIONS.md` §8 Build 性能 & Docker 缓存（54 行）：
+  - 黄金法则：易变层放后面、重型操作放前面
+  - 实测对比表（215s → 1s）
+  - BuildKit content-hash 陷阱：`touch` 不触发 cache miss，必须改文件内容
+  - chown -R 在 60GB venv 上 = 215s 的真实数字
+  - 不要主动 prune build cache（用 `--keep-storage` 留水位）
+
+### Changed
+- `services/tts-server/Dockerfile.cosyvoice3` (`8ed9a4d`)：
+  - useradd + `chown -R /opt/venv /opt/CosyVoice` 提前到 COPY app 之前（缓存稳定）
+  - COPY 用 `--chown=appuser:appuser` 内联设置 ownership
+- `services/tts-server/Dockerfile.cosyvoice` (`45fbf83`)：v0.6 同样重排，与 v0.7.1 对齐
+
+### Notes
+- BuildKit (Docker 23+) 用 content-hash 而非 mtime 判 cache 失效——从老 docker build 思维迁移时常见误诊源（`touch` 不触发 cache miss）。测优化时必须改文件内容（`echo / sed -i`）。
+- 这种"格式上一样、效果重大不同"的改动 transitive trust 合理：v0.7.1 已实测（1s code-only rebuild），v0.6 同 pattern 推断同效。
+- v0.6 改动是 preventive maintenance，prod 当前跑 v0.7 不影响；用户某天回滚 v0.6 + 改 prompt 后 rebuild 时享受。
+
+### 验证（autonomous，prod GPU）
+- ✅ Dockerfile 重排后首次 rebuild 8.75 min（chown 跑一次）
+- ✅ 无改动 rebuild 1s（cache 全命中）
+- ✅ 真改动 rebuild 1s（cache 在新位置全命中）
+
+---
+
+## [0.7-fix-1] — 2026-05-07 — `da78e29`
+
+prod 实测发现 bug：CosyVoice 3 LLM 硬要求输入序列含 `<|endofprompt|>` token (151646)。
+
+### Fixed
+- `services/tts-server/app/main_cosyvoice3.py`：`DEFAULT_PROMPT_TEXT` 末尾加 `<|endofprompt|>`：
+  ```python
+  # 之前
+  DEFAULT_PROMPT_TEXT = "希望你以后能够做的比我还好呦。"
+  # 之后
+  DEFAULT_PROMPT_TEXT = "希望你以后能够做的比我还好呦。<|endofprompt|>"
+  ```
+
+### Notes
+- 触发条件：v0.7.0 prod 启动后 `/tts/stream` 第一次合成请求 hang 60s → 看 tts-server 日志才发现 LLM thread crash:
+  ```
+  AssertionError: <|endofprompt|> not detected in CosyVoice3 text or prompt_text
+  ```
+- 根因：`cosyvoice/llm/llm.py:479` 在 v3 LLM `inference()` 里硬断言 token 151646 必须在输入序列中。v3 frontend 的 `text_normalize` / `_extract_text_token` 都不自动添加；caller 必须显式拼。v2 不要求此 token。这是**undocumented contract** —— v3 README/runtime demo 都没写明，只在 `cosyvoice/utils/common.py` 方言指令模板里能看出该 token 的用法。
+- 沙盒 mock 测试覆盖不到：`FakeCosyVoice3` 在我们的协议测试里不真跑 LLM forward，断言不触发。**必须 prod GPU 实测**才暴露——OPERATIONS.md §3.2 早就标"真 CosyVoice 3 推理性能 → prod GPU 实测" ⏳，一发即中。
+
+### 升级影响
+- 需 push + git pull + rebuild tts-server（image 重做小步骤，~6 min，包含 chown -R 60GB 一次）
+- 已纳入 [PROD_VALIDATION.md §3](./PROD_VALIDATION.md)
 
 ---
 
