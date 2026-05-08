@@ -16,7 +16,7 @@
 
 ### 鉴权
 
-三路任一（详见 [CONVENTIONS.md §7](./CONVENTIONS.md#§7-鉴权)）：
+三路任一（详见 [CONVENTIONS.md §7](CONVENTIONS.md#§7-鉴权)）：
 - Header: `Authorization: Bearer <RTVOICE_API_KEY>`
 - Subprotocol: `Sec-WebSocket-Protocol: bearer.<KEY>`
 - Query: `?token=<KEY>`

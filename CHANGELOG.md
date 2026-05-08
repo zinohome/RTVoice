@@ -19,6 +19,55 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.8.0] — 2026-05-08 — SP1.5 API 规范 + endpoint refactor
+
+平台化重构第二阶段：API 路径加 `/v1/` 前缀、错误格式统一、写完整 API 规范。
+
+### Added
+
+- `docs/api/CONVENTIONS.md` — 13 章节 API 规范（路径风格 / 版本 / 错误格式 / 鉴权 / headers / capability discovery / deprecation 流程 / 现有 endpoint 迁移表）
+- `docs/api/stt.md` `tts.md` `sessions.md` — 每 service 完整 API 文档（含 WS 协议描述、error codes、Python+Node 例子）
+- 各 service 加 `app/error_schema.py`：`ErrorResponse` Pydantic + `api_error()` helper + `http_exception_handler()`
+
+### Changed (BREAKING)
+
+| 老路径 | 新路径 |
+|---|---|
+| `WS /asr` | `WS /v1/asr` |
+| `POST /tts/stream` | `POST /v1/tts/stream` |
+| `WS /tts/stream_ws` | `WS /v1/tts/stream_ws` |
+| `GET /voices` | `GET /v1/voices` |
+| `POST /voices/add` | `POST /v1/voices` (RESTful collection，去掉 verb) |
+| `DELETE /voices/{spk_id}` | `DELETE /v1/voices/{spk_id}` |
+| `POST /token` | `POST /v1/tokens` (单数→复数) |
+
+**所有 4xx/5xx 响应 body** 改为 `{type:"error",code:"<service>.<reason>",message,request_id}`。
+
+`/health` `/metrics` `/info` `/openapi.json` 保持原路径（运维面无版本）。
+
+### Deprecated / Removed
+
+老路径**直接删**（hard cutover；CozyVoice 未接入，无外部 consumer）。
+
+未来 breaking change 改为软迁移：response 加 `Deprecation: true` + `Sunset: <RFC HTTP date>`，≥1 release 周期后才返 410。
+
+### Notes
+
+- agent-worker `STT_WS_URL` 默认值 + `tts_client.py` hardcoded 路径同步改 `/v1/`
+- `services/token-server/static/index.html` 改 `/token` → `/v1/tokens`
+- 跨文档（README / ARCHITECTURE / OPERATIONS / COZYVOICE_INTEGRATION）所有 endpoint 引用同步更新
+
+详见 [SP1.5 设计文档](./docs/superpowers/specs/2026-05-08-sp1.5-api-conventions-design.md) + [实施 plan](./docs/superpowers/plans/2026-05-08-sp1.5-api-conventions.md)。
+
+### 验证（autonomous）
+
+- ✅ FastAPI auto-gen `/openapi.json` 每 service 含新路径
+- ✅ 沙盒 mock test：3 个 tts main_*.py + stt-server + token-server 路径 routes 验证
+- ✅ 全文档链接 lint 0 [FAIL]
+- ⏳ prod 集成测试 + 浏览器对话验收（待 user 在 SP1.5 完工后做）
+
+---
+
 ## [0.7.1] — 2026-05-07 — `8ed9a4d` `45fbf83` `c7d4556`
 
 Build 性能优化：Dockerfile 层重排让 code-only rebuild 从 ~3.5min 降到 ~1s（240×）。同步把 v0.6 Dockerfile.cosyvoice 也改了，回滚后享受同优化。
