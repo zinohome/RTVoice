@@ -51,6 +51,7 @@ import time
 import numpy as np
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from app.error_schema import ErrorResponse, api_error, http_exception_handler
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
@@ -77,7 +78,7 @@ def _check_client_auth(authorization: str | None = Header(None)) -> None:
     if not RTVOICE_API_KEY:
         return
     if authorization != f"Bearer {RTVOICE_API_KEY}":
-        raise HTTPException(401, "invalid or missing Bearer token")
+        raise api_error(401, "auth.invalid_token", "invalid or missing Bearer token")
 
 # 句子切分正则：中英文标点都吃
 _SENTENCE_SPLIT = re.compile(r'(?<=[。！？\.\!\?])\s*|(?<=[，；,;])\s+')
@@ -125,6 +126,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RTVoice TTS Server", version="0.5.0", lifespan=lifespan)
+app.add_exception_handler(HTTPException, http_exception_handler())
 
 # --- Prometheus metrics ---
 SYNTH_PHRASES = Counter("rtvoice_tts_phrases_total", "Phrases synthesized")
@@ -139,7 +141,7 @@ PHRASE_RTF = Histogram(
     "Per-phrase real-time factor (audio_seconds / synth_seconds)",
     buckets=(0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0),
 )
-Instrumentator(excluded_handlers=["/health", "/metrics", "/tts/stream"]).instrument(app).expose(app)
+Instrumentator(excluded_handlers=["/health", "/metrics", "/v1/tts/stream"]).instrument(app).expose(app)
 
 
 class TTSRequest(BaseModel):
@@ -167,10 +169,10 @@ async def info() -> dict:
     }
 
 
-@app.get("/voices")
+@app.get("/v1/voices")
 async def voices(_auth: None = Depends(_check_client_auth)) -> dict:
     if _kokoro is None:
-        raise HTTPException(503, "Kokoro 尚未加载")
+        raise api_error(503, "tts.not_ready", "Kokoro 尚未加载")
     return {"voices": sorted(_kokoro.get_voices())}
 
 
@@ -222,14 +224,14 @@ async def _synthesize_stream(req: TTSRequest, request: Request) -> AsyncIterator
             continue
 
 
-@app.post("/tts/stream")
+@app.post("/v1/tts/stream")
 async def tts_stream(req: TTSRequest, request: Request,
                      _auth: None = Depends(_check_client_auth)):
     if _kokoro is None:
-        raise HTTPException(503, "Kokoro 尚未加载")
+        raise api_error(503, "tts.not_ready", "Kokoro 尚未加载")
     voice = req.voice or DEFAULT_VOICE
     if voice not in _kokoro.get_voices():
-        raise HTTPException(400, f"未知音色 voice={voice!r}")
+        raise api_error(400, "tts.voice_not_found", f"未知音色 voice={voice!r}")
     return StreamingResponse(
         _synthesize_stream(req, request),
         media_type="application/octet-stream",
@@ -241,6 +243,3 @@ async def tts_stream(req: TTSRequest, request: Request,
     )
 
 
-@app.exception_handler(HTTPException)
-async def _http_exc(request: Request, exc: HTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})

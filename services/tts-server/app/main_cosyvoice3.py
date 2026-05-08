@@ -51,6 +51,7 @@ sys.path.insert(0, COSYVOICE_DIR)
 sys.path.insert(0, os.path.join(COSYVOICE_DIR, "third_party/Matcha-TTS"))
 
 from cosyvoice.cli.cosyvoice import CosyVoice3  # noqa: E402
+from app.error_schema import ErrorResponse, api_error, http_exception_handler
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -170,6 +171,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RTVoice TTS Server (Fun-CosyVoice 3)", version="0.7.0", lifespan=lifespan)
+app.add_exception_handler(HTTPException, http_exception_handler())
 
 # Prometheus 指标（与 Kokoro 版同名，dashboard 不变）
 SYNTH_PHRASES = Counter("rtvoice_tts_phrases_total", "Phrases synthesized")
@@ -184,7 +186,7 @@ PHRASE_RTF = Histogram(
     "Per-phrase real-time factor (audio_seconds / synth_seconds)",
     buckets=(0.5, 1.0, 2.0, 5.0, 10.0, 20.0),
 )
-Instrumentator(excluded_handlers=["/health", "/metrics", "/tts/stream"]).instrument(app).expose(app)
+Instrumentator(excluded_handlers=["/health", "/metrics", "/v1/tts/stream"]).instrument(app).expose(app)
 
 
 class TTSRequest(BaseModel):
@@ -208,7 +210,7 @@ def _check_client_auth(authorization: str | None = Header(None)) -> None:
     if not RTVOICE_API_KEY:
         return  # dev：未设 key 跳过
     if authorization != f"Bearer {RTVOICE_API_KEY}":
-        raise HTTPException(401, "invalid or missing Bearer token")
+        raise api_error(401, "auth.invalid_token", "invalid or missing Bearer token")
 
 
 def _ws_auth_ok(ws: WebSocket) -> bool:
@@ -245,7 +247,7 @@ async def info() -> dict:
     }
 
 
-@app.get("/voices")
+@app.get("/v1/voices")
 async def voices(_auth: None = Depends(_check_client_auth)) -> dict:
     return {"voices": _cosyvoice_voices}
 
@@ -354,16 +356,14 @@ async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: st
                 pass
 
 
-@app.post("/tts/stream")
+@app.post("/v1/tts/stream")
 async def tts_stream(req: TTSRequest, request: Request,
                      _auth: None = Depends(_check_client_auth)):
     if _cosyvoice is None:
-        raise HTTPException(503, "CosyVoice 尚未加载")
+        raise api_error(503, "tts.not_ready", "CosyVoice 尚未加载")
     voice = _resolve_voice(req.voice)
     if _cosyvoice_voices and voice not in _cosyvoice_voices:
-        raise HTTPException(
-            400, f"未知音色 voice={req.voice!r} → {voice!r}; 可用={_cosyvoice_voices}"
-        )
+        raise api_error(400, "tts.voice_not_found", f"未知音色 voice={req.voice!r} → {voice!r}; 可用={_cosyvoice_voices}")
     return StreamingResponse(
         _synthesize_stream(req, request),
         media_type="application/octet-stream",
@@ -401,7 +401,7 @@ class _SendError:
         self.msg = msg
 
 
-@app.websocket("/tts/stream_ws")
+@app.websocket("/v1/tts/stream_ws")
 async def tts_stream_ws(ws: WebSocket) -> None:
     if _cosyvoice is None:
         await ws.close(code=1013, reason="CosyVoice 尚未加载")
@@ -555,20 +555,20 @@ async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
 
 def _check_admin_auth(authorization: str | None = Header(None)) -> None:
     if not ADMIN_API_KEY:
-        raise HTTPException(403, "admin endpoints disabled (TTS_ADMIN_API_KEY 未设置)")
+        raise api_error(403, "auth.admin_disabled", "admin endpoints disabled (TTS_ADMIN_API_KEY 未设置)")
     expected = f"Bearer {ADMIN_API_KEY}"
     if authorization != expected:
-        raise HTTPException(401, "invalid or missing Bearer token")
+        raise api_error(401, "auth.invalid_token", "invalid or missing Bearer token")
 
 
 def _validate_spk_id(spk_id: str) -> str:
     spk_id = spk_id.strip()
     if not SPK_ID_RE.match(spk_id):
-        raise HTTPException(400, "spk_id 只允许字母数字下划线/中日韩字符/连字符，长度 1-64")
+        raise api_error(400, "tts.invalid_spk_id", "spk_id 只允许字母数字下划线/中日韩字符/连字符，长度 1-64")
     return spk_id
 
 
-@app.post("/voices/add")
+@app.post("/v1/voices", status_code=201)
 async def add_voice(
     spk_id: str = Form(..., description="新音色 ID（不能与现有冲突）"),
     prompt_text: str = Form(..., min_length=1, max_length=200,
@@ -577,18 +577,18 @@ async def add_voice(
     _auth: None = Depends(_check_admin_auth),
 ) -> dict:
     if _cosyvoice is None:
-        raise HTTPException(503, "CosyVoice 尚未加载")
+        raise api_error(503, "tts.not_ready", "CosyVoice 尚未加载")
 
     spk_id = _validate_spk_id(spk_id)
     if spk_id in _cosyvoice.list_available_spks():
-        raise HTTPException(409, f"音色 {spk_id!r} 已存在；先 DELETE 再 POST")
+        raise api_error(409, "tts.voice_already_exists", f"音色 {spk_id!r} 已存在；先 DELETE 再 POST")
 
     # 读到内存校验（5 MB 上限够 30 秒 16k mono 16-bit wav）
     raw = await file.read()
     if len(raw) > MAX_WAV_BYTES:
-        raise HTTPException(413, f"wav 超过 {MAX_WAV_BYTES} 字节上限")
+        raise api_error(413, "tts.wav_too_large", f"wav 超过 {MAX_WAV_BYTES} 字节上限")
     if len(raw) < 1024:
-        raise HTTPException(400, "wav 文件过小，疑似无效")
+        raise api_error(400, "tts.invalid_wav", "wav 文件过小，疑似无效")
 
     # 持久化到 named volume；先写再注册，失败时清理
     wav_path = VOICES_WAV_DIR / f"{spk_id}.wav"
@@ -599,7 +599,7 @@ async def add_voice(
         try:
             waveform, sr = torchaudio.load(str(wav_path))
         except Exception as e:
-            raise HTTPException(400, f"wav 解码失败：{e}")
+            raise api_error(400, "tts.wav_decode_failed", f"wav 解码失败：{e}")
         log.info("[admin] add voice spk_id=%s sr=%d duration=%.2fs",
                  spk_id, sr, waveform.shape[-1] / sr)
 
@@ -615,7 +615,7 @@ async def add_voice(
     except Exception as e:
         wav_path.unlink(missing_ok=True)
         log.exception("[admin] add voice 失败")
-        raise HTTPException(500, f"注册失败：{e}")
+        raise api_error(500, "tts.register_failed", f"注册失败：{e}")
 
     # 刷新 voices 列表
     global _cosyvoice_voices
@@ -623,18 +623,18 @@ async def add_voice(
     return {"spk_id": spk_id, "voice_count": len(_cosyvoice_voices)}
 
 
-@app.delete("/voices/{spk_id}")
+@app.delete("/v1/voices/{spk_id}")
 async def delete_voice(
     spk_id: str,
     _auth: None = Depends(_check_admin_auth),
 ) -> dict:
     if _cosyvoice is None:
-        raise HTTPException(503, "CosyVoice 尚未加载")
+        raise api_error(503, "tts.not_ready", "CosyVoice 尚未加载")
     spk_id = _validate_spk_id(spk_id)
     if spk_id == DEFAULT_SPK_ID:
-        raise HTTPException(400, f"默认音色 {DEFAULT_SPK_ID!r} 不可删除")
+        raise api_error(400, "tts.default_voice_protected", f"默认音色 {DEFAULT_SPK_ID!r} 不可删除")
     if spk_id not in _cosyvoice.list_available_spks():
-        raise HTTPException(404, f"音色 {spk_id!r} 不存在")
+        raise api_error(404, "tts.voice_not_found", f"音色 {spk_id!r} 不存在")
 
     # 从 frontend.spk2info pop（CosyVoice 没暴露 delete API，直接操作 dict）
     spk2info = _cosyvoice.frontend.spk2info
@@ -651,6 +651,3 @@ async def delete_voice(
     return {"spk_id": spk_id, "deleted": True, "voice_count": len(_cosyvoice_voices)}
 
 
-@app.exception_handler(HTTPException)
-async def _http_exc(request: Request, exc: HTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
