@@ -94,6 +94,60 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------
+  # Realtime Voice Service — multi-tenant session API + WS gateway (SP2)
+  # ---------------------------------------------------------------
+  realtime-server:
+    build:
+      context: ./services/realtime-server
+      dockerfile: Dockerfile
+    image: rtvoice/realtime-server:v0.9.0
+    container_name: rtvoice-realtime
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    networks: [rtvoice_net]
+    depends_on:
+      stt-server:
+        condition: service_healthy
+      tts-server:
+        condition: service_healthy
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
+      STT_WS_URL: ws://stt-server:9090/v1/asr
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://llm-server:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5:1.5b}
+      LLM_API_KEY: ollama
+      TTS_BASE_URL: http://tts-server:9880
+      PUBLIC_WS_BASE: ${PUBLIC_WS_BASE:-ws://realtime-server:9000}
+      AGENT_SYSTEM_PROMPT: ${AGENT_SYSTEM_PROMPT:-}
+      AGENT_LLM_MAX_TOKENS: ${AGENT_LLM_MAX_TOKENS:-80}
+      RTVOICE_MAX_CONCURRENT_SESSIONS: ${RTVOICE_MAX_CONCURRENT_SESSIONS:-5}
+      RTVOICE_SESSION_QUEUE_DEPTH: ${RTVOICE_SESSION_QUEUE_DEPTH:-0}
+      RTVOICE_SESSION_CREATE_TIMEOUT_S: ${RTVOICE_SESSION_CREATE_TIMEOUT_S:-60}
+      RTVOICE_SESSION_IDLE_TIMEOUT_S: ${RTVOICE_SESSION_IDLE_TIMEOUT_S:-30}
+      RTVOICE_SESSION_MAX_LIFETIME_S: ${RTVOICE_SESSION_MAX_LIFETIME_S:-1800}
+      RTVOICE_WS_DISCONNECT_GRACE_S: ${RTVOICE_WS_DISCONNECT_GRACE_S:-0}
+      RTVOICE_TURN_TIMEOUT_S: ${RTVOICE_TURN_TIMEOUT_S:-60}
+    expose:
+      - "9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9000/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "30m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------
   # Agent Worker — v0.2 mock 引擎内嵌；v0.4+ 迁移到 livekit-agents 框架
   # ---------------------------------------------------------------
   agent-worker:
