@@ -26,7 +26,7 @@ docker compose --profile dev up -d
 | 想试什么 | 怎么试 |
 |---|---|
 | **STT**（语音转文字）| [测试页](http://127.0.0.1:8000/) 录一段；或编程方式见 [STT 集成示例](./COZYVOICE_INTEGRATION.md) |
-| **TTS**（文字转语音）| `curl -X POST http://127.0.0.1:9880/tts/stream -d '{"text":"你好"}' \| ffplay -f s16le -ar 24000 -` |
+| **TTS**（文字转语音）| `curl -X POST http://127.0.0.1:9880/v1/tts/stream -d '{"text":"你好"}' \| ffplay -f s16le -ar 24000 -` |
 | **Realtime 对话**| 浏览器 [测试页](http://127.0.0.1:8000/) → 加入语音 → 说话 |
 
 **首次启动注意**：LLM (Ollama) 需要 `ollama pull qwen2.5:1.5b`（约 1GB）。完整下好后约 3-5 分钟可对话。prod GPU 部署见 [DEPLOY.md](./DEPLOY.md)。
@@ -37,7 +37,7 @@ docker compose --profile dev up -d
 
 ### 🎤 STT — 流式语音识别
 
-- **接口**：WS `/asr`
+- **接口**：WS `/v1/asr`
 - **引擎**：sherpa-onnx Streaming Zipformer 中英文
 - **协议**：PCM int16 LE 16kHz mono in → JSON `{partial,final,error}` events out
 - **场景**：实时转写、麦克风听写、对话录音
@@ -45,15 +45,15 @@ docker compose --profile dev up -d
 
 ### 🔊 TTS — 流式语音合成 + 音色克隆
 
-- **接口**：HTTP POST `/tts/stream`（单次）+ WS `/tts/stream_ws`（双向流式）
+- **接口**：HTTP POST `/v1/tts/stream`（单次）+ WS `/v1/tts/stream_ws`（双向流式）
 - **引擎**：Fun-CosyVoice 3 (0.5B GPU)
 - **协议**：text in（HTTP body 或 WS 流）→ chunked PCM int16 LE 24kHz mono out
-- **特性**：音色克隆（POST /voices/add）、speed 0.5-2.0
+- **特性**：音色克隆（POST /v1/voices）、speed 0.5-2.0
 - → [集成示例](./COZYVOICE_INTEGRATION.md) · [API spec](./docs/api/tts.md)（即将上线）
 
 ### 💬 Realtime Voice — 实时语音对话
 
-- **接口**：HTTP POST `/sessions` 创建 + WS `/v1/realtime/{session_id}` 连接
+- **接口**：HTTP POST `/v1/sessions` 创建 + WS `/v1/realtime/{session_id}` 连接
 - **协议**：客户端发 PCM in / 收 PCM + transcript events out（OpenAI Realtime 风格）
 - **引擎**：内部 STT (sherpa) + LLM (Ollama / vLLM) + TTS (Fun-CosyVoice 3)
 - **特性**：双向流式、prompt+memory、同步 transcript、换音色、barge-in

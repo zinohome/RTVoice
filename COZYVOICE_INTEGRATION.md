@@ -43,7 +43,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod \
                up -d stt-server tts-server agent-worker
 ```
 
-> 验证：`curl -i http://127.0.0.1:9090/asr`（无 token）应该 → 拒绝 / 4401。
+> 验证：`curl -i http://127.0.0.1:9090/v1/asr`（无 token）应该 → 拒绝 / 4401。
 
 ### 2.2 留一个 docker network 名（CozyVoice 要 join）
 
@@ -74,7 +74,7 @@ services:
       - default
       - rtvoice_net      # 加入 RTVoice network
     environment:
-      RTVOICE_STT_URL: ws://stt-server:9090/asr
+      RTVOICE_STT_URL: ws://stt-server:9090/v1/asr
       RTVOICE_TTS_URL: http://tts-server:9880
       RTVOICE_API_KEY: ${RTVOICE_API_KEY}
       # 默认音色（可改）
@@ -110,12 +110,12 @@ print(r.read().decode())
 |---|---|---|---|
 | 健康检查 | GET | `/health` | 无 |
 | 服务信息 | GET | `/info` | 无（公开元数据） |
-| STT 流式识别 | WS | `/asr` | Bearer |
-| TTS 单次合成 | POST | `/tts/stream` | Bearer |
-| **TTS 双向流式** | **WS** | **`/tts/stream_ws`** | **Bearer** |
-| 列出音色 | GET | `/voices` | Bearer |
-| 注册音色（admin） | POST | `/voices/add` | TTS_ADMIN_API_KEY |
-| 删除音色（admin） | DELETE | `/voices/{id}` | TTS_ADMIN_API_KEY |
+| STT 流式识别 | WS | `/v1/asr` | Bearer |
+| TTS 单次合成 | POST | `/v1/tts/stream` | Bearer |
+| **TTS 双向流式** | **WS** | **`/v1/tts/stream_ws`** | **Bearer** |
+| 列出音色 | GET | `/v1/voices` | Bearer |
+| 注册音色（admin） | POST | `/v1/voices` | TTS_ADMIN_API_KEY |
+| 删除音色（admin） | DELETE | `/v1/voices/{id}` | TTS_ADMIN_API_KEY |
 
 ### 鉴权方式
 
@@ -198,7 +198,7 @@ class RTVoiceTTS:
             'lang': 'cmn',
             'speed': speed,
         }
-        async with self._client.stream('POST', f'{self.base_url}/tts/stream',
+        async with self._client.stream('POST', f'{self.base_url}/v1/tts/stream',
                                        json=payload, headers=headers) as r:
             r.raise_for_status()
             async for chunk in r.aiter_bytes(chunk_size=4096):
@@ -231,7 +231,7 @@ class RTVoiceTTSStream:
     def __init__(self, base_url=None, api_key=None):
         # 把 http(s) URL 转 ws(s)
         url = base_url or os.environ['RTVOICE_TTS_URL']
-        self.ws_url = url.replace('http://', 'ws://', 1).replace('https://', 'wss://', 1) + '/tts/stream_ws'
+        self.ws_url = url.replace('http://', 'ws://', 1).replace('https://', 'wss://', 1) + '/v1/tts/stream_ws'
         self.api_key = api_key or os.environ.get('RTVOICE_API_KEY', '').strip()
 
     async def synth_streaming(self, text_iter, voice='default_zh_female', speed=1.0):
@@ -322,7 +322,7 @@ async def conversation_round(user_pcm_16k: bytes) -> bytes:
 ffmpeg -i alice.mp3 -ar 16000 -ac 1 -sample_fmt s16 alice_ref.wav
 
 # 通过 admin API 注册
-curl -X POST http://127.0.0.1:9880/voices/add \
+curl -X POST http://127.0.0.1:9880/v1/voices \
   -H "Authorization: Bearer $TTS_ADMIN_API_KEY" \
   -F spk_id=alice \
   -F prompt_text="参考音频对应的文字（≥3秒发音内容）" \
@@ -361,7 +361,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml \
 
 CozyVoice 端 URL：
 ```
-RTVOICE_STT_URL=ws://127.0.0.1:9090/asr
+RTVOICE_STT_URL=ws://127.0.0.1:9090/v1/asr
 RTVOICE_TTS_URL=http://127.0.0.1:9880
 ```
 
@@ -375,7 +375,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml \
 
 CozyVoice 端：
 ```
-RTVOICE_STT_URL=wss://192.168.66.163/asr
+RTVOICE_STT_URL=wss://192.168.66.163/v1/asr
 RTVOICE_TTS_URL=https://192.168.66.163
 ```
 首次需信任 caddy 自签 root CA：
@@ -408,7 +408,7 @@ Caddy 自动 ACME 申请 cert（需开放 80/443 公网）。
 | WS 连接立刻 close（4401）| Bearer 不对 / 三路都没附带 | 看 stt-server log `WS 鉴权失败 client=...` |
 | TTS WS 收到 `{"type":"error","message":"..."}`  | server 端推理失败 | `docker logs rtvoice-tts | tail` 看具体异常 |
 | CosyVoice 3 延迟没明显比 v0.6 快 | agent 不是真喂 generator / GPU 显存满 | `nvidia-smi`；改 server log 看 `append text token / wait for more` 是否触发 |
-| 音色 `unknown voice 'alice'` | 没注册 | `curl /voices` 看注册的音色清单 |
+| 音色 `unknown voice 'alice'` | 没注册 | `curl /v1/voices` 看注册的音色清单 |
 
 更深入排障 → [OPERATIONS.md §4](./OPERATIONS.md)
 
@@ -416,7 +416,7 @@ Caddy 自动 ACME 申请 cert（需开放 80/443 公网）。
 
 ## 9. 接口契约稳定性
 
-- **HTTP/WS endpoint 路径**：稳定（`/asr` `/tts/stream` `/tts/stream_ws` `/voices/*`）
+- **HTTP/WS endpoint 路径**：稳定（`/v1/asr` `/v1/tts/stream` `/v1/tts/stream_ws` `/v1/voices/*`）
 - **PCM 输出格式**：稳定（24kHz int16 LE mono）
 - **Bearer 鉴权方式**：稳定
 - **JSON event types**（`partial`/`final`/`error`/`done`）：稳定

@@ -47,7 +47,7 @@
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `RTVOICE_API_KEY` | 空（鉴权关）| STT WS + TTS HTTP/WS Bearer；公网暴露必填 |
-| `TTS_ADMIN_API_KEY` | 空（admin 关）| `/voices/add` `/voices/{id}` 单独 key |
+| `TTS_ADMIN_API_KEY` | 空（admin 关）| `/v1/voices` `/voices/{id}` 单独 key |
 
 ### 2.3 容错调参（v0.6.2+）
 
@@ -93,9 +93,9 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml \
 **冒烟测试**：
 ```bash
 # 应 401（无 token）
-curl -i http://127.0.0.1:9880/voices
+curl -i http://127.0.0.1:9880/v1/voices
 # 加 token 应 200
-curl -i -H "Authorization: Bearer $RTVOICE_API_KEY" http://127.0.0.1:9880/voices
+curl -i -H "Authorization: Bearer $RTVOICE_API_KEY" http://127.0.0.1:9880/v1/voices
 # agent-worker 日志应有 [TTS-probe] backend=cosyvoice2 text_streaming=False
 docker logs rtvoice-agent | grep TTS-probe
 ```
@@ -180,7 +180,7 @@ docker compose ... up -d agent-worker
 python3 -c "
 import asyncio, websockets, json
 async def t():
-  async with websockets.connect('ws://127.0.0.1:9880/tts/stream_ws',
+  async with websockets.connect('ws://127.0.0.1:9880/v1/tts/stream_ws',
     additional_headers={'Authorization':'Bearer $RTVOICE_API_KEY'}) as ws:
     await ws.send(json.dumps({'voice':'default_zh_female'}))
     await ws.send('你好')
@@ -205,7 +205,7 @@ asyncio.run(t())
 ffmpeg -i input.mp3 -ar 16000 -ac 1 -sample_fmt s16 ref.wav
 
 # POST 注册
-curl -X POST http://127.0.0.1:9880/voices/add \
+curl -X POST http://127.0.0.1:9880/v1/voices \
   -H "Authorization: Bearer $TTS_ADMIN_API_KEY" \
   -F spk_id=alice \
   -F prompt_text="参考音频对应的文本（≥3 秒发音内容）" \
@@ -213,11 +213,11 @@ curl -X POST http://127.0.0.1:9880/voices/add \
 
 # 验证 + 用
 curl -s -H "Authorization: Bearer $RTVOICE_API_KEY" \
-  http://127.0.0.1:9880/voices | jq
+  http://127.0.0.1:9880/v1/voices | jq
 # .env 改 TTS_VOICE=alice 重启 agent-worker
 
 # 删除
-curl -X DELETE http://127.0.0.1:9880/voices/alice \
+curl -X DELETE http://127.0.0.1:9880/v1/voices/alice \
   -H "Authorization: Bearer $TTS_ADMIN_API_KEY"
 ```
 

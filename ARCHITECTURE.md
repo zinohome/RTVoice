@@ -23,11 +23,11 @@ graph TB
         end
 
         subgraph "Public Services (对外接口)"
-            STT[STT Service<br/>WS /asr]
-            TTS[TTS Service<br/>HTTP+WS /tts/*]
-            RTV[Realtime Voice<br/>POST /sessions +<br/>WS /v1/realtime]
+            STT[STT Service<br/>WS /v1/asr]
+            TTS[TTS Service<br/>HTTP+WS /v1/tts/*]
+            RTV[Realtime Voice<br/>POST /v1/sessions +<br/>WS /v1/realtime]
             LK[LiveKit SFU<br/>可选高级模式]
-            ADM[Admin API<br/>/voices /quota /audit]
+            ADM[Admin API<br/>/v1/voices /quota /audit]
         end
 
         subgraph "Admin"
@@ -80,7 +80,7 @@ graph TB
 ### 接口签名
 
 ```
-WS /asr
+WS /v1/asr
   client → server: binary frames (PCM int16 LE 16kHz mono)
                     + text "EOS" (触发 final)
   server → client: JSON events
@@ -96,7 +96,7 @@ sequenceDiagram
     participant C as Client
     participant W as WS Handler
     participant R as sherpa-onnx<br/>OnlineRecognizer
-    C->>W: connect /asr (Bearer auth)
+    C->>W: connect /v1/asr (Bearer auth)
     W->>R: create_stream()
     loop 每 50ms 单 coroutine 周期
         C->>W: PCM bytes
@@ -132,12 +132,12 @@ sequenceDiagram
 ### 接口签名
 
 ```
-HTTP POST /tts/stream
+HTTP POST /v1/tts/stream
   request body: JSON {"text":"...", "voice":"...", "speed":1.0}
   response: chunked transfer, binary PCM int16 LE 24kHz mono
   headers: X-Sample-Rate=24000, X-Channels=1, X-Format=pcm-int16-le
 
-WS /tts/stream_ws
+WS /v1/tts/stream_ws
   client → server:
     text frame 1 (JSON metadata): {"voice":"...","speed":1.0}
     text frame N: 文本增量（可流式喂入）
@@ -187,16 +187,16 @@ sequenceDiagram
 ### Voice Clone
 
 ```
-POST /voices/add  (multipart, TTS_ADMIN_API_KEY 鉴权)
+POST /v1/voices  (multipart, TTS_ADMIN_API_KEY 鉴权)
   - file: 16kHz mono wav (3-30 秒)
   - spk_id: 新音色 ID
   - prompt_text: 参考音对应的文字 (≥3 秒发音内容)
 ↓
 add_zero_shot_spk() 注册 → spk2info.pt 持久化到 named volume
 ↓
-重启自动 reload，POST /tts/stream voice=新id 即可用
+重启自动 reload，POST /v1/tts/stream voice=新id 即可用
 
-DELETE /voices/{spk_id}  (默认音色保护，不可删)
+DELETE /v1/voices/{spk_id}  (默认音色保护，不可删)
 ```
 
 ### 容错
@@ -211,7 +211,7 @@ DELETE /voices/{spk_id}  (默认音色保护，不可删)
 ### 接口签名（默认 WS gateway 模式）
 
 ```
-HTTP POST /sessions
+HTTP POST /v1/sessions
   request body: {"voice":"...", "prompt":"...", ...}
   response: {"session_id":"...", "ws_url":"ws://.../v1/realtime/{id}"}
 
@@ -239,7 +239,7 @@ sequenceDiagram
     participant STT as STT engine
     participant LLM as LLM (Ollama/vLLM)
     participant TTS as TTS engine
-    C->>G: POST /sessions {voice, prompt}
+    C->>G: POST /v1/sessions {voice, prompt}
     G->>AW: spawn / dispatch worker
     G->>C: 200 {session_id, ws_url}
     C->>G: WS connect /v1/realtime/{id}
@@ -274,7 +274,7 @@ sequenceDiagram
     participant TS as token-server
     participant LK as LiveKit SFU
     participant AW as agent-worker
-    C->>TS: POST /token {identity, room}
+    C->>TS: POST /v1/tokens {identity, room}
     TS->>C: JWT
     C->>LK: WebRTC connect (token)
     LK->>AW: agent joined room (内部触发)
@@ -308,7 +308,7 @@ create → active → idle → expire
 | 层 | env | 用途 |
 |---|---|---|
 | Client API key | `RTVOICE_API_KEY` | STT WS / TTS HTTP+WS / Realtime Voice 的 client 调用 Bearer 鉴权（留空 = dev 模式无鉴权）|
-| Admin key | `TTS_ADMIN_API_KEY` | `/voices/add /voices/{id} /quota` 等高权限管理操作（留空 = admin 端点禁用）|
+| Admin key | `TTS_ADMIN_API_KEY` | `/v1/voices /v1/voices/{id} /quota` 等高权限管理操作（留空 = admin 端点禁用）|
 | LiveKit JWT | token-server | 仅 LiveKit 高级模式；token-server 用 `LIVEKIT_API_KEY/SECRET` 签 JWT |
 
 ### TLS（可选）
