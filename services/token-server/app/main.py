@@ -41,7 +41,8 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-from app.error_schema import ErrorResponse, api_error, http_exception_handler
+from fastapi.exceptions import RequestValidationError
+from app.error_schema import ErrorResponse, api_error, http_exception_handler, validation_exception_handler
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -79,6 +80,7 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_exception_handler(HTTPException, http_exception_handler())
+app.add_exception_handler(RequestValidationError, validation_exception_handler())
 
 
 def _rate_limit_dep(request: Request) -> None:

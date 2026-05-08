@@ -43,7 +43,8 @@ sys.path.insert(0, COSYVOICE_DIR)
 sys.path.insert(0, os.path.join(COSYVOICE_DIR, "third_party/Matcha-TTS"))
 
 from cosyvoice.cli.cosyvoice import CosyVoice2  # noqa: E402
-from app.error_schema import ErrorResponse, api_error, http_exception_handler
+from fastapi.exceptions import RequestValidationError
+from app.error_schema import ErrorResponse, api_error, http_exception_handler, validation_exception_handler
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -152,6 +153,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RTVoice TTS Server (CosyVoice 2)", version="0.6.0", lifespan=lifespan)
 app.add_exception_handler(HTTPException, http_exception_handler())
+app.add_exception_handler(RequestValidationError, validation_exception_handler())
 
 # Prometheus 指标（与 Kokoro 版同名，dashboard 不变）
 SYNTH_PHRASES = Counter("rtvoice_tts_phrases_total", "Phrases synthesized")

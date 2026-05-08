@@ -51,7 +51,8 @@ import time
 import numpy as np
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from app.error_schema import ErrorResponse, api_error, http_exception_handler
+from fastapi.exceptions import RequestValidationError
+from app.error_schema import ErrorResponse, api_error, http_exception_handler, validation_exception_handler
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
@@ -127,6 +128,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RTVoice TTS Server", version="0.5.0", lifespan=lifespan)
 app.add_exception_handler(HTTPException, http_exception_handler())
+app.add_exception_handler(RequestValidationError, validation_exception_handler())
 
 # --- Prometheus metrics ---
 SYNTH_PHRASES = Counter("rtvoice_tts_phrases_total", "Phrases synthesized")

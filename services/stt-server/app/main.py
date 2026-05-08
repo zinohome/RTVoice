@@ -36,7 +36,8 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from prometheus_client import Counter, Gauge, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from app.error_schema import ErrorResponse, api_error, http_exception_handler
+from fastapi.exceptions import RequestValidationError
+from app.error_schema import ErrorResponse, api_error, http_exception_handler, validation_exception_handler
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -132,6 +133,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RTVoice STT Server", version="0.5.0", lifespan=lifespan)
 app.add_exception_handler(HTTPException, http_exception_handler())
+app.add_exception_handler(RequestValidationError, validation_exception_handler())
 
 # --- Prometheus metrics ---
 WS_ACTIVE = Gauge("rtvoice_stt_ws_connections_active", "Currently open /asr WS connections")
