@@ -32,9 +32,11 @@ from pathlib import Path
 
 import numpy as np
 import sherpa_onnx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from prometheus_client import Counter, Gauge, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
+
+from app.error_schema import ErrorResponse, api_error, http_exception_handler
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -129,6 +131,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RTVoice STT Server", version="0.5.0", lifespan=lifespan)
+app.add_exception_handler(HTTPException, http_exception_handler())
 
 # --- Prometheus metrics ---
 WS_ACTIVE = Gauge("rtvoice_stt_ws_connections_active", "Currently open /asr WS connections")
@@ -180,7 +183,7 @@ def _ws_auth_ok(ws: WebSocket) -> bool:
     return False
 
 
-@app.websocket("/asr")
+@app.websocket("/v1/asr")
 async def asr_ws(ws: WebSocket) -> None:
     """v0.5.3：单线程消费循环，杜绝 stream 并发访问。
 
