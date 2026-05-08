@@ -119,7 +119,7 @@ services:
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
       # 走 docker network 内部地址（不经宿主端口）
       LIVEKIT_INTERNAL_URL: ws://livekit-server:7880
-      STT_WS_URL: ws://stt-server:9090/asr
+      STT_WS_URL: ws://stt-server:9090/v1/asr
       LLM_BASE_URL: http://llm-server:11434/v1
       LLM_MODEL: ${LLM_MODEL:-qwen2.5:1.5b}
       LLM_API_KEY: ollama   # ollama 不验证 key，但 OpenAI SDK 必需

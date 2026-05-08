@@ -57,7 +57,7 @@ class TTSClient:
             "lang": self.lang,
             "speed": self.speed,
         }
-        url = f"{self.base_url}/tts/stream"
+        url = f"{self.base_url}/v1/tts/stream"
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
         async with self._client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
@@ -89,7 +89,7 @@ class TTSClient:
         """
         # http(s)://host:port → ws(s)://host:port
         ws_url = self.base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
-        full = f"{ws_url}/tts/stream_ws"
+        full = f"{ws_url}/v1/tts/stream_ws"
         extra_headers = {}
         subprotocols = None
         if self.api_key:
