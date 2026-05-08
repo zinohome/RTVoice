@@ -88,6 +88,14 @@
 | `auth.invalid_token` | Bearer 不对 |
 | `auth.missing_token` | 没传 Bearer |
 | `session.not_found` | session_id 不存在 |
+| `session.capacity_full` | server 超并发上限 |
+| `session.unauthorized` | Bearer 不匹配 creator |
+| `session.expired` | session 超 max lifetime |
+| `session.idle_timeout` | ws idle 超时 |
+| `turn.timeout` | 单 turn 处理超时 |
+| `turn.in_progress` | 前 turn 未结束就发新 audio.eos |
+| `stt.empty` | STT final 为空（无有效语音）|
+| `internal.upstream_closed` | 上游 service WS 断 |
 | `internal.unknown` | 兜底（不详的内部异常）|
 
 WS 错误事件用同 schema：`{"type":"error","code":"...","message":"..."}`。
@@ -198,8 +206,8 @@ async def add_voice(...): ...
 | `POST /voices/add` | `POST /v1/voices` | **方法换 POST + 去掉 /add**（不放动词在 URL）|
 | `DELETE /voices/{spk_id}` | `DELETE /v1/voices/{spk_id}` | TTS delete |
 | `POST /token` | `POST /v1/tokens` | token-server，**复数化** |
-| 新增 | `POST /v1/sessions` | Realtime Voice 创建 session（SP2 实现）|
-| 新增 | `WS /v1/realtime/{session_id}` | Realtime Voice 数据面（SP2 实现）|
+| 新增 | `POST /v1/sessions` | Realtime Voice 创建 session（v0.9.0 已实现）|
+| 新增 | `WS /v1/realtime/{session_id}` | Realtime Voice 数据面（v0.9.0 已实现）|
 
 **保留不动**（运维 / 内部测试页）：
 

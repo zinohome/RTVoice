@@ -69,6 +69,16 @@
 | `TTS_MEM_LIMIT=10G` | v3 模型 ~5.6GB 推理 buffer |
 | `SKIP_RL_MODEL=1` | 默认跳过 `llm.rl.pt`（省 2GB）|
 
+### 2.5 Realtime Voice Service (SP2, v0.9+)
+
+| 变量 | 默认 | 调整时机 |
+|---|---|---|
+| `RTVOICE_MAX_CONCURRENT_SESSIONS` | 5 | RTX 3060 12GB 默认；GPU 升级后调高 |
+| `RTVOICE_SESSION_IDLE_TIMEOUT_S` | 30 | 用户停下不说话多久 close |
+| `RTVOICE_SESSION_MAX_LIFETIME_S` | 1800 | 单 session 最长 30 min |
+| `RTVOICE_TURN_TIMEOUT_S` | 60 | 单 turn 处理最长时间 |
+| `PUBLIC_WS_BASE` | ws://realtime-server:9000 | 公网部署改 wss://your-domain.com |
+
 ---
 
 ## 3. 升级路径
@@ -140,6 +150,21 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml \
 ```
 
 回滚秒级生效（v0.6 镜像 + 模型卷都还在）。
+
+### 3.4 v0.8.x → v0.9.0（SP2 加 Realtime Voice service）
+
+```bash
+# .env 不需改（默认值已调优 3060 12GB；想改 cap 可加 RTVOICE_MAX_CONCURRENT_SESSIONS）
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod \
+               build realtime-server
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod up -d realtime-server
+```
+
+**验证**：
+```bash
+curl -s http://127.0.0.1:9000/health
+curl -X POST http://127.0.0.1:9000/v1/sessions -H 'Content-Type: application/json' -d '{}'
+```
 
 ---
 
@@ -222,6 +247,18 @@ curl -X DELETE http://127.0.0.1:9880/v1/voices/alice \
 ```
 
 注册的 wav 持久化到 named volume（`rtvoice_cosyvoice_models` 或 `_v3` 卷的 `voices/` 子目录）。删 volume 才会丢。
+
+### 4.6 realtime-server: session 创建返 503 capacity_full
+
+- 看 `docker logs rtvoice-realtime | grep "session created"` 看活的 session 数
+- 如果实际只有 1-2 个但 503，可能 cleanup 没及时执行 — 重启 `docker compose ... restart realtime-server`
+- 想接收更多并发：`RTVOICE_MAX_CONCURRENT_SESSIONS=10`（仅在 GPU 容量充足时调高，否则 TTS 队列卡）
+
+### 4.7 realtime-server: WS 连接立即 close 4404
+
+- session_id 拼错 / 过期 / 已被 cleanup
+- 检查：`docker logs rtvoice-realtime | grep "session created\|cleanup"` 找 session_id 历史
+- 客户端应在 `expires_at` 之前连，超出立即返 4410 expired
 
 ---
 

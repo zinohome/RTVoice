@@ -27,6 +27,7 @@ docker compose --profile dev up -d
 |---|---|
 | **STT**（语音转文字）| [测试页](http://127.0.0.1:8000/) 录一段；或编程方式见 [STT 集成示例](./COZYVOICE_INTEGRATION.md) |
 | **TTS**（文字转语音）| `curl -X POST http://127.0.0.1:9880/v1/tts/stream -d '{"text":"你好"}' \| ffplay -f s16le -ar 24000 -` |
+| **Realtime 对话**（API 方式）| `curl -X POST http://127.0.0.1:9000/v1/sessions -d '{}' -H "Content-Type: application/json"` 拿 ws_url，然后 websocat 连 |
 | **Realtime 对话**| 浏览器 [测试页](http://127.0.0.1:8000/) → 加入语音 → 说话 |
 
 **首次启动注意**：LLM (Ollama) 需要 `ollama pull qwen2.5:1.5b`（约 1GB）。完整下好后约 3-5 分钟可对话。prod GPU 部署见 [DEPLOY.md](./DEPLOY.md)。
@@ -58,7 +59,7 @@ docker compose --profile dev up -d
 - **引擎**：内部 STT (sherpa) + LLM (Ollama / vLLM) + TTS (Fun-CosyVoice 3)
 - **特性**：双向流式、prompt+memory、同步 transcript、换音色、barge-in
 - **高级模式**：LiveKit endpoint 可选保留（适合 end-user 跨公网移动场景）
-- → [集成示例](./COZYVOICE_INTEGRATION.md) · [API spec](./docs/api/sessions.md)（即将上线）
+- → [集成示例](./COZYVOICE_INTEGRATION.md) · [API spec](./docs/api/sessions.md)
 
 ---
 

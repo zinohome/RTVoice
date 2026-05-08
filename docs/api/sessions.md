@@ -1,19 +1,19 @@
 # Realtime Voice Service API
 
 > 实时语音对话。WebSocket gateway 默认（OpenAI Realtime 风格）；LiveKit 高级模式可选。
-> **状态：协议骨架 ready；完整实现见 SP2**。
+> **状态：v0.9.0 已实现**（SP3 加 prompt + memory + transcript 流式）。
 
 ## Endpoints 速查
 
 | 用途 | 方法 | 路径 | 鉴权 | 状态 |
 |---|---|---|---|---|
-| 创建 session | POST | `/v1/sessions` | Bearer | SP2 |
-| WS 数据面 | WS | `/v1/realtime/{session_id}` | session_id | SP2 |
+| 创建 session | POST | `/v1/sessions` | Bearer | ✓（v0.9）|
+| WS 数据面 | WS | `/v1/realtime/{session_id}` | session_id | ✓（v0.9）|
 | LiveKit token（高级模式）| POST | `/v1/tokens` | APP_API_KEY | ✓（v0.7）|
 | 健康检查 | GET | `/health` | 无 | ✓ |
 | 服务信息 | GET | `/info` | 无 | ✓ |
 
-## POST /v1/sessions (SP2 实现)
+## POST /v1/sessions
 
 创建一个 Realtime Voice session：分配 worker、初始化 memory、返回 session_id + ws_url。
 
@@ -38,7 +38,7 @@
 }
 ```
 
-## WS /v1/realtime/{session_id} (SP2 实现)
+## WS /v1/realtime/{session_id}
 
 双向音频/事件 stream。基于 OpenAI Realtime API events 风格。
 
@@ -61,7 +61,7 @@
 | text | `{"type":"response.done"}` | 本轮回复结束 |
 | text | `{"type":"error","code":"...","message":"..."}` | 失败 |
 
-详细 session 生命周期 / memory 管理 / prompt 透传规则 → SP2 设计文档（SP2 启动时创建）。
+详细 session 生命周期 / memory 管理 / prompt 透传规则 → SP3 设计文档（SP3 启动时创建）。
 
 ## POST /v1/tokens（高级模式 LiveKit）
 

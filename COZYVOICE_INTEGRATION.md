@@ -293,6 +293,74 @@ async def llm_to_tts():
     return bytes(audio)
 ```
 
+### 5.4 Realtime Voice 完整对话客户端
+
+```python
+import asyncio, json, os
+import httpx, websockets
+
+
+class RTVoiceRealtimeClient:
+    def __init__(self, base_http=None, api_key=None):
+        self.base_http = base_http or os.environ.get("RTVOICE_RT_HTTP", "http://realtime-server:9000")
+        self.api_key = api_key or os.environ.get("RTVOICE_API_KEY", "").strip()
+
+    async def create_session(self, voice="default_zh_female", speed=1.0):
+        async with httpx.AsyncClient() as c:
+            headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+            r = await c.post(
+                f"{self.base_http}/v1/sessions",
+                json={"voice": voice, "speed": speed},
+                headers=headers,
+                timeout=10,
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def conversation(self, ws_url, audio_chunks_iter, on_transcript=None):
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        async with websockets.connect(ws_url, additional_headers=headers) as ws:
+            async def feed():
+                async for pcm in audio_chunks_iter:
+                    await ws.send(pcm)
+                await ws.send("audio.eos")
+            asyncio.create_task(feed())
+            async for msg in ws:
+                if isinstance(msg, bytes):
+                    yield msg
+                else:
+                    ev = json.loads(msg)
+                    if ev["type"] == "transcript.final":
+                        if on_transcript:
+                            on_transcript(ev["text"])
+                    elif ev["type"] == "response.done":
+                        return
+                    elif ev["type"] == "error":
+                        raise RuntimeError(f"realtime error: {ev}")
+
+
+async def main():
+    client = RTVoiceRealtimeClient()
+    sess = await client.create_session()
+    print(f"session: {sess['session_id']}")
+
+    async def mic_chunks():
+        with open("user_input.pcm", "rb") as f:
+            while True:
+                c = f.read(3200)
+                if not c: break
+                yield c
+
+    pcm_out = bytearray()
+    async for chunk in client.conversation(sess["ws_url"], mic_chunks(),
+                                            on_transcript=lambda t: print(f"我说了: {t}")):
+        pcm_out.extend(chunk)
+    open("agent_reply.pcm", "wb").write(pcm_out)
+
+
+asyncio.run(main())
+```
+
 ---
 
 ## 6. 常见模式

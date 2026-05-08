@@ -282,7 +282,7 @@ sequenceDiagram
     Note over AW: agent 内部走 STT/LLM/TTS pipeline<br/>把 PCM 推回 LK，LK 转给 client
 ```
 
-### Session 生命周期（抽象，详细 SP2 设计）
+### Session 生命周期（已实现 v0.9.0）
 
 ```
 create → active → idle → expire
@@ -291,7 +291,7 @@ create → active → idle → expire
   分配          倒计时  释放 worker
 ```
 
-详细 session API、memory 模型（追加 / 滑窗 / 摘要 / 持久化）、prompt 透传规则属于 SP2/SP3 设计范围，不在本架构文。
+session API + 生命周期管理已在 v0.9.0 (SP2) 实现；memory 模型（追加 / 滑窗 / 摘要 / 持久化）、prompt 透传规则属于 SP3 设计范围，不在本架构文。
 
 ### 关键设计权衡
 
@@ -327,7 +327,7 @@ create → active → idle → expire
 | prod (Q4 3B) | 1G | 5.5G | 3G | **9.5G** | 2.5G ✓ |
 | prod (Q4 7B) | 1G | 5.5G | 5G | **11.5G** | 0.5G ⚠️ 边缘 |
 
-> 多并发 session 时，agent-worker 数 × 每路 STT/TTS 占用要分别累加；详 SP2 设计。
+> 多并发 session 时，agent-worker 数 × 每路 STT/TTS 占用要分别累加；v0.9.0 默认 cap = 5（`RTVOICE_MAX_CONCURRENT_SESSIONS`）。
 
 ### 容错矩阵
 
