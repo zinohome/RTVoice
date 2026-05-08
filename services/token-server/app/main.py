@@ -3,7 +3,7 @@
 给浏览器/客户端签发 LiveKit JWT。
 
 鉴权（v0.1）：
-    /token 端点要求 HTTP header `Authorization: Bearer <APP_API_KEY>`。
+    /v1/tokens 端点要求 HTTP header `Authorization: Bearer <APP_API_KEY>`。
     APP_API_KEY 从环境变量读取，长度 ≥ 32。
     这是简单的"共享 API key"模型，不是用户级身份。
     v0.6+ 计划替换为真实用户认证。
@@ -11,7 +11,7 @@
 环境变量：
     LIVEKIT_API_KEY        LiveKit 服务端密钥（用于签 JWT）
     LIVEKIT_API_SECRET     LiveKit 服务端密钥
-    APP_API_KEY            客户端访问 /token 的共享 key（≥ 32 字符）
+    APP_API_KEY            客户端访问 /v1/tokens 的共享 key（≥ 32 字符）
     LIVEKIT_PUBLIC_URL     浏览器侧用的 ws/wss URL
     DEV_AUTO_INJECT_KEY    "true" 时把 APP_API_KEY 注入测试页（仅 dev 用）
     LOG_LEVEL              DEBUG/INFO/WARNING/ERROR
@@ -41,6 +41,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from app.error_schema import ErrorResponse, api_error, http_exception_handler
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -77,6 +78,7 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(HTTPException, http_exception_handler())
 
 
 def _rate_limit_dep(request: Request) -> None:
@@ -94,7 +96,7 @@ def _rate_limit_dep(request: Request) -> None:
 # Prometheus：自动 http_request_duration / http_requests_total + 自定义 counter
 TOKENS_ISSUED = Counter("rtvoice_tokens_issued_total", "Total LiveKit JWTs issued",
                         ["room"])
-AUTH_FAILURES = Counter("rtvoice_token_auth_failures_total", "401 responses on /token",
+AUTH_FAILURES = Counter("rtvoice_token_auth_failures_total", "401 responses on /v1/tokens",
                         ["reason"])
 Instrumentator(
     excluded_handlers=["/health", "/metrics"],
@@ -113,19 +115,11 @@ def require_api_key(
 ) -> None:
     if creds is None or creds.scheme.lower() != "bearer":
         AUTH_FAILURES.labels(reason="missing").inc()
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing Authorization: Bearer header",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise api_error(401, "auth.missing_token", "Missing Authorization: Bearer header")
     # 常量时间比较，防 timing attack
     if not hmac.compare_digest(creds.credentials, APP_API_KEY):
         AUTH_FAILURES.labels(reason="invalid").inc()
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise api_error(401, "auth.invalid_token", "Invalid API key")
 
 
 class TokenRequest(BaseModel):
@@ -171,7 +165,7 @@ def health() -> dict[str, str]:
 
 
 @app.post(
-    "/token",
+    "/v1/tokens",
     response_model=TokenResponse,
     dependencies=[Depends(require_api_key), Depends(_rate_limit_dep)],
 )
@@ -180,9 +174,9 @@ def issue_token(
     req: Annotated[TokenRequest, Body()],
 ) -> TokenResponse:
     if not _NAME_RE.match(req.room):
-        raise HTTPException(400, "room 仅允许 [A-Za-z0-9_-]，长度 1-64")
+        raise api_error(400, "token.invalid_room", "room 仅允许 [A-Za-z0-9_-]，长度 1-64")
     if not _NAME_RE.match(req.identity):
-        raise HTTPException(400, "identity 仅允许 [A-Za-z0-9_-]，长度 1-64")
+        raise api_error(400, "token.invalid_identity", "identity 仅允许 [A-Za-z0-9_-]，长度 1-64")
 
     grants = api.VideoGrants(
         room_join=True,
@@ -216,10 +210,3 @@ def issue_token(
     )
 
 
-@app.exception_handler(HTTPException)
-async def _http_exc_handler(request: Request, exc: HTTPException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"error": exc.detail},
-        headers=exc.headers or {},
-    )

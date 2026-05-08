@@ -97,7 +97,7 @@
   }
 
   async function fetchToken(roomName, identity, apiKey) {
-    const res = await fetch("/token", {
+    const res = await fetch("/v1/tokens", {
       method: "POST",
       headers: { "content-type": "application/json", "authorization": `Bearer ${apiKey}` },
       body: JSON.stringify({ room: roomName, identity }),
