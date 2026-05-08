@@ -19,6 +19,54 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.9.0] — 2026-05-08 — SP2 Realtime Voice 多 tenant session
+
+平台化重构第三阶段：新增 `realtime-server` docker service 提供 `POST /v1/sessions` + `WS /v1/realtime/{id}` 多 tenant Realtime Voice service。
+
+### Added
+
+- `services/realtime-server/` 新 docker service
+  - `Dockerfile` + `requirements.txt` (fastapi/uvicorn/websockets/httpx/pydantic)
+  - `app/main.py` (FastAPI app + 2 endpoints + WS handler + auth)
+  - `app/session_manager.py` (Session class + SessionManager + lifecycle: CREATED→ACTIVE→CLEANUP)
+  - `app/pipeline.py` (run_turn: STT → LLM → TTS streaming)
+  - `app/config.py` (12 个 env vars 集中)
+  - `app/{stt,llm,tts}_client.py` (copy from agent-worker)
+  - `app/error_schema.py` (per-service copy)
+  - 4 个测试文件（config + session_manager + pipeline mock + endpoints TestClient）
+- `docker-compose.yml` 加 realtime-server service block (image v0.9.0, expose 9000)
+- `.env.example` SP2 段落（RTVOICE_* env vars + sizing 速查表）
+
+### Changed
+
+- `docs/api/sessions.md`: 状态从"协议骨架"升级为"v0.9.0 已实现"
+- `docs/api/CONVENTIONS.md`: error code 表加 `session.*` `turn.*` `stt.empty` `internal.upstream_closed` 共 9 条
+- `README.md` 60 秒 try 表加 Realtime API curl 示例
+- `ARCHITECTURE.md` §4 Realtime Voice 段去掉"SP2 实现"占位
+- `OPERATIONS.md` §2.5 SP2 env vars + §3.4 升级路径 + §4.6/4.7 故障 cookbook
+- `COZYVOICE_INTEGRATION.md` §5.4 加 RealtimeClient Python SDK 完整例
+
+### Notes / 设计决策
+
+- `agent-worker` v0.7 LiveKit demo 路径**保留不动**进入维护模式；新 Realtime 主线在 realtime-server
+- pipeline 代码 copy-paste 自 agent-worker（不抽 shared lib，与 SP1.5 决策一致）
+- session_id Stripe 风格 `sess_<urlsafe-12bytes>` + Bearer + creator binding（可选）
+- 协议 SP2 minimal: PCM in/out + audio.eos + transcript.final + response.done + error
+- 不含 memory / prompt 透传 / transcript.partial / response.text — SP3 范围
+- 所有 concurrency 参数 env-driven；3060 12GB 调优默认（cap=5）；未来 GPU 扩容只改 .env
+
+### 验证（autonomous）
+
+- ✅ FastAPI auto-gen `/openapi.json` 含 `/v1/sessions`
+- ✅ unit test: SessionManager 11 测试全过（create/get/cleanup/capacity/expire/attach_ws）
+- ✅ integration test: pipeline.run_turn() 4 mock 测试全过（happy/empty/llm 异常/finally）
+- ✅ endpoints test: 11 TestClient 测试全过
+- ⏳ prod 集成测试（待 user 部署 + 浏览器对话验收）
+
+详见 [SP2 设计文档](./docs/superpowers/specs/2026-05-08-sp2-realtime-session-design.md) + [实施 plan](./docs/superpowers/plans/2026-05-08-sp2-realtime-session.md)。
+
+---
+
 ## [0.8.0] — 2026-05-08 — SP1.5 API 规范 + endpoint refactor
 
 平台化重构第二阶段：API 路径加 `/v1/` 前缀、错误格式统一、写完整 API 规范。
