@@ -1,8 +1,14 @@
-"""Per-turn pipeline: STT final → LLM → TTS → client PCM (copy-paste from
-agent-worker `_run_pipeline_ws`, simplified for SP2 = no memory)."""
+"""Per-turn pipeline (SP3): STT final → LLM stream w/ memory → TTS → client.
+
+新增于 SP3：
+  - 组 messages = [system(prompt), ...memory, {user:final}] 喂给 llm_client
+  - LLM delta 同时 ws.send_json(response.text) 和 tts_ws.send_text
+  - response.done 带 text=完整 assistant 回复
+  - 成功 turn → memory.append_turn(user, assistant)
+  - 全程 audit.write(event) 异步落 JSONL
+"""
 from __future__ import annotations
 import asyncio
-import json
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -11,13 +17,11 @@ from app import config
 
 if TYPE_CHECKING:
     from app.session_manager import Session
-    from fastapi import WebSocket
 
 log = logging.getLogger("rtvoice.realtime.pipeline")
 
 
 def _classify_error(exc: Exception) -> str:
-    """Python exception → CONVENTIONS.md §6 error code"""
     if isinstance(exc, asyncio.TimeoutError):
         return "turn.timeout"
     s = str(exc).lower()
@@ -30,46 +34,56 @@ def _classify_error(exc: Exception) -> str:
     return "internal.unknown"
 
 
-async def run_turn(sess, ws):
-    """Single turn: STT final → LLM → TTS → client PCM + done.
-
-    Per spec §6.1 (SP2; no memory).
-    """
-    sess.current_turn_task = asyncio.current_task()
+async def _audit(sess, event: dict) -> None:
+    """audit_writer 可选；写错不抛."""
+    if sess.audit_writer is None:
+        return
     try:
+        await sess.audit_writer.write(event)
+    except Exception:
+        log.exception("audit.write failed (continuing)")
+
+
+async def run_turn(sess, ws):
+    """SP3 single turn with memory + streaming + audit."""
+    sess.current_turn_task = asyncio.current_task()
+    user_text = ""
+    assistant_chunks: list[str] = []
+    try:
+        # 1. STT final
         try:
-            final_text = await sess.stt_client.request_final(
+            user_text = await sess.stt_client.request_final(
                 timeout=config.STT_FINAL_TIMEOUT_S
             )
         except asyncio.TimeoutError:
-            await ws.send_json({
-                "type": "error",
-                "code": "stt.timeout",
-                "message": "STT did not return final in time",
-                "request_id": None,
-            })
+            await ws.send_json({"type": "error", "code": "stt.timeout",
+                                "message": "STT final timeout", "request_id": None})
             return
 
-        if not final_text or not final_text.strip():
-            await ws.send_json({
-                "type": "error",
-                "code": "stt.empty",
-                "message": "no speech detected",
-                "request_id": None,
-            })
+        if not user_text or not user_text.strip():
+            await ws.send_json({"type": "error", "code": "stt.empty",
+                                "message": "no speech detected", "request_id": None})
             return
 
-        await ws.send_json({
-            "type": "transcript.final",
-            "text": final_text,
-        })
+        await ws.send_json({"type": "transcript.final", "text": user_text})
+        await _audit(sess, {"event": "transcript.final", "text": user_text})
 
+        # 2. 组 messages = [system, ...memory, user]
+        messages: list[dict] = []
+        if sess.prompt:
+            messages.append({"role": "system", "content": sess.prompt})
+        messages.extend(list(sess.memory))
+        messages.append({"role": "user", "content": user_text})
+
+        # 3. LLM stream + 并行 TTS feed + ws.response.text emit
         tts_ws = await sess.tts_client.open_ws()
         try:
             async def feeder():
                 try:
-                    async for delta in sess.llm_client.stream(final_text):
+                    async for delta in sess.llm_client.stream(messages):
                         if delta:
+                            assistant_chunks.append(delta)
+                            await ws.send_json({"type": "response.text", "text": delta})
                             await tts_ws.send_text(delta)
                 finally:
                     await tts_ws.eos()
@@ -90,23 +104,25 @@ async def run_turn(sess, ws):
         finally:
             await tts_ws.aclose()
 
-        await ws.send_json({
-            "type": "response.done",
-        })
+        # 4. response.done + memory + audit
+        assistant_text = "".join(assistant_chunks)
+        await ws.send_json({"type": "response.done", "text": assistant_text})
+        await _audit(sess, {"event": "response.done", "text": assistant_text})
+
+        if assistant_text:
+            sess.memory.append_turn(user_text, assistant_text)
 
     except asyncio.CancelledError:
         raise
     except Exception as e:
         log.exception("turn failed: %s", e)
         try:
-            await ws.send_json({
-                "type": "error",
-                "code": _classify_error(e),
-                "message": str(e)[:200],
-                "request_id": None,
-            })
+            await ws.send_json({"type": "error", "code": _classify_error(e),
+                                "message": str(e)[:200], "request_id": None})
         except Exception:
             pass
+        await _audit(sess, {"event": "error", "code": _classify_error(e),
+                            "message": str(e)[:200]})
     finally:
         sess.current_turn_task = None
         sess.last_activity = datetime.now(timezone.utc)

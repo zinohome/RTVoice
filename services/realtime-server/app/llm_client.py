@@ -7,7 +7,7 @@
 
 使用：
     llm = LLMClient(base_url="http://llm-server:11434/v1", model="qwen2.5:1.5b")
-    async for delta in llm.stream(user_text="你好"):
+    async for delta in llm.stream([{"role": "user", "content": "你好"}]):
         print(delta, end="", flush=True)
 
 设计：
