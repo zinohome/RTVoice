@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RTVoice Web Demo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>RTVoice Web Demo</h1>
+    <nav>
+      <button class="tab" data-tab="stt">STT</button>
+      <button class="tab" data-tab="tts">TTS</button>
+      <button class="tab" data-tab="realtime">Realtime</button>
+      <button class="tab" data-tab="tokens">Tokens</button>
+    </nav>
+  </header>
+
+  <section id="config">
+    <label>API base: <input id="cfg-base" size="40"></label>
+    <label>Bearer (空=dev): <input id="cfg-bearer" size="40" type="password"></label>
+    <button id="cfg-save">Save</button>
+    <span id="cfg-status"></span>
+  </section>
+
+  <main id="content">
+    <!-- ============== STT tab ============== -->
+    <section id="tab-stt" class="tab-content">
+      <h2>STT — Speech to Text</h2>
+      <p>录一段中文音频 → 调 POST /v1/asr 拿识别 text</p>
+      <div class="row">
+        <button id="stt-record">🎙️ 开始录音</button>
+        <button id="stt-stop" disabled>⏹ 结束并识别</button>
+        <span id="stt-status" class="muted"></span>
+      </div>
+      <div class="row">
+        <label>结果：</label>
+        <input id="stt-result" type="text" readonly placeholder="(结果会显示在这里)" />
+      </div>
+    </section>
+
+    <!-- ============== TTS tab ============== -->
+    <section id="tab-tts" class="tab-content">
+      <h2>TTS — Text to Speech</h2>
+      <p>填文字 → POST /v1/tts/stream → Web Audio 流式播放（24k mono int16）</p>
+      <div class="row">
+        <textarea id="tts-text" rows="3" placeholder="输入要合成的文字...">你好世界，欢迎使用 RTVoice 平台。</textarea>
+      </div>
+      <div class="row">
+        <label>Voice: <input id="tts-voice" type="text" value="default_zh_female" size="20"></label>
+        <label>Speed: <input id="tts-speed" type="number" value="1.0" step="0.1" min="0.5" max="2.0" style="width: 70px"></label>
+        <label>Lang: <input id="tts-lang" type="text" value="cmn" size="6"></label>
+      </div>
+      <div class="row">
+        <button id="tts-go">▶ 合成 + 播放</button>
+        <button id="tts-stop-btn" disabled>⏹ 停止</button>
+        <span id="tts-status" class="muted"></span>
+      </div>
+      <div class="row" id="tts-meta" class="muted"></div>
+    </section>
+
+    <!-- ============== Realtime tab ============== -->
+    <section id="tab-realtime" class="tab-content">
+      <h2>Realtime — 完整对话</h2>
+      <p>POST /v1/sessions 创会话 → WS /v1/realtime/{id} → mic 录音 → audio.eos → 听 agent 回复</p>
+
+      <fieldset>
+        <legend>1. 创建 session</legend>
+        <div class="row">
+          <label>Prompt:</label>
+          <textarea id="rt-prompt" rows="2" placeholder="(空 = server default)"></textarea>
+        </div>
+        <div class="row">
+          <label>Voice: <input id="rt-voice" type="text" value="default_zh_female" size="20"></label>
+          <label>Speed: <input id="rt-speed" type="number" value="1.0" step="0.1" min="0.5" max="2.0" style="width:70px"></label>
+          <label><input type="checkbox" id="rt-audit"> audit_persist</label>
+        </div>
+        <div class="row">
+          <button id="rt-create">1) 创建</button>
+          <span id="rt-session-info" class="muted"></span>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>2. 连接 + 录音</legend>
+        <div class="row">
+          <button id="rt-connect" disabled>2) 连 WS</button>
+          <button id="rt-record" disabled>3) 开始录音</button>
+          <button id="rt-eos" disabled>4) 结束 turn (EOS)</button>
+          <button id="rt-disconnect" disabled>断开</button>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>3. 中途控制</legend>
+        <div class="row">
+          <button id="rt-update-prompt" disabled>改 prompt</button>
+          <button id="rt-update-voice" disabled>改 voice</button>
+          <button id="rt-clear-memory" disabled>memory.clear</button>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>4. 流式显示</legend>
+        <div id="rt-transcript" class="rt-stream user-color"></div>
+        <div id="rt-response" class="rt-stream agent-color"></div>
+      </fieldset>
+    </section>
+
+    <!-- ============== Tokens tab ============== -->
+    <section id="tab-tokens" class="tab-content">
+      <h2>Tokens — LiveKit JWT</h2>
+      <p>POST /v1/tokens（token-server :8000）申请 LiveKit room JWT</p>
+      <div class="row">
+        <label>Identity: <input id="tk-identity" type="text" value="alice"></label>
+        <label>Room: <input id="tk-room" type="text" value="rtvoice-test"></label>
+        <label>TTL minutes: <input id="tk-ttl" type="number" value="10" min="1" max="1440" style="width:80px"></label>
+      </div>
+      <div class="row">
+        <button id="tk-go">申请 token</button>
+        <span id="tk-status" class="muted"></span>
+      </div>
+      <div class="row">
+        <label>Token:</label>
+        <textarea id="tk-token" rows="3" readonly placeholder="(JWT 显示在这里)"></textarea>
+      </div>
+      <div class="row">
+        <label>LiveKit URL:</label>
+        <input id="tk-url" type="text" readonly>
+      </div>
+    </section>
+  </main>
+
+  <aside id="log-panel">
+    <h3>Event Log</h3>
+    <div id="log"></div>
+  </aside>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
