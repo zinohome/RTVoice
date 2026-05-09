@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from app import config
 from app.tts_client import TTSClient
+from app.metrics import TURNS_TOTAL
 
 if TYPE_CHECKING:
     from app.session_manager import Session
@@ -150,5 +151,7 @@ async def run_turn(sess, ws):
         await _audit(sess, {"event": "error", "code": _classify_error(e),
                             "message": str(e)[:200]})
     finally:
+        status = "ok" if assistant_chunks else "error"
+        TURNS_TOTAL.labels(status=status).inc()
         sess.current_turn_task = None
         sess.last_activity = datetime.now(timezone.utc)

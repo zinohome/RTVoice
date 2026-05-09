@@ -11,6 +11,7 @@ from typing import Any, Literal, Optional
 from app import config
 from app.memory import ConversationMemory
 from app.audit import AuditWriter
+from app.metrics import SESSIONS_ACTIVE, AUDIT_QUEUE_DEPTH
 
 log = logging.getLogger("rtvoice.realtime.session")
 
@@ -101,6 +102,7 @@ class SessionManager:
             log.info("session created: id=%s voice=%s speed=%.2f audit=%s expires=%s",
                      sess.id, sess.voice, sess.speed, audit_persist,
                      sess.expires_at.isoformat())
+            SESSIONS_ACTIVE.set(self.active_count())
             return sess
 
     def get(self, session_id: str) -> Optional[Session]:
@@ -149,6 +151,15 @@ class SessionManager:
                         await res
                 except Exception:
                     pass
+        SESSIONS_ACTIVE.set(self.active_count())
+        try:
+            depth = 0
+            for s in self._sessions.values():
+                if s.audit_writer is not None and hasattr(s.audit_writer, "_q"):
+                    depth += s.audit_writer._q.qsize()
+            AUDIT_QUEUE_DEPTH.set(depth)
+        except Exception:
+            pass
 
     def active_count(self) -> int:
         return len(self._sessions)

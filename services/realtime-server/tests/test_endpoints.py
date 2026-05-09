@@ -215,3 +215,12 @@ def test_memory_clear_event_handled(client_stt_mock):
     import json as _json
     with c.websocket_connect(f"/v1/realtime/{sid}") as ws:
         ws.send_text(_json.dumps({"type": "memory.clear"}))
+
+
+def test_metrics_endpoint_exposes_sp4_metrics(client):
+    """/metrics 含 3 个 SP4 自定义 metric 名."""
+    r = client.get("/metrics")
+    body = r.text
+    assert "rtvoice_realtime_sessions_active" in body
+    assert "rtvoice_realtime_turns_total" in body
+    assert "rtvoice_realtime_audit_queue_depth" in body
