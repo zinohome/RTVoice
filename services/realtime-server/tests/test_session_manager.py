@@ -110,3 +110,42 @@ async def test_attach_ws_fails_if_not_created(mgr):
     await mgr.cleanup(sess.id, "test")
     ok = mgr.attach_ws(sess.id, object())
     assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_create_with_prompt(monkeypatch):
+    monkeypatch.setattr("app.config.MAX_CONCURRENT_SESSIONS", 5)
+    from app import session_manager
+    mgr = session_manager.SessionManager()
+    sess = await mgr.create("h", "v", 1.0, prompt="hello world", audit_persist=False)
+    assert sess.prompt == "hello world"
+    assert sess.audit_persist is False
+    assert sess.audit_writer is None
+    from app.memory import ConversationMemory
+    assert isinstance(sess.memory, ConversationMemory)
+
+
+@pytest.mark.asyncio
+async def test_create_with_audit_persist_creates_writer(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.config.MAX_CONCURRENT_SESSIONS", 5)
+    monkeypatch.setattr("app.config.AUDIT_DIR", str(tmp_path))
+    from app import session_manager
+    mgr = session_manager.SessionManager()
+    sess = await mgr.create("h", "v", 1.0, prompt="x", audit_persist=True)
+    from app.audit import AuditWriter
+    assert isinstance(sess.audit_writer, AuditWriter)
+    await mgr.cleanup(sess.id, "test")
+
+
+@pytest.mark.asyncio
+async def test_cleanup_aclose_audit_writer(tmp_path, monkeypatch):
+    """cleanup 时 audit_writer.aclose() 必须被调用."""
+    monkeypatch.setattr("app.config.MAX_CONCURRENT_SESSIONS", 5)
+    monkeypatch.setattr("app.config.AUDIT_DIR", str(tmp_path))
+    from app import session_manager
+    mgr = session_manager.SessionManager()
+    sess = await mgr.create("h", "v", 1.0, prompt="x", audit_persist=True)
+    aw = sess.audit_writer
+    await sess.audit_writer.write({"event": "test"})
+    await mgr.cleanup(sess.id, "test")
+    assert aw._closed is True

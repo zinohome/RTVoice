@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 
 from app import config
+from app.memory import ConversationMemory
+from app.audit import AuditWriter
 
 log = logging.getLogger("rtvoice.realtime.session")
 
@@ -35,6 +37,11 @@ class Session:
     stt_client: Any = None
     llm_client: Any = None
     tts_client: Any = None
+    # SP3 fields
+    prompt: str = ""
+    memory: Any = None
+    audit_persist: bool = False
+    audit_writer: Any = None
 
 
 def _new_session_id() -> str:
@@ -57,7 +64,14 @@ class SessionManager:
         self._capacity_lock = asyncio.Lock()
         self._expire_task: Optional[asyncio.Task] = None
 
-    async def create(self, creator_key_hash: str, voice: str, speed: float) -> Session:
+    async def create(
+        self,
+        creator_key_hash: str,
+        voice: str,
+        speed: float,
+        prompt: str = "",
+        audit_persist: bool = False,
+    ) -> Session:
         async with self._capacity_lock:
             if self.active_count() >= config.MAX_CONCURRENT_SESSIONS:
                 raise CapacityFull(
@@ -72,10 +86,20 @@ class SessionManager:
                 created_at=now,
                 expires_at=now + timedelta(seconds=config.SESSION_MAX_LIFETIME_S),
                 last_activity=now,
+                prompt=prompt,
+                memory=ConversationMemory(max_turns=config.MEMORY_MAX_TURNS),
+                audit_persist=audit_persist,
             )
+            if audit_persist:
+                sess.audit_writer = AuditWriter(
+                    sess.id,
+                    base_dir=config.AUDIT_DIR,
+                    queue_max=config.AUDIT_QUEUE_MAX,
+                )
             self._sessions[sess.id] = sess
-            log.info("session created: id=%s voice=%s speed=%.2f expires=%s",
-                     sess.id, sess.voice, sess.speed, sess.expires_at.isoformat())
+            log.info("session created: id=%s voice=%s speed=%.2f audit=%s expires=%s",
+                     sess.id, sess.voice, sess.speed, audit_persist,
+                     sess.expires_at.isoformat())
             return sess
 
     def get(self, session_id: str) -> Optional[Session]:
@@ -111,6 +135,11 @@ class SessionManager:
                 await sess.ws.close(code=code)
             except Exception:
                 pass
+        if sess.audit_writer is not None:
+            try:
+                await sess.audit_writer.aclose()
+            except Exception:
+                log.exception("audit_writer.aclose failed for %s", session_id)
         for c in (sess.stt_client, sess.llm_client, sess.tts_client):
             if c and hasattr(c, "close"):
                 try:
