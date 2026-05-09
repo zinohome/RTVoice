@@ -19,6 +19,55 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.11.0] — 2026-05-09 — SP4 Bridge: Python SDK + SP3 残项 + A-lite 仪表盘
+
+平台化重构第五阶段：把 RTVoice 从"platform 已建好"推进到"platform 已能被用起来 + 看得见"。
+
+### Added
+
+- **`clients/python/`** — Python SDK `rtvoice-client` v0.1.0 alpha（PyPI 公开发布）
+  - 4 命名空间：stt / tts / realtime / tokens
+  - async + sync 双形态（`AsyncClient` + `Client`）
+  - 14 typed exception 对应 CONVENTIONS §6 错误码
+  - Pydantic v2 模型 + RealtimeEvent discriminated union
+  - 高层 `realtime.conversation()` helper
+  - `py.typed` marker
+- **`monitoring/`** — Prometheus + Grafana provisioning（profile=monitoring）
+  - `prometheus.yml` (4 services scrape, 15d retention)
+  - `grafana/dashboards/rtvoice-overview.json` (8 面板)
+  - `docker-compose.yml` 加 prometheus + grafana service block
+- **realtime-server** 3 个新 Prometheus metric
+  - `rtvoice_realtime_sessions_active` Gauge
+  - `rtvoice_realtime_turns_total` Counter (status=ok|error)
+  - `rtvoice_realtime_audit_queue_depth` Gauge
+
+### Changed
+
+- `WS session.update` 白名单：`prompt` → `prompt + voice + speed`
+- `pipeline.run_turn`：检查 `sess.tts_client_dirty`，需要时关旧 TTSClient + 用新 voice/speed 建新
+- `WS` 新增 `memory.clear` event（清 session 历史，prompt 不动）
+- `Session` dataclass 加 `tts_client_dirty: bool` 字段
+- `ConversationMemory` 加 `.clear()` 方法
+
+### 验证（autonomous）
+
+- ✅ SDK 共 56 单元测试（smoke + errors + models + base + stt + tts + realtime + tokens + sync + 3 e2e skipped）
+- ✅ realtime-server 60 测试（K 残项 +5 + metrics +1）
+- ✅ SP3 后 52 → SP4 后 116（SDK + realtime + e2e 占位）
+- ✅ docker compose validate OK
+- ⏳ prod 集成测试 + user-participation（CozyVoice 切换至 SDK；Grafana 看面板）
+
+### 设计决策
+
+- SDK monorepo 内（不独立 repo）：版本同步项目节奏；CozyVoice 等下游可 `pip install -e clients/python/`
+- semver 0.1.x alpha 起：API 还会基于 CozyVoice 反馈微调
+- Anonymous Grafana viewer 默认开：方便临时查看；公网部署必须加 reverse proxy 鉴权
+- `transcript.partial stable=true` 不在 SP4：等 STT API 调研
+
+详见 [SP4 设计](./docs/superpowers/specs/2026-05-09-sp4-bridge-bundle-design.md) + [实施 plan](./docs/superpowers/plans/2026-05-09-sp4-bridge-bundle.md)。
+
+---
+
 ## [0.10.0] — 2026-05-09 — SP3 Realtime Voice prompt + memory + 流式 + audit
 
 平台化重构第四阶段：升级 realtime-server 从"单 turn 无记忆"到"多轮对话 + 流式 transcript/response + 异步 audit"。
