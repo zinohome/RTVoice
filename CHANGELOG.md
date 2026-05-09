@@ -19,6 +19,48 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.10.0] — 2026-05-09 — SP3 Realtime Voice prompt + memory + 流式 + audit
+
+平台化重构第四阶段：升级 realtime-server 从"单 turn 无记忆"到"多轮对话 + 流式 transcript/response + 异步 audit"。
+
+### Added
+
+- `services/realtime-server/app/memory.py`：ConversationMemory 滑动窗口
+- `services/realtime-server/app/audit.py`：AuditWriter 异步 JSONL
+- `services/realtime-server/static/index.html`：浏览器测试页
+- POST /v1/sessions 加 `prompt` + `audit_persist` 入参
+- WS 事件：`transcript.partial`、`response.text`、`session.update`
+- WS `response.done` 加 `text` 字段（完整 assistant 回复）
+- GET /info `capabilities` 加 memory / transcript_partial / response_text / default_prompt
+- 5 个 env vars：RTVOICE_MEMORY_MAX_TURNS / RTVOICE_DEFAULT_PROMPT / RTVOICE_AUDIT_DIR / RTVOICE_AUDIT_QUEUE_MAX / RTVOICE_PROMPT_MAX_CHARS
+- docker-compose volume：宿主 transcripts dir → /data/transcripts
+
+### Changed
+
+- `Session` dataclass 加 prompt / memory / audit_persist / audit_writer
+- `LLMClient.stream()` 签名 `(messages: list[dict])`，pipeline 自己组消息列表
+- `pipeline.run_turn`：构造 messages、emit response.text、turn 末写 memory + audit
+- `STTClient` 在 main.py 创建时传 on_partial 回调（→ ws.send_json transcript.partial）
+
+### 验证（autonomous）
+
+- ✅ unit memory 4 测试 / audit 5 测试 / session_manager +3 / pipeline +6 / endpoints +4 / llm_client +1
+- ✅ 总测试 28 → 52
+- ✅ OpenAPI schema 含 prompt + audit_persist
+- ✅ docker build 成功；compose validate OK
+- ⏳ prod 集成测试（user-participation 浏览器验收，合并 SP2 延期项）
+
+### 设计决策
+
+- 滑动窗口纯 deque（O(1) append + 自动驱逐），无 tokenizer，TTFT 不退化
+- audit 路径用 session 创建日期，全程一个文件（不跨 0 点切）
+- session.update 仅 prompt 进白名单（YAGNI；voice/memory.clear 留 SP4+）
+- LLMClient 改签名是 breaking，但 realtime-server 是 SP2 起的全新 service；agent-worker 用自己的 client copy 不受影响
+
+详见 [SP3 设计](./docs/superpowers/specs/2026-05-09-sp3-realtime-memory-design.md) + [实施 plan](./docs/superpowers/plans/2026-05-09-sp3-realtime-memory.md)。
+
+---
+
 ## [0.9.0] — 2026-05-08 — SP2 Realtime Voice 多 tenant session
 
 平台化重构第三阶段：新增 `realtime-server` docker service 提供 `POST /v1/sessions` + `WS /v1/realtime/{id}` 多 tenant Realtime Voice service。
