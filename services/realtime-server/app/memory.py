@@ -32,3 +32,7 @@ class ConversationMemory:
 
     def __len__(self) -> int:
         return len(self._buf)
+
+    def clear(self) -> None:
+        """清空当前历史；prompt 不动."""
+        self._buf.clear()

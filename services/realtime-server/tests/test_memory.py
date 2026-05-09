@@ -38,3 +38,25 @@ def test_assistant_text_truncated_at_size_cap():
     m.append_turn("u", "a" * 50)
     msgs = list(m)
     assert msgs[1]["content"] == "a" * 10
+
+
+def test_clear_empties_buffer():
+    m = ConversationMemory(max_turns=3)
+    m.append_turn("u1", "a1")
+    m.append_turn("u2", "a2")
+    assert len(m) == 4
+    m.clear()
+    assert len(m) == 0
+    assert list(m) == []
+
+
+def test_clear_preserves_max_turns_after_clear():
+    """clear 后还能继续 append."""
+    m = ConversationMemory(max_turns=2)
+    m.append_turn("u1", "a1")
+    m.clear()
+    m.append_turn("u2", "a2")
+    m.append_turn("u3", "a3")
+    m.append_turn("u4", "a4")  # 该驱逐 u2/a2（cap=2）
+    msgs = list(m)
+    assert msgs[0]["content"] == "u3"
