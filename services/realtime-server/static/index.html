@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>RTVoice Realtime — SP3 Test</title>
+<style>
+body{font-family:sans-serif;max-width:780px;margin:2em auto;padding:0 1em}
+input,textarea,button{font-size:14px;padding:6px}
+.row{margin:.5em 0}
+#log{border:1px solid #ddd;padding:.5em;height:300px;overflow:auto;white-space:pre-wrap;font-family:monospace;font-size:12px}
+.user{color:#0a0}.agent{color:#06c}.evt{color:#888}.err{color:#c00}
+</style>
+</head>
+<body>
+<h1>RTVoice Realtime — SP3 Test Page</h1>
+<div class="row">
+  <label>API base: <input id="api" value="http://127.0.0.1:9000" size="40"></label>
+</div>
+<div class="row">
+  <label>Bearer (空=dev): <input id="bearer" size="40"></label>
+</div>
+<div class="row">
+  <label>Prompt (空=server default):</label><br>
+  <textarea id="prompt" rows="2" cols="80"></textarea>
+</div>
+<div class="row">
+  <label><input type="checkbox" id="audit"> audit_persist</label>
+</div>
+<div class="row">
+  <button id="create">1) 创建 session</button>
+  <button id="connect" disabled>2) 连 WS</button>
+  <button id="rec" disabled>3) 开始录音</button>
+  <button id="eos" disabled>4) 结束 turn</button>
+  <button id="updp" disabled>5) 改 prompt</button>
+</div>
+<div class="row" id="info"></div>
+<div id="log"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const log=(c,t)=>{const d=document.createElement("div");d.className=c;d.textContent=t;$('log').appendChild(d);$('log').scrollTop=$('log').scrollHeight;};
+let ws,session,mediaRec,audioCtx,procNode,mic,playBuf=[];
+
+$('create').onclick=async()=>{
+  const r=await fetch($('api').value+"/v1/sessions",{
+    method:"POST",
+    headers:{"Content-Type":"application/json", ...($('bearer').value?{"Authorization":"Bearer "+$('bearer').value}:{})},
+    body:JSON.stringify({prompt:$('prompt').value||undefined, audit_persist:$('audit').checked})
+  });
+  if(!r.ok){log('err',"create failed: "+r.status+" "+await r.text());return}
+  session=await r.json();
+  $('info').textContent="session: "+session.session_id+" | prompt: "+session.prompt.slice(0,40)+"...";
+  log('evt','created '+session.session_id);
+  $('connect').disabled=false;
+};
+
+$('connect').onclick=()=>{
+  let url=session.ws_url.replace("realtime-server","127.0.0.1");
+  const proto=$('bearer').value?["bearer."+$('bearer').value]:[];
+  ws=new WebSocket(url, proto);
+  ws.binaryType="arraybuffer";
+  ws.onopen=()=>{log('evt','ws open');$('rec').disabled=false;$('eos').disabled=false;$('updp').disabled=false;};
+  ws.onmessage=e=>{
+    if(typeof e.data==='string'){
+      const ev=JSON.parse(e.data);
+      const t=ev.type;
+      if(t==='transcript.partial'){log('user','部分: '+ev.text);}
+      else if(t==='transcript.final'){log('user','你说: '+ev.text);}
+      else if(t==='response.text'){log('agent','agent: '+ev.text);}
+      else if(t==='response.done'){log('evt','done: '+(ev.text||'').slice(0,60));}
+      else if(t==='error'){log('err','error: '+ev.code+' '+ev.message);}
+      else log('evt',JSON.stringify(ev));
+    }else{
+      log('evt','pcm '+e.data.byteLength+' bytes');
+    }
+  };
+  ws.onclose=e=>log('evt','ws close '+e.code);
+  ws.onerror=e=>log('err','ws err');
+};
+
+$('rec').onclick=async()=>{
+  if(!audioCtx){audioCtx=new AudioContext({sampleRate:16000});}
+  mic=await navigator.mediaDevices.getUserMedia({audio:{sampleRate:16000,channelCount:1,echoCancellation:true}});
+  const src=audioCtx.createMediaStreamSource(mic);
+  procNode=audioCtx.createScriptProcessor(2048,1,1);
+  procNode.onaudioprocess=e=>{
+    const f32=e.inputBuffer.getChannelData(0);
+    const i16=new Int16Array(f32.length);
+    for(let i=0;i<f32.length;i++)i16[i]=Math.max(-1,Math.min(1,f32[i]))*0x7FFF;
+    if(ws&&ws.readyState===1)ws.send(i16.buffer);
+  };
+  src.connect(procNode);procNode.connect(audioCtx.destination);
+  log('evt','录音中…');
+};
+
+$('eos').onclick=()=>{ws.send("audio.eos");log('evt','EOS sent');};
+$('updp').onclick=()=>{
+  const p=prompt("新 prompt:");
+  if(!p)return;
+  ws.send(JSON.stringify({type:"session.update",prompt:p}));
+  log('evt','session.update sent');
+};
+</script>
+</body>
+</html>

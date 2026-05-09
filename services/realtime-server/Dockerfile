@@ -14,6 +14,7 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY app /app/app
+COPY static /app/static
 
 RUN useradd -u 1000 -m appuser && chown -R appuser:appuser /app
 USER appuser

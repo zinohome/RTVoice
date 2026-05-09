@@ -15,11 +15,15 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Annotated, Literal, Optional
 
+from pathlib import Path
+
 from fastapi import (
     Depends, FastAPI, Header, HTTPException, Request, WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import app.config as config
@@ -67,6 +71,19 @@ app = FastAPI(
 )
 app.add_exception_handler(HTTPException, http_exception_handler())
 app.add_exception_handler(RequestValidationError, validation_exception_handler())
+
+
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+
+@app.get("/", include_in_schema=False, response_class=HTMLResponse)
+async def index() -> HTMLResponse:
+    idx = _STATIC_DIR / "index.html"
+    if not idx.is_file():
+        return HTMLResponse("<h1>RTVoice Realtime</h1><p>静态测试页未部署。</p>")
+    return HTMLResponse(idx.read_text(encoding="utf-8"))
 
 
 try:
