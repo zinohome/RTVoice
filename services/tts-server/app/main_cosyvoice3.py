@@ -40,6 +40,7 @@ from fastapi import (
     Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile,
     WebSocket, WebSocketDisconnect,
 )
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -172,6 +173,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RTVoice TTS Server (Fun-CosyVoice 3)", version="0.7.0", lifespan=lifespan)
+
+_cors_raw = os.environ.get("RTVOICE_CORS_ORIGINS", "*").strip()
+_cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-Id"],
+    max_age=3600,
+)
+
 app.add_exception_handler(HTTPException, http_exception_handler())
 app.add_exception_handler(RequestValidationError, validation_exception_handler())
 
