@@ -128,6 +128,52 @@ print(r.read().decode())
 
 ---
 
+## §5.0 Recommended: 用 rtvoice-client SDK
+
+v0.11+ 起官方 SDK 可用。**强烈推荐替代手写 httpx/websockets。**
+
+```bash
+pip install rtvoice-client
+```
+
+```python
+from rtvoice_client import Client
+
+c = Client(api_key=os.environ["RTVOICE_API_KEY"],
+           base_url=os.environ["RTVOICE_BASE_URL"])
+
+# STT
+text = c.stt.transcribe(pcm_int16le_16k_mono, sample_rate=16000)
+
+# TTS
+pcm = c.tts.synthesize("你好世界", voice="default_zh_female", speed=1.0)
+
+# Realtime — 高层 helper
+async def cozyvoice_chat(audio_iter):
+    async for evt in c.realtime.conversation(audio_iter, prompt="..."):
+        if evt.type == "response.text":
+            yield evt.text  # text delta 给 UI
+        elif evt.type == "response.pcm":
+            yield evt.data   # PCM bytes 给 audio sink
+```
+
+错误处理用 typed exceptions：
+
+```python
+from rtvoice_client.errors import CapacityFull, PromptTooLong, RTVoiceError
+
+try:
+    sess = c.realtime.create_session(prompt="...")
+except CapacityFull:
+    show_user("服务繁忙，稍后重试")
+except PromptTooLong:
+    show_user("system prompt 太长（>2000 字符）")
+except RTVoiceError as e:
+    log.error("rtvoice error: %s", e)
+```
+
+---
+
 ## 5. Python SDK 示例
 
 ### 5.1 STT WS 客户端

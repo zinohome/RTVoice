@@ -103,6 +103,8 @@
 
 WS 错误事件用同 schema：`{"type":"error","code":"...","message":"..."}`。
 
+> **v0.11.0 (SP4 K)**: `session.update` 白名单扩到 `prompt + voice + speed`；新增 `memory.clear` event。
+
 ## §7 鉴权
 
 ### HTTP

@@ -1,7 +1,7 @@
 # Realtime Voice Service API
 
 > 实时语音对话。WebSocket gateway 默认（OpenAI Realtime 风格）；LiveKit 高级模式可选。
-> **状态：v0.10.0 已实现**（prompt + memory + transcript.partial + response.text + session.update + audit_persist）。
+> **状态：v0.11.0 已实现** —— SP3 (prompt/memory/streaming/audit) + SP4 K (voice/speed 热改 + memory.clear)。
 
 ## Endpoints 速查
 
@@ -50,7 +50,10 @@
 
 | Type | Payload | 何时 |
 |---|---|---|
-| text JSON | `{"type":"session.update","instructions":"...","voice":"..."}` | 热改 session config（可选）|
+| text JSON | `{"type":"session.update","prompt":"..."}` | 热改 system prompt（SP3） |
+| text JSON | `{"type":"session.update","voice":"alice"}` | 热改 TTS voice（SP4，下一 turn 起 effective） |
+| text JSON | `{"type":"session.update","speed":1.5}` | 热改 TTS speed（0.5-2.0；下一 turn 起 effective） |
+| text JSON | `{"type":"memory.clear"}` | 清当前 session 历史；prompt 不动（SP4） |
 | binary | PCM int16 LE 16kHz mono | 用户音频 |
 | text `"audio.eos"` | — | 用户发言结束 |
 

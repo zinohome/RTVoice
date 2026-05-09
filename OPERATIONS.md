@@ -302,7 +302,55 @@ curl -X DELETE http://127.0.0.1:9880/v1/voices/alice \
 
 ---
 
-## 5. 监控检查项
+## §5 Monitoring (SP4 A-lite, v0.11+)
+
+### 5.1 启用监控栈
+
+```bash
+docker compose --profile prod --profile monitoring up -d
+```
+
+容器：
+- `rtvoice-prometheus` — 抓取 4 services /metrics，15s 间隔，15d 保留
+- `rtvoice-grafana` — datasource Prometheus 自动连，dashboard 自动 provisioning
+
+访问：
+- Prometheus: http://${BIND_HOST}:9090
+- Grafana: http://${BIND_HOST}:3000  (anonymous viewer 默认开)
+
+### 5.2 安全注意
+
+**Anonymous Grafana 默认开 Viewer**——指标 + dashboard 全公开。生产部署：
+- 默认 `BIND_HOST=127.0.0.1` 仅 LAN 访问
+- 上公网必须加反向代理（Caddy/nginx）做基本认证或 OAuth proxy
+- 改 `GF_AUTH_ANONYMOUS_ENABLED=false` 强制登录（admin 密码在 .env）
+
+### 5.3 Dashboard 内容（rtvoice-overview）
+
+| 面板 | 含义 |
+|---|---|
+| Service Health | up/down for each -server job |
+| Active Sessions | realtime-server 当前 session 数 |
+| Turns / min | run_turn 调用速率 |
+| Turn Error Rate | error/(ok+error) 比例 |
+| Audit Queue Depth | 落盘背压指示器 |
+| HTTP Request Rate by Service | per-service 流量 |
+| HTTP P95 Latency | 慢服务定位 |
+| Tokens Issued | LiveKit token rate |
+
+### 5.4 故障排查
+
+#### Grafana "No Data"
+- `docker exec rtvoice-prometheus wget -qO- http://localhost:9090/api/v1/targets | jq .data.activeTargets[].health` — 看哪 target 不健康
+- 服务侧：`curl http://realtime-server:9000/metrics | head` 验证 metric 暴露
+- 防火墙：rtvoice_net 网络内通信，不会被 host 防火墙拦
+
+#### Prometheus 数据卷膨胀
+- 默认 retention=15d；改：command 段加 `--storage.tsdb.retention.size=5GB`
+
+---
+
+## 6. 监控检查项
 
 如果你跑了 `docker-compose.monitoring.yml`，Grafana 看这些指标判健康：
 
@@ -318,7 +366,7 @@ curl -X DELETE http://127.0.0.1:9880/v1/voices/alice \
 
 ---
 
-## 6. 已知限制
+## 7. 已知限制
 
 - **重连后 sherpa-onnx 是新 stream**：当前 utterance 数据丢失，用户需重复一次。这是设计权衡（用"丢局部"换"全局可用"），不是 bug。
 - **mid-stream LLM 异常截断不拼 fallback**：用户听到半句话停止。设计上是为了避免"半句拼一句兜底"听起来很奇怪。如果想改成更激进的恢复，改 `llm_client.py::stream`。
@@ -326,7 +374,7 @@ curl -X DELETE http://127.0.0.1:9880/v1/voices/alice \
 
 ---
 
-## 7. 升级历史快查
+## 8. 升级历史快查
 
 | 版本 | 主线变化 | 核心 commit |
 |---|---|---|
@@ -343,7 +391,7 @@ curl -X DELETE http://127.0.0.1:9880/v1/voices/alice \
 
 ---
 
-## 8. Build 性能 & Docker 缓存（v0.7.1+）
+## 9. Build 性能 & Docker 缓存（v0.7.1+）
 
 ML 镜像（venv 60GB+）的 build 缓存策略与普通 web 镜像不同。`Dockerfile.cosyvoice3` 已按下面规则优化（v0.7.1，commit `8ed9a4d`）。
 

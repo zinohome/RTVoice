@@ -36,6 +36,32 @@ docker compose --profile dev up -d
 
 ---
 
+## Python SDK (v0.11+)
+
+```bash
+pip install rtvoice-client
+```
+
+```python
+from rtvoice_client import Client
+c = Client(api_key="...", base_url="https://your-rtvoice.example.com")
+text = c.stt.transcribe(pcm)
+pcm = c.tts.synthesize("你好")
+```
+
+详见 [clients/python/README.md](./clients/python/README.md)。
+
+## Monitoring (v0.11+)
+
+```bash
+docker compose --profile prod --profile monitoring up -d
+# Grafana: http://your-host:3000  (anonymous viewer)
+```
+
+详见 [OPERATIONS.md §5](./OPERATIONS.md)。
+
+---
+
 ## What's in the box
 
 ### 🎤 STT — 流式语音识别
