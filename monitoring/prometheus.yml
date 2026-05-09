@@ -1,48 +1,26 @@
-# Prometheus scrape 配置（dev / prod 通用）
-#
-# 启用方式：
-#   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
-#                  -f docker-compose.monitoring.yml --profile dev --profile monitoring up -d
-# 然后访问 http://127.0.0.1:9090（Prometheus）/ http://127.0.0.1:3000（Grafana）
-
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
   external_labels:
-    project: rtvoice
+    deployment: rtvoice-prod
 
 scrape_configs:
-  # 自身
-  - job_name: prometheus
+  - job_name: realtime-server
     static_configs:
-      - targets: [localhost:9090]
-
-  # token-server: FastAPI Instrumentator + 自定义 counter
-  - job_name: rtvoice-token
-    static_configs:
-      - targets: [token-server:8000]
+      - targets: ["realtime-server:9000"]
     metrics_path: /metrics
-
-  # stt-server: WS 连接 + decode 延迟
-  - job_name: rtvoice-stt
+  - job_name: stt-server
     static_configs:
-      - targets: [stt-server:9090]
+      - targets: ["stt-server:9090"]
     metrics_path: /metrics
-
-  # tts-server: phrases / TTFB / RTF
-  - job_name: rtvoice-tts
+  - job_name: tts-server
     static_configs:
-      - targets: [tts-server:9880]
+      - targets: ["tts-server:9880"]
     metrics_path: /metrics
-
-  # agent-worker: 独立 :9100 端口（FSM Gauge / 端到端延迟 / barge-in）
-  - job_name: rtvoice-agent
+  - job_name: token-server
     static_configs:
-      - targets: [agent-worker:9100]
+      - targets: ["token-server:8000"]
     metrics_path: /metrics
-
-  # vLLM (prod): vLLM 自带 /metrics
-  # - job_name: rtvoice-llm
-  #   static_configs:
-  #     - targets: [llm-server:8000]
-  #   metrics_path: /metrics
+  - job_name: prometheus-self
+    static_configs:
+      - targets: ["localhost:9090"]
