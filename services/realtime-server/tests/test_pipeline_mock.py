@@ -50,12 +50,18 @@ class FakeTTSWS:
 
 
 class FakeTTSClient:
-    def __init__(self):
+    def __init__(self, voice="default", speed=1.0):
+        self.voice = voice
+        self.speed = speed
         self.opened_ws = None
+        self.closed = False
 
     async def open_ws(self):
         self.opened_ws = FakeTTSWS()
         return self.opened_ws
+
+    async def close(self):
+        self.closed = True
 
 
 class FakeWS:
@@ -271,3 +277,43 @@ async def test_run_turn_audit_writes_events():
     events = [e["event"] for e in aw.events]
     assert "transcript.final" in events
     assert "response.done" in events
+
+
+@pytest.mark.asyncio
+async def test_run_turn_rebuilds_tts_when_dirty(monkeypatch):
+    """sess.tts_client_dirty=True → pipeline 关旧 TTS、建新（用新 voice/speed）."""
+    from app.pipeline import run_turn
+
+    sess = _make_session()
+    sess.stt_client = FakeSTTClient(final_text="hi")
+    sess.llm_client = FakeLLMClient()
+    old_tts = FakeTTSClient(voice="old_voice", speed=1.0)
+    sess.tts_client = old_tts
+    sess.voice = "new_voice"
+    sess.speed = 1.5
+    sess.tts_client_dirty = True
+
+    new_tts = FakeTTSClient(voice="new_voice", speed=1.5)
+    monkeypatch.setattr("app.pipeline.TTSClient", lambda **kwargs: new_tts)
+
+    ws = FakeWS()
+    await run_turn(sess, ws)
+
+    assert old_tts.closed is True
+    assert sess.tts_client is new_tts
+    assert sess.tts_client_dirty is False
+
+
+@pytest.mark.asyncio
+async def test_run_turn_does_not_rebuild_when_not_dirty():
+    from app.pipeline import run_turn
+    sess = _make_session()
+    sess.stt_client = FakeSTTClient(final_text="hi")
+    sess.llm_client = FakeLLMClient()
+    tts = FakeTTSClient()
+    sess.tts_client = tts
+    sess.tts_client_dirty = False
+    ws = FakeWS()
+    await run_turn(sess, ws)
+    assert tts.closed is False
+    assert sess.tts_client is tts

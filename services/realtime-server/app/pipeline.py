@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from app import config
+from app.tts_client import TTSClient
 
 if TYPE_CHECKING:
     from app.session_manager import Session
@@ -47,6 +48,31 @@ async def _audit(sess, event: dict) -> None:
 async def run_turn(sess, ws):
     """SP3 single turn with memory + streaming + audit."""
     sess.current_turn_task = asyncio.current_task()
+
+    # SP4 K: voice/speed 热改 → pipeline 这里重建 TTS client
+    if getattr(sess, "tts_client_dirty", False):
+        try:
+            old = sess.tts_client
+            if old is not None and hasattr(old, "close"):
+                res = old.close()
+                if asyncio.iscoroutine(res):
+                    await res
+        except Exception:
+            log.exception("close old tts_client failed (continuing)")
+        try:
+            sess.tts_client = TTSClient(
+                base_url=config.TTS_BASE_URL,
+                voice=sess.voice,
+                speed=sess.speed,
+                api_key=config.RTVOICE_API_KEY or None,
+            )
+            sess.tts_client_dirty = False
+            log.info("session %s rebuilt tts_client (voice=%s speed=%.2f)",
+                     sess.id, sess.voice, sess.speed)
+        except Exception:
+            log.exception("rebuild tts_client failed")
+            sess.tts_client_dirty = False
+
     user_text = ""
     assistant_chunks: list[str] = []
     try:
