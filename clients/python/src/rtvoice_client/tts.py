@@ -63,8 +63,9 @@ class AsyncTTS:
 
 
 class SyncTTS:
-    def __init__(self, inner: AsyncTTS) -> None:
+    def __init__(self, inner: AsyncTTS, runner=None) -> None:
         self._inner = inner
+        self._runner = runner if runner is not None else _legacy_runner
 
     def synthesize(
         self,
@@ -74,14 +75,18 @@ class SyncTTS:
         speed: float = 1.0,
         lang: str = "cmn",
     ) -> bytes:
-        return asyncio.run(
+        return self._runner(
             self._inner.synthesize(text, voice=voice, speed=speed, lang=lang)
         )
 
     def stream(self, text: str, **kwargs):
-        """Sync iterator wrapping async stream — drains into list."""
+        """Sync iterator: drains async stream via runner."""
         async def _drain():
             return [c async for c in self._inner.stream(text, **kwargs)]
-        chunks = asyncio.run(_drain())
+        chunks = self._runner(_drain())
         for c in chunks:
             yield c
+
+
+def _legacy_runner(coro):
+    return asyncio.run(coro)

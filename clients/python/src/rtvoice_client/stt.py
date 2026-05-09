@@ -73,10 +73,17 @@ class AsyncSTTStream:
 
 
 class SyncSTT:
-    """Sync wrapper: each call asyncio.run AsyncSTT method."""
+    """Sync wrapper: each call uses parent Client's runner（避免 asyncio.run 多次循环）."""
 
-    def __init__(self, inner: AsyncSTT) -> None:
+    def __init__(self, inner: AsyncSTT, runner=None) -> None:
         self._inner = inner
+        # 兼容旧测试：runner 为 None 时退化用 asyncio.run（仅创建一次 client 时安全）
+        self._runner = runner if runner is not None else _legacy_runner
 
     def transcribe(self, pcm: bytes, *, sample_rate: int = 16000) -> str:
-        return asyncio.run(self._inner.transcribe(pcm, sample_rate=sample_rate))
+        return self._runner(self._inner.transcribe(pcm, sample_rate=sample_rate))
+
+
+def _legacy_runner(coro):
+    """Fallback for tests / direct construction without parent Client."""
+    return asyncio.run(coro)

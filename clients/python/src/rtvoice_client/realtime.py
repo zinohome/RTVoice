@@ -137,8 +137,13 @@ class AsyncRealtime:
 
 
 class SyncRealtime:
-    def __init__(self, inner: AsyncRealtime) -> None:
+    def __init__(self, inner: AsyncRealtime, runner=None) -> None:
         self._inner = inner
+        self._runner = runner if runner is not None else _legacy_runner
 
     def create_session(self, **kwargs) -> SessionCreateResponse:
-        return asyncio.run(self._inner.create_session(**kwargs))
+        return self._runner(self._inner.create_session(**kwargs))
+
+
+def _legacy_runner(coro):
+    return asyncio.run(coro)

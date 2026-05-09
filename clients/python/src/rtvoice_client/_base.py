@@ -121,49 +121,67 @@ class AsyncClient:
 
 
 class Client:
-    """Sync entry point — wraps AsyncClient via asyncio.run for each call.
+    """Sync entry point — wraps AsyncClient via single long-lived event loop.
+
+    持有一个 asyncio.new_event_loop()，所有 sync 调用通过它跑，
+    避免每次 asyncio.run() 创新 loop 导致 httpx connection pool 引用旧 loop 报
+    'Event loop is closed' 的 bug（SP4-fix-1）。
 
     Use AsyncClient when running inside an async event loop (FastAPI etc.).
     """
 
     def __init__(self, **kwargs: Any) -> None:
+        import asyncio
+        self._loop = asyncio.new_event_loop()
         self._async = AsyncClient(**kwargs)
         self._stt: Any = None
         self._tts: Any = None
         self._realtime: Any = None
         self._tokens: Any = None
 
+    def _run(self, coro: Any) -> Any:
+        """Execute a coroutine on this Client's persistent event loop."""
+        return self._loop.run_until_complete(coro)
+
     @property
     def stt(self):
         if self._stt is None:
             from rtvoice_client.stt import SyncSTT
-            self._stt = SyncSTT(self._async.stt)
+            self._stt = SyncSTT(self._async.stt, self._run)
         return self._stt
 
     @property
     def tts(self):
         if self._tts is None:
             from rtvoice_client.tts import SyncTTS
-            self._tts = SyncTTS(self._async.tts)
+            self._tts = SyncTTS(self._async.tts, self._run)
         return self._tts
 
     @property
     def realtime(self):
         if self._realtime is None:
             from rtvoice_client.realtime import SyncRealtime
-            self._realtime = SyncRealtime(self._async.realtime)
+            self._realtime = SyncRealtime(self._async.realtime, self._run)
         return self._realtime
 
     @property
     def tokens(self):
         if self._tokens is None:
             from rtvoice_client.tokens import SyncTokens
-            self._tokens = SyncTokens(self._async.tokens)
+            self._tokens = SyncTokens(self._async.tokens, self._run)
         return self._tokens
 
     def close(self) -> None:
-        import asyncio
-        asyncio.run(self._async.aclose())
+        if self._loop.is_closed():
+            return
+        try:
+            self._loop.run_until_complete(self._async.aclose())
+        except Exception:
+            pass
+        try:
+            self._loop.close()
+        except Exception:
+            pass
 
     def __enter__(self):
         return self
