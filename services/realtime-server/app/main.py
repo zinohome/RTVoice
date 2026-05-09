@@ -312,16 +312,17 @@ async def realtime_ws(ws: WebSocket, session_id: str) -> None:
                         log.debug("session %s: non-JSON text %r", session_id, text_msg[:80])
                         continue
                     if ev.get("type") == "session.update":
-                        allowed = {"type", "prompt"}
+                        allowed = {"type", "prompt", "voice", "speed"}
                         extra = set(ev.keys()) - allowed
                         if extra:
                             await ws.send_json({
                                 "type": "error",
                                 "code": "session.update.invalid",
-                                "message": f"only 'prompt' is hot-editable; got extra: {sorted(extra)}",
+                                "message": f"only prompt/voice/speed; got extra: {sorted(extra)}",
                                 "request_id": None,
                             })
-                        elif "prompt" in ev:
+                            continue
+                        if "prompt" in ev:
                             new_prompt = str(ev["prompt"])
                             if len(new_prompt) > config.PROMPT_MAX_CHARS:
                                 await ws.send_json({
@@ -333,6 +334,40 @@ async def realtime_ws(ws: WebSocket, session_id: str) -> None:
                                 sess.prompt = new_prompt
                                 log.info("session %s prompt updated (%d chars)",
                                          session_id, len(new_prompt))
+                        if "voice" in ev:
+                            sess.voice = str(ev["voice"])
+                            sess.tts_client_dirty = True
+                            log.info("session %s voice updated to %s (dirty)",
+                                     session_id, sess.voice)
+                        if "speed" in ev:
+                            try:
+                                s = float(ev["speed"])
+                            except (TypeError, ValueError):
+                                await ws.send_json({
+                                    "type": "error", "code": "validation.invalid_request",
+                                    "message": "speed must be a number",
+                                    "request_id": None,
+                                })
+                                continue
+                            if not (0.5 <= s <= 2.0):
+                                await ws.send_json({
+                                    "type": "error", "code": "validation.invalid_request",
+                                    "message": "speed out of range (0.5-2.0)",
+                                    "request_id": None,
+                                })
+                                continue
+                            sess.speed = s
+                            sess.tts_client_dirty = True
+                            log.info("session %s speed updated to %.2f (dirty)",
+                                     session_id, s)
+                    elif ev.get("type") == "memory.clear":
+                        sess.memory.clear()
+                        log.info("session %s memory cleared", session_id)
+                        if sess.audit_writer is not None:
+                            try:
+                                await sess.audit_writer.write({"event": "memory.clear"})
+                            except Exception:
+                                log.exception("audit write memory.clear failed")
                     else:
                         log.debug("session %s: unknown event %r",
                                   session_id, ev.get("type"))

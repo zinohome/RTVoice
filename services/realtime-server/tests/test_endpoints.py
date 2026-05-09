@@ -164,3 +164,54 @@ def test_info_includes_sp3_capabilities(client):
     assert caps["response_text"] is True
     assert "default_prompt" in caps
     assert isinstance(caps["default_prompt"], str)
+
+
+@pytest.fixture
+def client_stt_mock(client, monkeypatch):
+    """Monkeypatch STTClient.connect to no-op so WS handler enters main loop."""
+    async def _noop_connect(self):
+        return None
+    async def _noop_feed(self, b):
+        return None
+    async def _noop_close(self):
+        return None
+    from app import stt_client as _stt_mod
+    monkeypatch.setattr(_stt_mod.STTClient, "connect", _noop_connect)
+    monkeypatch.setattr(_stt_mod.STTClient, "feed", _noop_feed, raising=False)
+    monkeypatch.setattr(_stt_mod.STTClient, "close", _noop_close, raising=False)
+    return client
+
+
+def test_session_update_voice_speed_via_ws(client_stt_mock):
+    """WS session.update voice/speed → 不抛 + 无 error."""
+    c = client_stt_mock
+    r = c.post("/v1/sessions", json={})
+    sid = r.json()["session_id"]
+    with c.websocket_connect(f"/v1/realtime/{sid}") as ws:
+        import json as _json
+        ws.send_text(_json.dumps({"type": "session.update", "voice": "alice"}))
+        ws.send_text(_json.dumps({"type": "session.update", "speed": 1.5}))
+        # 简化：测能发送不抛即可（TestClient WS 收消息会 block）
+
+
+def test_session_update_speed_out_of_range_emits_error(client_stt_mock):
+    """speed=3.0 → error validation.invalid_request."""
+    c = client_stt_mock
+    r = c.post("/v1/sessions", json={})
+    sid = r.json()["session_id"]
+    import json as _json
+    with c.websocket_connect(f"/v1/realtime/{sid}") as ws:
+        ws.send_text(_json.dumps({"type": "session.update", "speed": 3.0}))
+        msg = ws.receive_json()
+        assert msg["type"] == "error"
+        assert msg["code"] == "validation.invalid_request"
+
+
+def test_memory_clear_event_handled(client_stt_mock):
+    """WS memory.clear → no error event back（仅验"发不抛"）."""
+    c = client_stt_mock
+    r = c.post("/v1/sessions", json={})
+    sid = r.json()["session_id"]
+    import json as _json
+    with c.websocket_connect(f"/v1/realtime/{sid}") as ws:
+        ws.send_text(_json.dumps({"type": "memory.clear"}))

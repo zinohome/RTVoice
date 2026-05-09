@@ -42,6 +42,7 @@ class Session:
     memory: Any = None
     audit_persist: bool = False
     audit_writer: Any = None
+    tts_client_dirty: bool = False
 
 
 def _new_session_id() -> str:
