@@ -244,3 +244,9 @@ def test_cors_actual_request_has_acao_header(client):
     r = client.get("/info", headers={"Origin": "http://example.com"})
     assert r.status_code == 200
     assert "access-control-allow-origin" in {k.lower() for k in r.headers}
+
+
+def test_info_version_is_0_12_0(client):
+    r = client.get("/info")
+    assert r.status_code == 200
+    assert r.json()["version"] == "0.12.0"
