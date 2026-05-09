@@ -79,6 +79,15 @@
 | `RTVOICE_TURN_TIMEOUT_S` | 60 | 单 turn 处理最长时间 |
 | `PUBLIC_WS_BASE` | ws://realtime-server:9000 | 公网部署改 wss://your-domain.com |
 
+### 2.6 Realtime Voice SP3 (v0.10+)
+
+| 变量 | 默认 | 调整时机 |
+|---|---|---|
+| `RTVOICE_MEMORY_MAX_TURNS` | 6 | 上下文需求多 → 调高（注意 LLM context 限制）|
+| `RTVOICE_DEFAULT_PROMPT` | 中文短回答 | 客户端不传时的兜底 |
+| `RTVOICE_AUDIT_DIR` | `/data/transcripts` | 改路径需同步 compose volume |
+| `RTVOICE_PROMPT_MAX_CHARS` | 2000 | 客户端 prompt 上限 |
+
 ---
 
 ## 3. 升级路径
@@ -164,6 +173,25 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod u
 ```bash
 curl -s http://127.0.0.1:9000/health
 curl -X POST http://127.0.0.1:9000/v1/sessions -H 'Content-Type: application/json' -d '{}'
+```
+
+### 3.5 v0.9.x → v0.10.0（SP3 加 prompt + memory + audit）
+
+```bash
+# 1. 创建宿主 transcripts 目录（首次）
+mkdir -p /var/data/rtvoice/transcripts && chown 1000:1000 /var/data/rtvoice/transcripts
+
+# 2. .env 加：
+# RTVOICE_AUDIT_HOST_DIR=/var/data/rtvoice/transcripts
+
+# 3. 部署
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod \
+               up -d --build realtime-server
+```
+
+**验证**：
+```bash
+curl -s http://127.0.0.1:9000/info | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['capabilities']['memory'], d['capabilities']['default_prompt'])"
 ```
 
 ---
@@ -259,6 +287,18 @@ curl -X DELETE http://127.0.0.1:9880/v1/voices/alice \
 - session_id 拼错 / 过期 / 已被 cleanup
 - 检查：`docker logs rtvoice-realtime | grep "session created\|cleanup"` 找 session_id 历史
 - 客户端应在 `expires_at` 之前连，超出立即返 4410 expired
+
+### 4.8 audit JSONL 文件没出现
+
+- 检查 RTVOICE_AUDIT_DIR 在容器内权限：`docker exec rtvoice-realtime ls -la /data/transcripts`
+- 用户必须传 `audit_persist=true`；默认 false
+- mkdir 失败 → 看 `docker logs rtvoice-realtime | grep "audit dir"`
+
+### 4.9 多轮对话不连续（agent 不记得前文）
+
+- 看 `/info` 返回 `memory: true`
+- 看 audit JSONL 文件每个 turn 的 messages 长度（client console / response.text 累计）
+- MEMORY_MAX_TURNS=0 会禁用 memory；确认 env
 
 ---
 

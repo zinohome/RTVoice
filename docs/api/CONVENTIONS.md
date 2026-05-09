@@ -97,6 +97,9 @@
 | `stt.empty` | STT final 为空（无有效语音）|
 | `internal.upstream_closed` | 上游 service WS 断 |
 | `internal.unknown` | 兜底（不详的内部异常）|
+| `prompt.too_long` | POST/WS prompt 字符数超 PROMPT_MAX_CHARS |
+| `session.update.invalid` | WS session.update 字段不在白名单 |
+| `audit.write_failed` | 服务端落盘异常（不发 client，仅 log） |
 
 WS 错误事件用同 schema：`{"type":"error","code":"...","message":"..."}`。
 

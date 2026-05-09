@@ -1,7 +1,7 @@
 # Realtime Voice Service API
 
 > 实时语音对话。WebSocket gateway 默认（OpenAI Realtime 风格）；LiveKit 高级模式可选。
-> **状态：v0.9.0 已实现**（SP3 加 prompt + memory + transcript 流式）。
+> **状态：v0.10.0 已实现**（prompt + memory + transcript.partial + response.text + session.update + audit_persist）。
 
 ## Endpoints 速查
 
@@ -34,7 +34,11 @@
 {
   "session_id": "sess_abc123",
   "ws_url": "ws://localhost:9000/v1/realtime/sess_abc123",
-  "expires_at": "2026-05-08T16:30:00Z"
+  "expires_at": "2026-05-09T16:30:00Z",
+  "voice": "default_zh_female",
+  "speed": 1.0,
+  "prompt": "你是语音助手。用中文简短回答（≤2 句）。",
+  "audit_persist": false
 }
 ```
 
@@ -61,7 +65,7 @@
 | text | `{"type":"response.done"}` | 本轮回复结束 |
 | text | `{"type":"error","code":"...","message":"..."}` | 失败 |
 
-详细 session 生命周期 / memory 管理 / prompt 透传规则 → SP3 设计文档（SP3 启动时创建）。
+详细 session 生命周期 / memory 管理 / prompt 透传规则 → [SP3 设计文档](../superpowers/specs/2026-05-09-sp3-realtime-memory-design.md)。
 
 ## POST /v1/tokens（高级模式 LiveKit）
 

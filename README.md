@@ -30,6 +30,8 @@ docker compose --profile dev up -d
 | **Realtime 对话**（API 方式）| `curl -X POST http://127.0.0.1:9000/v1/sessions -d '{}' -H "Content-Type: application/json"` 拿 ws_url，然后 websocat 连 |
 | **Realtime 对话**| 浏览器 [测试页](http://127.0.0.1:8000/) → 加入语音 → 说话 |
 
+**Realtime Voice 完整能力（v0.10+）**: 多轮记忆 / 流式 transcript+text / 中途换 prompt / 异步 audit JSONL。详见 [SP3 spec](./docs/superpowers/specs/2026-05-09-sp3-realtime-memory-design.md)。
+
 **首次启动注意**：LLM (Ollama) 需要 `ollama pull qwen2.5:1.5b`（约 1GB）。完整下好后约 3-5 分钟可对话。prod GPU 部署见 [DEPLOY.md](./DEPLOY.md)。
 
 ---

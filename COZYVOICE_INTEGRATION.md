@@ -361,6 +361,30 @@ async def main():
 asyncio.run(main())
 ```
 
+**用法 — 自定义 prompt + audit**（v0.10+）：
+
+```python
+# 注：上面 §5.4 RTVoiceRealtimeClient.create_session 仅传 voice/speed；
+# SP3 加字段直接扩展 POST body，或把 create_session 加 kwargs：
+async def create_session_sp3(self, voice="default_zh_female", speed=1.0,
+                             prompt=None, audit_persist=False):
+    body = {"voice": voice, "speed": speed, "audit_persist": audit_persist}
+    if prompt: body["prompt"] = prompt
+    # ...同上 POST /v1/sessions
+
+sess = await client.create_session_sp3(prompt="你是 IT 客服，用中文简短回答", audit_persist=True)
+# 之后所有 turn agent 用此 prompt + 自动滚 6 轮历史
+# audit JSONL 在 server 端 /data/transcripts/{date}/{session_id}.jsonl
+```
+
+**中途换 prompt**：
+
+```python
+async with websockets.connect(ws_url) as ws:
+    await ws.send(json.dumps({"type": "session.update", "prompt": "改用英文"}))
+    # 下一 turn 起 agent 用新 prompt
+```
+
 ---
 
 ## 6. 常见模式
