@@ -11,6 +11,7 @@ Endpoints:
 from __future__ import annotations
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Annotated, Literal, Optional
@@ -22,6 +23,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -69,6 +71,19 @@ app = FastAPI(
     version="0.9.0",
     lifespan=lifespan,
 )
+
+_cors_raw = os.environ.get("RTVOICE_CORS_ORIGINS", "*").strip()
+_cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-Id"],
+    max_age=3600,
+)
+
 app.add_exception_handler(HTTPException, http_exception_handler())
 app.add_exception_handler(RequestValidationError, validation_exception_handler())
 

@@ -224,3 +224,23 @@ def test_metrics_endpoint_exposes_sp4_metrics(client):
     assert "rtvoice_realtime_sessions_active" in body
     assert "rtvoice_realtime_turns_total" in body
     assert "rtvoice_realtime_audit_queue_depth" in body
+
+
+def test_cors_preflight_returns_acao(client):
+    """OPTIONS preflight 返 ACAO 头（默认 *）"""
+    r = client.options("/v1/sessions", headers={
+        "Origin": "http://example.com",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "Authorization,Content-Type",
+    })
+    assert r.status_code == 200
+    headers = {k.lower(): v for k, v in r.headers.items()}
+    assert "access-control-allow-origin" in headers
+    assert headers["access-control-allow-origin"] in ("*", "http://example.com")
+
+
+def test_cors_actual_request_has_acao_header(client):
+    """实际 GET 请求带 Origin → response 含 ACAO"""
+    r = client.get("/info", headers={"Origin": "http://example.com"})
+    assert r.status_code == 200
+    assert "access-control-allow-origin" in {k.lower() for k in r.headers}
