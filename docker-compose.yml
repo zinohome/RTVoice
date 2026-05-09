@@ -117,6 +117,7 @@ services:
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
+      RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
       STT_WS_URL: ws://stt-server:9090/v1/asr
       LLM_BASE_URL: ${LLM_BASE_URL:-http://llm-server:11434/v1}
       LLM_MODEL: ${LLM_MODEL:-qwen2.5:1.5b}
@@ -234,6 +235,7 @@ services:
       STT_NUM_THREADS: ${STT_NUM_THREADS:-2}
       # Bearer 鉴权（留空 = 关闭，dev 默认；prod 暴露公网时必填）
       RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
+      RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
     # 内部服务，端口不映射到宿主（仅 docker network 可达）
     expose:
       - "9090"
@@ -307,6 +309,7 @@ services:
       TTS_DEFAULT_LANG: ${TTS_DEFAULT_LANG:-cmn}
       # Bearer 鉴权（与 STT 共享 key，agent-worker 同时用此 key 调用）
       RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
+      RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
     expose:
       - "9880"
     deploy:
