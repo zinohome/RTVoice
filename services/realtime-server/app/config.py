@@ -47,6 +47,13 @@ LLM_MAX_CONCURRENT = _int("RTVOICE_LLM_MAX_CONCURRENT", 4)
 # STT timeout (turn 内等 STT final 的最长时间)
 STT_FINAL_TIMEOUT_S = _float("STT_FINAL_TIMEOUT_S", 5.0)
 
+# SP3 — Memory + Prompt + Audit
+MEMORY_MAX_TURNS = _int("RTVOICE_MEMORY_MAX_TURNS", 6)
+DEFAULT_PROMPT = _str("RTVOICE_DEFAULT_PROMPT", "你是语音助手。用中文简短回答（≤2 句）。")
+AUDIT_DIR = _str("RTVOICE_AUDIT_DIR", "/data/transcripts")
+AUDIT_QUEUE_MAX = _int("RTVOICE_AUDIT_QUEUE_MAX", 1000)
+PROMPT_MAX_CHARS = _int("RTVOICE_PROMPT_MAX_CHARS", 2000)
+
 # Voice defaults
 DEFAULT_VOICE = _str("TTS_VOICE", "default_zh_female")
 DEFAULT_LANG = _str("TTS_LANG", "cmn")
@@ -67,3 +74,5 @@ def log_summary(logger):
     logger.info("TTS_REPLICAS=%d LLM_MAX_CONCURRENT=%d",
                 TTS_MODEL_REPLICAS, LLM_MAX_CONCURRENT)
     logger.info("auth=%s", "enabled" if RTVOICE_API_KEY else "disabled (dev mode)")
+    logger.info("SP3: MEMORY_MAX_TURNS=%d AUDIT_DIR=%s PROMPT_MAX_CHARS=%d",
+                MEMORY_MAX_TURNS, AUDIT_DIR, PROMPT_MAX_CHARS)

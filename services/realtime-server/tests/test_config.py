@@ -38,3 +38,24 @@ def test_env_override(monkeypatch):
     from app import config
     assert config.MAX_CONCURRENT_SESSIONS == 10
     assert config.SESSION_IDLE_TIMEOUT_S == 60
+
+
+def test_sp3_defaults(monkeypatch):
+    """SP3 新增 env vars 默认值（RTX 3060 调优）"""
+    for k in [
+        "RTVOICE_MEMORY_MAX_TURNS",
+        "RTVOICE_DEFAULT_PROMPT",
+        "RTVOICE_AUDIT_DIR",
+        "RTVOICE_AUDIT_QUEUE_MAX",
+        "RTVOICE_PROMPT_MAX_CHARS",
+    ]:
+        monkeypatch.delenv(k, raising=False)
+    import importlib, sys
+    if "app.config" in sys.modules:
+        importlib.reload(sys.modules["app.config"])
+    from app import config
+    assert config.MEMORY_MAX_TURNS == 6
+    assert config.DEFAULT_PROMPT == "你是语音助手。用中文简短回答（≤2 句）。"
+    assert config.AUDIT_DIR == "/data/transcripts"
+    assert config.AUDIT_QUEUE_MAX == 1000
+    assert config.PROMPT_MAX_CHARS == 2000
