@@ -128,3 +128,39 @@ def test_ws_creator_binding_mismatch(client_with_auth):
     with pytest.raises(Exception):
         with client_with_auth.websocket_connect(f"/v1/realtime/{sid}") as ws:
             ws.receive_text()
+
+
+def test_create_session_with_prompt(client):
+    r = client.post("/v1/sessions", json={"prompt": "你是 IT 客服"})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["prompt"] == "你是 IT 客服"
+    assert body["audit_persist"] is False
+
+
+def test_create_session_default_prompt_from_env(client):
+    """不传 prompt 用 env default."""
+    r = client.post("/v1/sessions", json={})
+    body = r.json()
+    assert body["prompt"] == "你是语音助手。用中文简短回答（≤2 句）。"
+
+
+def test_create_session_prompt_too_long_returns_422(client, monkeypatch):
+    monkeypatch.setattr("app.config.PROMPT_MAX_CHARS", 100)
+    long_prompt = "x" * 200
+    r = client.post("/v1/sessions", json={"prompt": long_prompt})
+    assert r.status_code == 422
+    body = r.json()
+    assert body["type"] == "error"
+    assert body["code"] == "prompt.too_long"
+
+
+def test_info_includes_sp3_capabilities(client):
+    r = client.get("/info")
+    caps = r.json()["capabilities"]
+    assert caps["memory"] is True
+    assert caps["memory_max_turns"] == 6
+    assert caps["transcript_partial"] is True
+    assert caps["response_text"] is True
+    assert "default_prompt" in caps
+    assert isinstance(caps["default_prompt"], str)

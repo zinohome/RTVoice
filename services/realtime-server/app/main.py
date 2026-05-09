@@ -79,6 +79,8 @@ except Exception as e:
 class SessionCreateRequest(BaseModel):
     voice: str | None = Field(None, description="TTS voice spk_id, default: default_zh_female")
     speed: float = Field(1.0, ge=0.5, le=2.0, description="TTS speed factor")
+    prompt: str | None = Field(None, description="System prompt; default: env RTVOICE_DEFAULT_PROMPT")
+    audit_persist: bool = Field(False, description="If true, persist transcript JSONL to AUDIT_DIR")
 
 
 class SessionCreateResponse(BaseModel):
@@ -87,6 +89,8 @@ class SessionCreateResponse(BaseModel):
     expires_at: str
     voice: str
     speed: float
+    prompt: str
+    audit_persist: bool
 
 
 def _check_bearer_http(authorization: str | None) -> str:
@@ -128,7 +132,12 @@ async def info() -> dict:
             "session_api": True,
             "ws_realtime": True,
             "transcript_final": True,
-            "memory": False,
+            "transcript_partial": True,
+            "response_text": True,
+            "memory": True,
+            "memory_max_turns": config.MEMORY_MAX_TURNS,
+            "audit_persist": True,
+            "default_prompt": config.DEFAULT_PROMPT,
             "max_concurrent_sessions": config.MAX_CONCURRENT_SESSIONS,
             "session_idle_timeout_s": config.SESSION_IDLE_TIMEOUT_S,
             "session_max_lifetime_s": config.SESSION_MAX_LIFETIME_S,
@@ -155,12 +164,18 @@ async def create_session(
 ) -> SessionCreateResponse:
     bearer = _check_bearer_http(authorization)
     voice = req.voice or config.DEFAULT_VOICE
+    prompt = req.prompt if req.prompt is not None else config.DEFAULT_PROMPT
+    if len(prompt) > config.PROMPT_MAX_CHARS:
+        raise api_error(422, "prompt.too_long",
+                        f"prompt > {config.PROMPT_MAX_CHARS} chars")
 
     try:
         sess = await session_mgr.create(
             creator_key_hash=hash_key(bearer),
             voice=voice,
             speed=req.speed,
+            prompt=prompt,
+            audit_persist=req.audit_persist,
         )
     except CapacityFull as e:
         raise api_error(503, "session.capacity_full", str(e))
@@ -171,6 +186,8 @@ async def create_session(
         expires_at=sess.expires_at.isoformat(),
         voice=voice,
         speed=req.speed,
+        prompt=prompt,
+        audit_persist=req.audit_persist,
     )
 
 
@@ -197,7 +214,21 @@ async def realtime_ws(ws: WebSocket, session_id: str) -> None:
         await ws.close(code=1011, reason="attach_failed")
         return
 
-    sess.stt_client = STTClient(config.STT_WS_URL, api_key=config.RTVOICE_API_KEY or None)
+    async def _on_stt_partial(text: str) -> None:
+        if not text:
+            return
+        try:
+            await ws.send_json({"type": "transcript.partial", "text": text, "stable": False})
+            if sess.audit_writer is not None:
+                await sess.audit_writer.write({"event": "transcript.partial", "text": text})
+        except Exception:
+            log.exception("on_partial forward failed")
+
+    sess.stt_client = STTClient(
+        config.STT_WS_URL,
+        on_partial=_on_stt_partial,
+        api_key=config.RTVOICE_API_KEY or None,
+    )
     try:
         await sess.stt_client.connect()
     except Exception as e:
@@ -245,15 +276,49 @@ async def realtime_ws(ws: WebSocket, session_id: str) -> None:
                     await sess.stt_client.feed(msg["bytes"])
                 except Exception:
                     log.exception("STT feed failed")
-            elif msg.get("text") == "audio.eos":
-                if sess.current_turn_task and not sess.current_turn_task.done():
-                    await ws.send_json({
-                        "type": "error", "code": "turn.in_progress",
-                        "message": "previous turn not yet done",
-                        "request_id": None,
-                    })
+            elif msg.get("text"):
+                text_msg = msg["text"]
+                if text_msg == "audio.eos":
+                    if sess.current_turn_task and not sess.current_turn_task.done():
+                        await ws.send_json({
+                            "type": "error", "code": "turn.in_progress",
+                            "message": "previous turn not yet done",
+                            "request_id": None,
+                        })
+                    else:
+                        asyncio.create_task(run_turn(sess, ws))
                 else:
-                    asyncio.create_task(run_turn(sess, ws))
+                    import json as _json
+                    try:
+                        ev = _json.loads(text_msg)
+                    except Exception:
+                        log.debug("session %s: non-JSON text %r", session_id, text_msg[:80])
+                        continue
+                    if ev.get("type") == "session.update":
+                        allowed = {"type", "prompt"}
+                        extra = set(ev.keys()) - allowed
+                        if extra:
+                            await ws.send_json({
+                                "type": "error",
+                                "code": "session.update.invalid",
+                                "message": f"only 'prompt' is hot-editable; got extra: {sorted(extra)}",
+                                "request_id": None,
+                            })
+                        elif "prompt" in ev:
+                            new_prompt = str(ev["prompt"])
+                            if len(new_prompt) > config.PROMPT_MAX_CHARS:
+                                await ws.send_json({
+                                    "type": "error", "code": "prompt.too_long",
+                                    "message": f"prompt > {config.PROMPT_MAX_CHARS}",
+                                    "request_id": None,
+                                })
+                            else:
+                                sess.prompt = new_prompt
+                                log.info("session %s prompt updated (%d chars)",
+                                         session_id, len(new_prompt))
+                    else:
+                        log.debug("session %s: unknown event %r",
+                                  session_id, ev.get("type"))
             else:
                 log.debug("session %s: unknown msg %s", session_id, msg)
 
