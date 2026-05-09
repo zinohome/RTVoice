@@ -167,6 +167,15 @@ services:
           cpus: "${TTS_CPU_LIMIT:-2.0}"
 
   # ---------------------------------------------------------------
+  # Realtime Voice Server (SP3, v0.10+) — 暴露 host port 给浏览器
+  # ---------------------------------------------------------------
+  # base compose 里只 expose（docker 内部网络）；prod 加 ports 映射到 BIND_HOST
+  # 如走反向代理（Caddy/nginx wss）可改这里指向 127.0.0.1 而非 BIND_HOST
+  realtime-server:
+    ports:
+      - "${BIND_HOST}:${REALTIME_SERVER_PORT:-9000}:9000"
+
+  # ---------------------------------------------------------------
   # Agent Worker — 协议层不变，跑 CPU 即可（不分 GPU）
   # ---------------------------------------------------------------
   agent-worker:
