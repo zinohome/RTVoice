@@ -6,3 +6,4 @@ pydantic>=2.7
 prometheus-client>=0.21
 prometheus-fastapi-instrumentator>=7.0
 openai>=1.45
+watchdog>=4.0

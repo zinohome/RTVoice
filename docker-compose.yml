@@ -102,9 +102,9 @@ services:
   # ---------------------------------------------------------------
   realtime-server:
     build:
-      context: ./services/realtime-server
-      dockerfile: Dockerfile
-    image: rtvoice/realtime-server:v0.12.0
+      context: .
+      dockerfile: services/realtime-server/Dockerfile
+    image: rtvoice/realtime-server:v0.13.0
     container_name: rtvoice-realtime
     profiles: ["dev", "prod"]
     restart: unless-stopped

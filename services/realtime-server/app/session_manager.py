@@ -44,6 +44,7 @@ class Session:
     audit_persist: bool = False
     audit_writer: Any = None
     tts_client_dirty: bool = False
+    key_id: str | None = None
 
 
 def _new_session_id() -> str:
@@ -61,10 +62,11 @@ def _now() -> datetime:
 
 
 class SessionManager:
-    def __init__(self) -> None:
+    def __init__(self, quota=None) -> None:
         self._sessions: dict[str, Session] = {}
         self._capacity_lock = asyncio.Lock()
         self._expire_task: Optional[asyncio.Task] = None
+        self._quota = quota   # SP6: QuotaTracker
 
     async def create(
         self,
@@ -143,6 +145,11 @@ class SessionManager:
                 await sess.audit_writer.aclose()
             except Exception:
                 log.exception("audit_writer.aclose failed for %s", session_id)
+        if sess.key_id and self._quota is not None:
+            try:
+                await self._quota.release_session(sess.key_id)
+            except Exception:
+                log.exception("quota release failed for %s", sess.key_id)
         for c in (sess.stt_client, sess.llm_client, sess.tts_client):
             if c and hasattr(c, "close"):
                 try:

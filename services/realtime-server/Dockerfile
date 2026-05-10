@@ -10,11 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
-
-COPY app /app/app
-COPY static /app/static
+COPY services/common /app/common
+COPY services/realtime-server/requirements.txt /app/
+RUN pip install --upgrade pip && \
+    pip install -r /app/requirements.txt && \
+    pip install --no-cache-dir /app/common
+COPY services/realtime-server/app /app/app
+COPY services/realtime-server/static /app/static
+ENV PYTHONPATH=/app/common:/app
 
 RUN useradd -u 1000 -m appuser && chown -R appuser:appuser /app
 USER appuser

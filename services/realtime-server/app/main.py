@@ -41,6 +41,12 @@ from app.stt_client import STTClient
 from app.llm_client import LLMClient
 from app.tts_client import TTSClient
 
+from rtvoice_auth.models import Key
+from rtvoice_auth.verify import verify_key
+from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDenied, QuotaExceeded
+from rtvoice_auth.quota import QuotaTracker
+from rtvoice_auth.lifespan import auto_migrate_legacy
+
 logging.basicConfig(
     level=config.LOG_LEVEL,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -55,7 +61,23 @@ session_mgr: SessionManager | None = None
 async def lifespan(app: FastAPI):
     global session_mgr
     config.log_summary(log)
-    session_mgr = SessionManager()
+    # SP6: init key store + quota
+    backend = os.environ.get("RTVOICE_KEYS_BACKEND", "yaml").lower()
+    if backend == "redis":
+        import redis.asyncio as redis_lib
+        from rtvoice_auth.store_redis import RedisKeyStore
+        url = os.environ.get("RTVOICE_REDIS_URL", "redis://redis:6379/0")
+        client = redis_lib.from_url(url)
+        app.state.key_store = RedisKeyStore(client)
+    else:
+        from rtvoice_auth.store import YamlKeyStore
+        path = os.environ.get("RTVOICE_KEYS_FILE", "/data/keys.yaml")
+        app.state.key_store = YamlKeyStore(path)
+    await app.state.key_store.load()
+    await auto_migrate_legacy(app.state.key_store)
+    app.state.quota = QuotaTracker()
+    app.state.scope = "realtime"
+    session_mgr = SessionManager(quota=app.state.quota)
     session_mgr.start_expire_loop()
     log.info("realtime-server lifespan: ready")
     yield
@@ -125,29 +147,45 @@ class SessionCreateResponse(BaseModel):
     audit_persist: bool
 
 
-def _check_bearer_http(authorization: str | None) -> str:
-    if not config.RTVOICE_API_KEY:
-        return ""
-    if not authorization:
-        raise api_error(401, "auth.missing_token", "Authorization header required")
-    if authorization != f"Bearer {config.RTVOICE_API_KEY}":
-        raise api_error(401, "auth.invalid_token", "invalid Bearer token")
-    return config.RTVOICE_API_KEY
+async def require_key(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> Key:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise api_error(401, "auth.missing_token", "Authorization: Bearer required")
+    secret = authorization[len("Bearer "):]
+    try:
+        return await verify_key(secret,
+                                scope=request.app.state.scope,
+                                store=request.app.state.key_store)
+    except InvalidToken as e:
+        raise api_error(401, e.code, e.message)
+    except TokenRevoked as e:
+        raise api_error(401, e.code, e.message)
+    except ScopeDenied as e:
+        raise api_error(403, e.code, e.message)
 
 
-def _extract_ws_bearer(ws: WebSocket) -> str | None:
-    if not config.RTVOICE_API_KEY:
-        return ""
+async def _extract_ws_bearer_key(ws: WebSocket) -> Key | None:
+    """三路 Bearer 验证；返 Key record。"""
+    secret = None
     auth = ws.headers.get("authorization", "")
-    if auth == f"Bearer {config.RTVOICE_API_KEY}":
-        return config.RTVOICE_API_KEY
-    proto = ws.headers.get("sec-websocket-protocol", "")
-    for p in (s.strip() for s in proto.split(",")):
-        if p.startswith("bearer.") and p[len("bearer."):] == config.RTVOICE_API_KEY:
-            return config.RTVOICE_API_KEY
-    if ws.query_params.get("token") == config.RTVOICE_API_KEY:
-        return config.RTVOICE_API_KEY
-    return None
+    if auth.startswith("Bearer "):
+        secret = auth[len("Bearer "):]
+    if not secret:
+        proto = ws.headers.get("sec-websocket-protocol", "")
+        for p in (s.strip() for s in proto.split(",")):
+            if p.startswith("bearer."):
+                secret = p[len("bearer."):]
+                break
+    if not secret:
+        secret = ws.query_params.get("token")
+    if not secret:
+        return None
+    try:
+        return await verify_key(secret, scope="realtime", store=ws.app.state.key_store)
+    except AuthError:
+        return None
 
 
 @app.get("/health")
@@ -192,24 +230,33 @@ async def info() -> dict:
 )
 async def create_session(
     req: SessionCreateRequest,
-    authorization: Annotated[str | None, Header()] = None,
+    request: Request,
+    key: Key = Depends(require_key),
 ) -> SessionCreateResponse:
-    bearer = _check_bearer_http(authorization)
+    # SP6 quota acquire
+    try:
+        await request.app.state.quota.acquire_session(key)
+    except QuotaExceeded as e:
+        raise api_error(429, e.code, e.message)
+
     voice = req.voice or config.DEFAULT_VOICE
     prompt = req.prompt if req.prompt is not None else config.DEFAULT_PROMPT
     if len(prompt) > config.PROMPT_MAX_CHARS:
+        await request.app.state.quota.release_session(key.id)
         raise api_error(422, "prompt.too_long",
                         f"prompt > {config.PROMPT_MAX_CHARS} chars")
 
     try:
         sess = await session_mgr.create(
-            creator_key_hash=hash_key(bearer),
+            creator_key_hash=key.id,  # ← 改用 key.id
             voice=voice,
             speed=req.speed,
             prompt=prompt,
             audit_persist=req.audit_persist,
         )
+        sess.key_id = key.id
     except CapacityFull as e:
+        await request.app.state.quota.release_session(key.id)
         raise api_error(503, "session.capacity_full", str(e))
 
     return SessionCreateResponse(
@@ -225,8 +272,8 @@ async def create_session(
 
 @app.websocket("/v1/realtime/{session_id}")
 async def realtime_ws(ws: WebSocket, session_id: str) -> None:
-    bearer = _extract_ws_bearer(ws)
-    if bearer is None:
+    key = await _extract_ws_bearer_key(ws)
+    if key is None:
         await ws.close(code=4401, reason="unauthorized")
         return
 
@@ -234,7 +281,7 @@ async def realtime_ws(ws: WebSocket, session_id: str) -> None:
     if sess is None:
         await ws.close(code=4404, reason="session_not_found")
         return
-    if sess.creator_key_hash != hash_key(bearer):
+    if sess.creator_key_hash != key.id:
         await ws.close(code=4403, reason="session_unauthorized")
         return
     if sess.expires_at < datetime.now(timezone.utc):

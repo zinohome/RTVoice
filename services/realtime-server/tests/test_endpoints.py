@@ -6,28 +6,37 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture
-def client(monkeypatch):
-    monkeypatch.setenv("RTVOICE_API_KEY", "")
+def client(monkeypatch, tmp_path):
+    """SP6 fixture: yaml store + legacy auto-migrate + auto Bearer header."""
+    monkeypatch.setenv("RTVOICE_KEYS_BACKEND", "yaml")
+    monkeypatch.setenv("RTVOICE_KEYS_FILE", str(tmp_path / "keys.yaml"))
+    monkeypatch.setenv("RTVOICE_API_KEY", "dev-test-key-32-chars-aaaaaaaaa")
     monkeypatch.setenv("RTVOICE_MAX_CONCURRENT_SESSIONS", "3")
-    import importlib, sys
+    import sys
     for m in list(sys.modules):
         if m.startswith("app."):
             del sys.modules[m]
     from app.main import app
-    with TestClient(app) as c:
+    c = TestClient(app)
+    c.headers.update({"Authorization": "Bearer dev-test-key-32-chars-aaaaaaaaa"})
+    with c:
         yield c
 
 
 @pytest.fixture
-def client_with_auth(monkeypatch):
+def client_with_auth(monkeypatch, tmp_path):
+    """SP6 fixture: identical to client but legacy secret matches existing tests."""
+    monkeypatch.setenv("RTVOICE_KEYS_BACKEND", "yaml")
+    monkeypatch.setenv("RTVOICE_KEYS_FILE", str(tmp_path / "keys.yaml"))
     monkeypatch.setenv("RTVOICE_API_KEY", "test-key-32chars-test-key-32chars")
     monkeypatch.setenv("RTVOICE_MAX_CONCURRENT_SESSIONS", "3")
-    import importlib, sys
+    import sys
     for m in list(sys.modules):
         if m.startswith("app."):
             del sys.modules[m]
     from app.main import app
-    with TestClient(app) as c:
+    c = TestClient(app)
+    with c:
         yield c
 
 
@@ -250,3 +259,156 @@ def test_info_version_is_0_12_0(client):
     r = client.get("/info")
     assert r.status_code == 200
     assert r.json()["version"] == "0.12.0"
+
+
+# -------------------------------------------------------------------
+# SP6 T9 — require_key + quota integration tests
+# -------------------------------------------------------------------
+def test_create_session_with_valid_key(monkeypatch, tmp_path):
+    """有效 key 走 quota acquire；返 201."""
+    from rtvoice_auth.models import Key
+    from rtvoice_auth.store import YamlKeyStore
+    import hashlib, asyncio
+    from datetime import datetime, timezone
+
+    yaml_path = tmp_path / "keys.yaml"
+    secret = "t-secret-32chars-aaaaaaaaaaaaaaaa"
+    h = hashlib.sha256(secret.encode()).hexdigest()
+    s = YamlKeyStore(str(yaml_path))
+    asyncio.run(s.load())
+    asyncio.run(s.put(Key(id="key_t", secret_hash=h, name="t",
+                          sessions_concurrent_max=2, sessions_per_hour_max=10,
+                          scopes=["stt", "tts", "realtime", "tokens"],
+                          created_at=datetime.now(timezone.utc))))
+
+    monkeypatch.setenv("RTVOICE_KEYS_BACKEND", "yaml")
+    monkeypatch.setenv("RTVOICE_KEYS_FILE", str(yaml_path))
+    monkeypatch.setenv("RTVOICE_API_KEY", "")  # disable legacy auto-migrate
+
+    from fastapi.testclient import TestClient
+    import sys
+    for m in list(sys.modules):
+        if m.startswith("app."):
+            del sys.modules[m]
+    from app.main import app
+    with TestClient(app) as c:
+        r = c.post("/v1/sessions", json={},
+                   headers={"Authorization": f"Bearer {secret}"})
+        assert r.status_code == 201
+
+
+def test_create_session_invalid_key_returns_401(monkeypatch, tmp_path):
+    monkeypatch.setenv("RTVOICE_KEYS_BACKEND", "yaml")
+    monkeypatch.setenv("RTVOICE_KEYS_FILE", str(tmp_path / "empty.yaml"))
+    monkeypatch.setenv("RTVOICE_API_KEY", "")
+
+    from fastapi.testclient import TestClient
+    import sys
+    for m in list(sys.modules):
+        if m.startswith("app."):
+            del sys.modules[m]
+    from app.main import app
+    with TestClient(app) as c:
+        r = c.post("/v1/sessions", json={},
+                   headers={"Authorization": "Bearer bogus"})
+        assert r.status_code == 401
+        assert r.json()["code"] == "auth.invalid_token"
+
+
+def test_create_session_quota_concurrent_exceeded(monkeypatch, tmp_path):
+    """concurrent=1 的 key，第 2 个 create_session → 429 auth.quota_concurrent."""
+    from rtvoice_auth.models import Key
+    from rtvoice_auth.store import YamlKeyStore
+    import hashlib, asyncio
+    from datetime import datetime, timezone
+
+    yaml_path = tmp_path / "keys.yaml"
+    secret = "secret-quota-test-32-chars-aaaaaa"
+    h = hashlib.sha256(secret.encode()).hexdigest()
+    s = YamlKeyStore(str(yaml_path))
+    asyncio.run(s.load())
+    asyncio.run(s.put(Key(id="kq", secret_hash=h, name="q",
+                          sessions_concurrent_max=1, sessions_per_hour_max=10,
+                          scopes=["realtime"],
+                          created_at=datetime.now(timezone.utc))))
+    monkeypatch.setenv("RTVOICE_KEYS_BACKEND", "yaml")
+    monkeypatch.setenv("RTVOICE_KEYS_FILE", str(yaml_path))
+    monkeypatch.setenv("RTVOICE_API_KEY", "")
+
+    from fastapi.testclient import TestClient
+    import sys
+    for m in list(sys.modules):
+        if m.startswith("app."):
+            del sys.modules[m]
+    from app.main import app
+    with TestClient(app) as c:
+        r1 = c.post("/v1/sessions", json={},
+                    headers={"Authorization": f"Bearer {secret}"})
+        assert r1.status_code == 201
+        r2 = c.post("/v1/sessions", json={},
+                    headers={"Authorization": f"Bearer {secret}"})
+        assert r2.status_code == 429
+        assert r2.json()["code"] == "auth.quota_concurrent"
+
+
+def test_revoked_key_returns_401(monkeypatch, tmp_path):
+    from rtvoice_auth.models import Key
+    from rtvoice_auth.store import YamlKeyStore
+    import hashlib, asyncio
+    from datetime import datetime, timezone
+
+    yaml_path = tmp_path / "keys.yaml"
+    secret = "rev-secret-32-chars-aaaaaaaaaaaaa"
+    h = hashlib.sha256(secret.encode()).hexdigest()
+    s = YamlKeyStore(str(yaml_path))
+    asyncio.run(s.load())
+    asyncio.run(s.put(Key(id="kr", secret_hash=h, name="r",
+                          revoked_at=datetime.now(timezone.utc),
+                          scopes=["realtime"],
+                          created_at=datetime.now(timezone.utc))))
+    monkeypatch.setenv("RTVOICE_KEYS_BACKEND", "yaml")
+    monkeypatch.setenv("RTVOICE_KEYS_FILE", str(yaml_path))
+    monkeypatch.setenv("RTVOICE_API_KEY", "")
+
+    from fastapi.testclient import TestClient
+    import sys
+    for m in list(sys.modules):
+        if m.startswith("app."):
+            del sys.modules[m]
+    from app.main import app
+    with TestClient(app) as c:
+        r = c.post("/v1/sessions", json={},
+                   headers={"Authorization": f"Bearer {secret}"})
+        assert r.status_code == 401
+        assert r.json()["code"] == "auth.token_revoked"
+
+
+def test_scope_denied_returns_403(monkeypatch, tmp_path):
+    from rtvoice_auth.models import Key
+    from rtvoice_auth.store import YamlKeyStore
+    import hashlib, asyncio
+    from datetime import datetime, timezone
+
+    yaml_path = tmp_path / "keys.yaml"
+    secret = "scope-secret-32-chars-aaaaaaaaaaa"
+    h = hashlib.sha256(secret.encode()).hexdigest()
+    s = YamlKeyStore(str(yaml_path))
+    asyncio.run(s.load())
+    asyncio.run(s.put(Key(id="ks", secret_hash=h, name="s",
+                          scopes=["stt"],
+                          created_at=datetime.now(timezone.utc))))
+    monkeypatch.setenv("RTVOICE_KEYS_BACKEND", "yaml")
+    monkeypatch.setenv("RTVOICE_KEYS_FILE", str(yaml_path))
+    monkeypatch.setenv("RTVOICE_API_KEY", "")
+
+    from fastapi.testclient import TestClient
+    import sys
+    for m in list(sys.modules):
+        if m.startswith("app."):
+            del sys.modules[m]
+    from app.main import app
+    with TestClient(app) as c:
+        r = c.post("/v1/sessions", json={},
+                   headers={"Authorization": f"Bearer {secret}"})
+        assert r.status_code == 403
+        assert r.json()["code"] == "auth.scope_denied"
