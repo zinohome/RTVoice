@@ -20,6 +20,8 @@ volumes:
     driver: local
   rtvoice_grafana_data:
     driver: local
+  rtvoice_redis_data:
+    driver: local
 
 services:
   # ---------------------------------------------------------------
@@ -80,6 +82,11 @@ services:
       # prod：默认 false，要求客户端手动配置
       DEV_AUTO_INJECT_KEY: ${DEV_AUTO_INJECT_KEY:-false}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
+      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys.yaml}
+      RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      - ${RTVOICE_KEYS_HOST_FILE:-./data/keys.yaml}:/data/keys.yaml:rw
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2).status==200 else 1)"]
       interval: 10s
@@ -138,8 +145,12 @@ services:
       RTVOICE_AUDIT_DIR: ${RTVOICE_AUDIT_DIR:-/data/transcripts}
       RTVOICE_AUDIT_QUEUE_MAX: ${RTVOICE_AUDIT_QUEUE_MAX:-1000}
       RTVOICE_PROMPT_MAX_CHARS: ${RTVOICE_PROMPT_MAX_CHARS:-2000}
+      RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
+      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys.yaml}
+      RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
     volumes:
       - ${RTVOICE_AUDIT_HOST_DIR:-./data/transcripts}:/data/transcripts:rw
+      - ${RTVOICE_KEYS_HOST_FILE:-./data/keys.yaml}:/data/keys.yaml:rw
     expose:
       - "9000"
     healthcheck:
@@ -236,6 +247,11 @@ services:
       # Bearer 鉴权（留空 = 关闭，dev 默认；prod 暴露公网时必填）
       RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
       RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
+      RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
+      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys.yaml}
+      RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      - ${RTVOICE_KEYS_HOST_FILE:-./data/keys.yaml}:/data/keys.yaml:rw
     # 内部服务，端口不映射到宿主（仅 docker network 可达）
     expose:
       - "9090"
@@ -310,6 +326,11 @@ services:
       # Bearer 鉴权（与 STT 共享 key，agent-worker 同时用此 key 调用）
       RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
       RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
+      RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
+      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys.yaml}
+      RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      - ${RTVOICE_KEYS_HOST_FILE:-./data/keys.yaml}:/data/keys.yaml:rw
     expose:
       - "9880"
     deploy:
@@ -363,3 +384,23 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/rtvoice-overview.json
+
+  # ---------------------------------------------------------------
+  # Redis (SP6 auth backend; profile=auth-redis enable)
+  # ---------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: rtvoice-redis
+    profiles: ["auth-redis"]
+    restart: unless-stopped
+    networks: [rtvoice_net]
+    volumes:
+      - rtvoice_redis_data:/data
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
