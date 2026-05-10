@@ -57,8 +57,8 @@ services:
   # ---------------------------------------------------------------
   stt-server:
     build:
-      context: ./services/stt-server
-      dockerfile: Dockerfile.gpu
+      context: .
+      dockerfile: services/stt-server/Dockerfile.gpu
     image: rtvoice/stt-server-gpu:v0.5.0
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

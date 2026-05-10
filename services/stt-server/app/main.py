@@ -40,6 +40,11 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from fastapi.exceptions import RequestValidationError
 from app.error_schema import ErrorResponse, api_error, http_exception_handler, validation_exception_handler
 
+from rtvoice_auth.models import Key
+from rtvoice_auth.verify import verify_key
+from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDenied
+from rtvoice_auth.lifespan import auto_migrate_legacy
+
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -47,12 +52,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("rtvoice.stt")
 
-# Bearer 鉴权（v0.6.1）：留空 = 鉴权关闭（dev 默认）
+# Bearer 鉴权（v0.6.2 / SP6 T10）：通过 rtvoice_auth.key_store 校验。
 # WS 不能像 HTTP 那样轻易加 header，所以接受三种来源（按优先级）：
 #   1) Sec-WebSocket-Protocol: bearer.<TOKEN>     （browser 友好，标准用法）
 #   2) Authorization: Bearer <TOKEN>              （server-to-server）
 #   3) ?token=<TOKEN>                             （query param fallback；URL log 风险）
-RTVOICE_API_KEY = os.environ.get("RTVOICE_API_KEY", "").strip()
 
 MODELS_DIR = Path(os.environ.get("STT_MODELS_DIR", "/app/models"))
 MODEL_NAME = os.environ.get(
@@ -128,6 +132,22 @@ async def lifespan(app: FastAPI):
     global _recognizer
     _recognizer = await asyncio.to_thread(_build_recognizer)
     log.info("recognizer ready")
+    # SP6: init key store
+    backend = os.environ.get("RTVOICE_KEYS_BACKEND", "yaml").lower()
+    if backend == "redis":
+        import redis.asyncio as redis_lib
+        from rtvoice_auth.store_redis import RedisKeyStore
+        url = os.environ.get("RTVOICE_REDIS_URL", "redis://redis:6379/0")
+        client = redis_lib.from_url(url)
+        app.state.key_store = RedisKeyStore(client)
+    else:
+        from rtvoice_auth.store import YamlKeyStore
+        path = os.environ.get("RTVOICE_KEYS_FILE", "/data/keys.yaml")
+        app.state.key_store = YamlKeyStore(path)
+    await app.state.key_store.load()
+    await auto_migrate_legacy(app.state.key_store)
+    app.state.scope = "stt"
+    log.info("key store ready (backend=%s, scope=stt)", backend)
     yield
     log.info("shutdown")
 
@@ -180,23 +200,26 @@ async def info() -> dict:
     }
 
 
-def _ws_auth_ok(ws: WebSocket) -> bool:
-    """三路 Bearer 校验。RTVOICE_API_KEY 留空时直接通过。"""
-    if not RTVOICE_API_KEY:
-        return True
-    # 1) Sec-WebSocket-Protocol: bearer.<TOKEN>
-    proto = ws.headers.get("sec-websocket-protocol", "")
-    for p in (s.strip() for s in proto.split(",")):
-        if p.startswith("bearer.") and p[len("bearer."):] == RTVOICE_API_KEY:
-            return True
-    # 2) Authorization: Bearer <TOKEN>
+async def _verify_ws_key(ws: WebSocket) -> Key | None:
+    """三路 Bearer 验证；scope=stt。失败/缺失 token 返 None。"""
+    secret = None
     auth = ws.headers.get("authorization", "")
-    if auth == f"Bearer {RTVOICE_API_KEY}":
-        return True
-    # 3) ?token=<TOKEN>
-    if ws.query_params.get("token") == RTVOICE_API_KEY:
-        return True
-    return False
+    if auth.startswith("Bearer "):
+        secret = auth[len("Bearer "):]
+    if not secret:
+        proto = ws.headers.get("sec-websocket-protocol", "")
+        for p in (s.strip() for s in proto.split(",")):
+            if p.startswith("bearer."):
+                secret = p[len("bearer."):]
+                break
+    if not secret:
+        secret = ws.query_params.get("token")
+    if not secret:
+        return None
+    try:
+        return await verify_key(secret, scope="stt", store=ws.app.state.key_store)
+    except AuthError:
+        return None
 
 
 @app.websocket("/v1/asr")
@@ -214,7 +237,8 @@ async def asr_ws(ws: WebSocket) -> None:
         - sherpa endpoint detection 在 _build_recognizer 已禁用
         - 全程一个协程操作 stream，无并发，无 race
     """
-    if not _ws_auth_ok(ws):
+    key = await _verify_ws_key(ws)
+    if key is None:
         # close before accept → 4401（HTTP 路径上是 401，但 WS 协议得 close code）
         await ws.close(code=4401, reason="unauthorized")
         log.warning("WS 鉴权失败 client=%s", ws.client)

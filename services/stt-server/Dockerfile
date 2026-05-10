@@ -23,8 +23,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/common /app/common
+COPY services/stt-server/requirements.txt /app/
+RUN pip install --upgrade pip && \
+    pip install -r /app/requirements.txt && \
+    pip install --no-cache-dir /app/common
 
 # Zipformer streaming bilingual zh-en (int8 量化版，~120MB 总体)
 ARG MODEL_NAME=sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
@@ -48,7 +51,8 @@ RUN mkdir -p /app/models/${MODEL_NAME} && cd /app/models/${MODEL_NAME} && \
 # 卸载下载工具
 RUN apt-get purge -y --auto-remove wget && rm -rf /var/lib/apt/lists/*
 
-COPY app ./app
+COPY services/stt-server/app /app/app
+ENV PYTHONPATH=/app/common:/app
 
 RUN useradd -u 1000 -m appuser && chown -R appuser:appuser /app
 USER appuser

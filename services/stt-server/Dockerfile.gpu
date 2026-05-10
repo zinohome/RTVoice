@@ -30,8 +30,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN python -m pip install --upgrade pip
 
 # requirements 与 dev 共用；onnxruntime-gpu 替代 CPU 版
-COPY requirements.txt requirements.gpu.txt ./
-RUN pip install --no-cache-dir -r requirements.gpu.txt
+COPY services/common /app/common
+COPY services/stt-server/requirements.txt services/stt-server/requirements.gpu.txt /app/
+RUN pip install --upgrade pip && \
+    pip install -r /app/requirements.gpu.txt && \
+    pip install --no-cache-dir /app/common
 
 # 模型下载与 dev 同
 ARG MODEL_NAME=sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
@@ -50,7 +53,8 @@ RUN mkdir -p /app/models/${MODEL_NAME} && cd /app/models/${MODEL_NAME} && \
 
 RUN apt-get purge -y --auto-remove wget && rm -rf /var/lib/apt/lists/*
 
-COPY app ./app
+COPY services/stt-server/app /app/app
+ENV PYTHONPATH=/app/common:/app
 
 # 非 root（24.04 默认有 ubuntu 用户 uid 1000，故用 1001）
 RUN useradd -u 1001 -m appuser && chown -R appuser:appuser /app /opt/venv

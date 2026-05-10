@@ -223,8 +223,8 @@ services:
   # ---------------------------------------------------------------
   stt-server:
     build:
-      context: ./services/stt-server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/stt-server/Dockerfile
     image: rtvoice/stt-server:v0.3.0
     container_name: rtvoice-stt
     profiles: ["dev", "prod"]
