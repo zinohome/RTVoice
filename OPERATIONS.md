@@ -429,7 +429,82 @@ docker exec rtvoice-grafana kill -HUP 1
 
 ---
 
-## 7. 监控检查项
+## §7 多租户认证（SP6, v0.13+）
+
+### 7.1 启用 multi-key auth
+
+prod 升级 v0.13.0 后**自动迁移**：服务启动检测到 `RTVOICE_API_KEY` 环境变量 + 空 `keys.yaml` → 自动注册 `legacy-default` key。下游客户端无感继续工作。
+
+### 7.2 创建 per-app key（推荐先于 revoke legacy）
+
+```bash
+# 容器内跑（host 通常没装 rtvoice-admin）
+docker exec rtvoice-realtime rtvoice-admin create \
+    --name cozyvoice \
+    --sessions-concurrent 10 \
+    --sessions-per-hour 500 \
+    --scopes stt,tts,realtime,tokens
+
+# 输出含 plaintext secret，⚠️ 立即保存（仅显示一次）
+```
+
+把生成的 secret 提供给下游应用替换其旧 `RTVOICE_API_KEY`。
+
+### 7.3 Backend 切换：YAML → Redis
+
+dev 默认 YAML。prod 切到 Redis（跨服务共享 + counter 实时）：
+
+```bash
+# 1. 启 Redis 容器（用 daocloud 镜像源 per OPERATIONS §6）
+docker pull docker.m.daocloud.io/library/redis:7-alpine
+docker tag docker.m.daocloud.io/library/redis:7-alpine redis:7-alpine
+docker compose --profile prod --profile auth-redis up -d redis
+
+# 2. .env 改：
+# RTVOICE_KEYS_BACKEND=redis
+
+# 3. 重启 4 服务
+docker compose --profile prod up -d --force-recreate \
+    realtime-server stt-server tts-server token-server
+
+# 4. 重新创建 keys（YAML 内容不会自动迁移到 Redis）
+docker exec rtvoice-realtime rtvoice-admin import-legacy   # 重新生成 legacy
+docker exec rtvoice-realtime rtvoice-admin create --name cozyvoice ...
+```
+
+### 7.4 撤销 legacy key（迁移完成后）
+
+```bash
+docker exec rtvoice-realtime rtvoice-admin list
+# 找到 legacy-default 的 key_id
+
+docker exec rtvoice-realtime rtvoice-admin revoke key_xxx
+# ⚠️ 撤销后所有用旧 RTVOICE_API_KEY 的客户端立即 401；先确认所有下游已切到 per-app key
+```
+
+### 7.5 quota 故障排查
+
+#### 现象：429 auth.quota_concurrent
+```bash
+# 查活跃 session
+docker exec rtvoice-realtime rtvoice-admin show <key_id>
+# 漏 release（异常路径）：重启 realtime-server 重置 in-memory counter
+docker compose restart realtime-server
+
+# 调高上限：rotate 不改 metadata，需 revoke + create 新 key with 更大 max
+```
+
+#### 现象：429 auth.quota_per_hour
+- rolling hour bucket；自然过期（每整点归零）
+- 临时调高：revoke + create 新 key（per_hour 更大）
+
+#### 现象：401 auth.token_revoked
+- key 已被 revoke；用 `rtvoice-admin list` 确认状态
+- 客户端切换到新 key
+
+---
+
+## 8. 监控检查项
 
 如果你跑了 `docker-compose.monitoring.yml`，Grafana 看这些指标判健康：
 

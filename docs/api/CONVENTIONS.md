@@ -87,6 +87,10 @@
 | `tts.wav_too_large` | 上传 wav > 5MB |
 | `auth.invalid_token` | Bearer 不对 |
 | `auth.missing_token` | 没传 Bearer |
+| `auth.token_revoked` | 401 | API key 已被 revoke（SP6） |
+| `auth.scope_denied` | 403 | API key 不含当前 service scope（SP6） |
+| `auth.quota_per_hour` | 429 | 1 小时 session 创建数超 key 上限（SP6） |
+| `auth.quota_concurrent` | 429 | 当前活跃 session 超 key 上限（SP6） |
 | `session.not_found` | session_id 不存在 |
 | `session.capacity_full` | server 超并发上限 |
 | `session.unauthorized` | Bearer 不匹配 creator |
