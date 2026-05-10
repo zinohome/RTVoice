@@ -59,8 +59,8 @@ services:
   # ---------------------------------------------------------------
   token-server:
     build:
-      context: ./services/token-server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/token-server/Dockerfile
     image: rtvoice/token-server:v0.1.0
     container_name: rtvoice-token
     profiles: ["dev", "prod"]

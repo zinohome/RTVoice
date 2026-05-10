@@ -21,18 +21,17 @@
 # FastAPI + Pydantic v2 用 forward ref 解析时会把 Annotated[X, Body()] 当成 Query，
 # 导致 schema 生成 500 + /token 422。Python 3.11 下 Annotated 原生可用，无须 future。
 
-import hmac
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 
 from typing import Annotated
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from livekit import api
 from pydantic import BaseModel, Field
@@ -43,6 +42,11 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from fastapi.exceptions import RequestValidationError
 from app.error_schema import ErrorResponse, api_error, http_exception_handler, validation_exception_handler
+
+from rtvoice_auth.models import Key
+from rtvoice_auth.verify import verify_key
+from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDenied
+from rtvoice_auth.lifespan import auto_migrate_legacy
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -72,10 +76,35 @@ RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "30"))
 _NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 
 limiter = Limiter(key_func=get_remote_address)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # SP6 T12: init key store
+    backend = os.environ.get("RTVOICE_KEYS_BACKEND", "yaml").lower()
+    if backend == "redis":
+        import redis.asyncio as redis_lib
+        from rtvoice_auth.store_redis import RedisKeyStore
+        url = os.environ.get("RTVOICE_REDIS_URL", "redis://redis:6379/0")
+        client = redis_lib.from_url(url)
+        app.state.key_store = RedisKeyStore(client)
+    else:
+        from rtvoice_auth.store import YamlKeyStore
+        path = os.environ.get("RTVOICE_KEYS_FILE", "/data/keys.yaml")
+        app.state.key_store = YamlKeyStore(path)
+    await app.state.key_store.load()
+    await auto_migrate_legacy(app.state.key_store)
+    app.state.scope = "tokens"
+    log.info("key store ready (backend=%s, scope=tokens)", backend)
+    yield
+    log.info("shutdown")
+
+
 app = FastAPI(
     title="RTVoice Token Server",
-    version="0.5.0",
-    description="为客户端签发 LiveKit JWT。共享 API key 鉴权 + slowapi rate limit。",
+    version="0.6.2",
+    description="为客户端签发 LiveKit JWT。Bearer key (rtvoice_auth) + slowapi rate limit。",
+    lifespan=lifespan,
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -108,20 +137,26 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# auto_error=False：自己控制 401 返回格式，统一错误结构
-_bearer = HTTPBearer(auto_error=False, description="APP_API_KEY")
-
-
-def require_api_key(
-    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+async def require_api_key(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
 ) -> None:
-    if creds is None or creds.scheme.lower() != "bearer":
+    """SP6 T12: rtvoice_auth verify_key (scope=tokens) 替代 hmac.compare_digest。"""
+    if not authorization or not authorization.startswith("Bearer "):
         AUTH_FAILURES.labels(reason="missing").inc()
         raise api_error(401, "auth.missing_token", "Missing Authorization: Bearer header")
-    # 常量时间比较，防 timing attack
-    if not hmac.compare_digest(creds.credentials, APP_API_KEY):
+    secret = authorization[len("Bearer "):]
+    try:
+        await verify_key(secret, scope="tokens", store=request.app.state.key_store)
+    except InvalidToken as e:
         AUTH_FAILURES.labels(reason="invalid").inc()
-        raise api_error(401, "auth.invalid_token", "Invalid API key")
+        raise api_error(401, e.code, e.message)
+    except TokenRevoked as e:
+        AUTH_FAILURES.labels(reason="revoked").inc()
+        raise api_error(401, e.code, e.message)
+    except ScopeDenied as e:
+        AUTH_FAILURES.labels(reason="scope").inc()
+        raise api_error(403, e.code, e.message)
 
 
 class TokenRequest(BaseModel):
