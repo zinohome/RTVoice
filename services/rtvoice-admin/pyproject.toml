@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.20"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rtvoice-admin"
+version = "0.13.0"
+description = "RTVoice multi-tenant admin CLI"
+requires-python = ">=3.10"
+dependencies = [
+    "rtvoice-auth",
+    "pyyaml>=6.0",
+    "redis>=5.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+rtvoice-admin = "rtvoice_admin.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rtvoice_admin"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
