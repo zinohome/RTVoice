@@ -57,6 +57,12 @@ from app.error_schema import ErrorResponse, api_error, http_exception_handler, v
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
+from typing import Annotated
+
+from rtvoice_auth.models import Key
+from rtvoice_auth.verify import verify_key
+from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDenied
+from rtvoice_auth.lifespan import auto_migrate_legacy
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -77,10 +83,32 @@ RTVOICE_API_KEY = os.environ.get("RTVOICE_API_KEY", "").strip()
 
 
 def _check_client_auth(authorization: str | None = Header(None)) -> None:
+    """Legacy fallback (deprecated v0.6.2). Kept only as compatibility shim;
+    新代码应通过 require_key 走 rtvoice_auth.key_store。"""
     if not RTVOICE_API_KEY:
         return
     if authorization != f"Bearer {RTVOICE_API_KEY}":
         raise api_error(401, "auth.invalid_token", "invalid or missing Bearer token")
+
+
+# SP6 T11: scope=tts via rtvoice_auth.key_store
+async def require_key(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> Key:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise api_error(401, "auth.missing_token", "Authorization: Bearer required")
+    secret = authorization[len("Bearer "):]
+    try:
+        return await verify_key(secret,
+                                scope=request.app.state.scope,
+                                store=request.app.state.key_store)
+    except InvalidToken as e:
+        raise api_error(401, e.code, e.message)
+    except TokenRevoked as e:
+        raise api_error(401, e.code, e.message)
+    except ScopeDenied as e:
+        raise api_error(403, e.code, e.message)
 
 # 句子切分正则：中英文标点都吃
 _SENTENCE_SPLIT = re.compile(r'(?<=[。！？\.\!\?])\s*|(?<=[，；,;])\s+')
@@ -123,6 +151,22 @@ async def lifespan(app: FastAPI):
     voices = list(_kokoro.get_voices())
     log.info("Kokoro 就绪：%d 个音色，默认 voice=%s lang=%s",
              len(voices), DEFAULT_VOICE, DEFAULT_LANG)
+    # SP6 T11: init key store + scope=tts
+    backend = os.environ.get("RTVOICE_KEYS_BACKEND", "yaml").lower()
+    if backend == "redis":
+        import redis.asyncio as redis_lib
+        from rtvoice_auth.store_redis import RedisKeyStore
+        url = os.environ.get("RTVOICE_REDIS_URL", "redis://redis:6379/0")
+        client = redis_lib.from_url(url)
+        app.state.key_store = RedisKeyStore(client)
+    else:
+        from rtvoice_auth.store import YamlKeyStore
+        path = os.environ.get("RTVOICE_KEYS_FILE", "/data/keys.yaml")
+        app.state.key_store = YamlKeyStore(path)
+    await app.state.key_store.load()
+    await auto_migrate_legacy(app.state.key_store)
+    app.state.scope = "tts"
+    log.info("key store ready (backend=%s, scope=tts)", backend)
     yield
     log.info("shutdown")
 
@@ -186,7 +230,7 @@ async def info() -> dict:
 
 
 @app.get("/v1/voices")
-async def voices(_auth: None = Depends(_check_client_auth)) -> dict:
+async def voices(key: Key = Depends(require_key)) -> dict:
     if _kokoro is None:
         raise api_error(503, "tts.not_ready", "Kokoro 尚未加载")
     return {"voices": sorted(_kokoro.get_voices())}
@@ -242,7 +286,7 @@ async def _synthesize_stream(req: TTSRequest, request: Request) -> AsyncIterator
 
 @app.post("/v1/tts/stream")
 async def tts_stream(req: TTSRequest, request: Request,
-                     _auth: None = Depends(_check_client_auth)):
+                     key: Key = Depends(require_key)):
     if _kokoro is None:
         raise api_error(503, "tts.not_ready", "Kokoro 尚未加载")
     voice = req.voice or DEFAULT_VOICE

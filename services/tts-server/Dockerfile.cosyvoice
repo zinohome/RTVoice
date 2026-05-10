@@ -55,8 +55,13 @@ WORKDIR /opt/CosyVoice
 RUN pip install -r requirements.txt
 
 # 我们的 server wrapper deps（FastAPI + Prometheus + 我们的协议）
-COPY requirements.cosyvoice.txt /tmp/server-requirements.txt
+COPY services/tts-server/requirements.cosyvoice.txt /tmp/server-requirements.txt
 RUN pip install -r /tmp/server-requirements.txt
+
+# rtvoice_auth shared package（SP6 T11）
+COPY services/common /app/common
+RUN pip install --no-cache-dir /app/common
+ENV PYTHONPATH=/app/common:/app
 
 # --- 缓存边界（同 Dockerfile.cosyvoice3 v0.7.1 一致）---
 # 重型 chown -R /opt/venv（60GB 量级 = 215s）必须放 COPY app 之前，让 code
@@ -65,16 +70,16 @@ RUN pip install -r /tmp/server-requirements.txt
 # volume 时继承 1001 ownership——entrypoint 以 appuser 写入 modelscope 下载
 # 才能成功
 RUN useradd -u 1001 -m appuser \
- && mkdir -p /opt/CosyVoice/pretrained_models \
- && chown -R appuser:appuser /opt/venv /opt/CosyVoice
+ && mkdir -p /opt/CosyVoice/pretrained_models /app \
+ && chown -R appuser:appuser /opt/venv /opt/CosyVoice /app
 
 # 入口脚本（小，少改动）
-COPY --chown=appuser:appuser entrypoint-cosyvoice.sh /entrypoint.sh
+COPY --chown=appuser:appuser services/tts-server/entrypoint-cosyvoice.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # 我们的服务代码（最常改动；--chown 内联避免后续单独 chown）
 WORKDIR /app
-COPY --chown=appuser:appuser app /app/app
+COPY --chown=appuser:appuser services/tts-server/app /app/app
 
 USER appuser
 

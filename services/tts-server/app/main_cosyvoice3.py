@@ -54,6 +54,12 @@ sys.path.insert(0, os.path.join(COSYVOICE_DIR, "third_party/Matcha-TTS"))
 from cosyvoice.cli.cosyvoice import CosyVoice3  # noqa: E402
 from fastapi.exceptions import RequestValidationError
 from app.error_schema import ErrorResponse, api_error, http_exception_handler, validation_exception_handler
+from typing import Annotated
+
+from rtvoice_auth.models import Key
+from rtvoice_auth.verify import verify_key
+from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDenied
+from rtvoice_auth.lifespan import auto_migrate_legacy
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -168,6 +174,23 @@ async def lifespan(app: FastAPI):
         log.info("admin endpoints 已启用 (TTS_ADMIN_API_KEY 设置)")
     else:
         log.info("admin endpoints 已禁用 (TTS_ADMIN_API_KEY 未设置)")
+
+    # SP6 T11: init key store + scope=tts
+    backend = os.environ.get("RTVOICE_KEYS_BACKEND", "yaml").lower()
+    if backend == "redis":
+        import redis.asyncio as redis_lib
+        from rtvoice_auth.store_redis import RedisKeyStore
+        url = os.environ.get("RTVOICE_REDIS_URL", "redis://redis:6379/0")
+        client = redis_lib.from_url(url)
+        app.state.key_store = RedisKeyStore(client)
+    else:
+        from rtvoice_auth.store import YamlKeyStore
+        path = os.environ.get("RTVOICE_KEYS_FILE", "/data/keys.yaml")
+        app.state.key_store = YamlKeyStore(path)
+    await app.state.key_store.load()
+    await auto_migrate_legacy(app.state.key_store)
+    app.state.scope = "tts"
+    log.info("key store ready (backend=%s, scope=tts)", backend)
     yield
     log.info("shutdown")
 
@@ -222,11 +245,31 @@ def _resolve_voice(voice: str | None) -> str:
 
 
 def _check_client_auth(authorization: str | None = Header(None)) -> None:
-    """Bearer 鉴权（client tier）：保护 inference endpoints。"""
+    """Legacy fallback (deprecated v0.6.2)；新代码走 require_key。"""
     if not RTVOICE_API_KEY:
         return  # dev：未设 key 跳过
     if authorization != f"Bearer {RTVOICE_API_KEY}":
         raise api_error(401, "auth.invalid_token", "invalid or missing Bearer token")
+
+
+# SP6 T11: scope=tts via rtvoice_auth.key_store
+async def require_key(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> Key:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise api_error(401, "auth.missing_token", "Authorization: Bearer required")
+    secret = authorization[len("Bearer "):]
+    try:
+        return await verify_key(secret,
+                                scope=request.app.state.scope,
+                                store=request.app.state.key_store)
+    except InvalidToken as e:
+        raise api_error(401, e.code, e.message)
+    except TokenRevoked as e:
+        raise api_error(401, e.code, e.message)
+    except ScopeDenied as e:
+        raise api_error(403, e.code, e.message)
 
 
 def _ws_auth_ok(ws: WebSocket) -> bool:
@@ -264,7 +307,7 @@ async def info() -> dict:
 
 
 @app.get("/v1/voices")
-async def voices(_auth: None = Depends(_check_client_auth)) -> dict:
+async def voices(key: Key = Depends(require_key)) -> dict:
     return {"voices": _cosyvoice_voices}
 
 
@@ -374,7 +417,7 @@ async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: st
 
 @app.post("/v1/tts/stream")
 async def tts_stream(req: TTSRequest, request: Request,
-                     _auth: None = Depends(_check_client_auth)):
+                     key: Key = Depends(require_key)):
     if _cosyvoice is None:
         raise api_error(503, "tts.not_ready", "CosyVoice 尚未加载")
     voice = _resolve_voice(req.voice)

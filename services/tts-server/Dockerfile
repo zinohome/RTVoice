@@ -23,8 +23,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     espeak-ng-data \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/common /app/common
+COPY services/tts-server/requirements.txt /app/
+RUN pip install --upgrade pip && \
+    pip install -r /app/requirements.txt && \
+    pip install --no-cache-dir /app/common
 
 # 下载 Kokoro 模型 + 音色 embedding
 ARG KOKORO_VERSION=v1.0
@@ -37,7 +40,8 @@ RUN mkdir -p /app/models && cd /app/models && \
 # 卸载下载工具
 RUN apt-get purge -y --auto-remove wget && rm -rf /var/lib/apt/lists/*
 
-COPY app ./app
+COPY services/tts-server/app /app/app
+ENV PYTHONPATH=/app/common:/app
 
 RUN useradd -u 1000 -m appuser && chown -R appuser:appuser /app
 USER appuser

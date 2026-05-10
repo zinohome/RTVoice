@@ -296,8 +296,8 @@ services:
   # ---------------------------------------------------------------
   tts-server:
     build:
-      context: ./services/tts-server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/tts-server/${TTS_DOCKERFILE:-Dockerfile}
     image: rtvoice/tts-server:v0.5.0
     container_name: rtvoice-tts
     profiles: ["dev", "prod"]
