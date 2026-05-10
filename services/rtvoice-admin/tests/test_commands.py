@@ -77,3 +77,37 @@ async def test_cmd_rotate_returns_new_secret(store):
     assert new_out["secret"] != out["secret"]
     new_hash = s.find_by_id(out["id"]).secret_hash
     assert new_hash != old_hash
+
+
+@pytest.mark.asyncio
+async def test_cmd_import_legacy_imports(store, monkeypatch):
+    from rtvoice_admin.commands_legacy import cmd_import_legacy
+    s, _ = store
+    await s.load()
+    monkeypatch.setenv("RTVOICE_API_KEY", "legacy-secret-32chars-test")
+    out = await cmd_import_legacy(s)
+    assert out["status"] == "imported"
+    assert s.any_keys()
+
+
+@pytest.mark.asyncio
+async def test_cmd_import_legacy_skips_when_keys_exist(store, monkeypatch):
+    from rtvoice_admin.commands import cmd_create
+    from rtvoice_admin.commands_legacy import cmd_import_legacy
+    s, _ = store
+    await s.load()
+    await cmd_create(s, name="x", sessions_concurrent=1, sessions_per_hour=10,
+                     scopes=["stt"])
+    monkeypatch.setenv("RTVOICE_API_KEY", "legacy-secret")
+    out = await cmd_import_legacy(s)
+    assert out["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_cmd_import_legacy_skips_when_no_env(store, monkeypatch):
+    from rtvoice_admin.commands_legacy import cmd_import_legacy
+    s, _ = store
+    await s.load()
+    monkeypatch.delenv("RTVOICE_API_KEY", raising=False)
+    out = await cmd_import_legacy(s)
+    assert out["status"] == "skipped"

@@ -86,6 +86,12 @@ async def _run_async(args) -> int:
         print("\n\u26a0\ufe0f  new secret 仅显示这一次，请立即保存。")
         return 0
 
+    if args.cmd == "import-legacy":
+        from rtvoice_admin.commands_legacy import cmd_import_legacy
+        out = await cmd_import_legacy(store)
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return 0
+
     return 1
 
 
@@ -117,6 +123,9 @@ def main(argv: list[str] | None = None) -> int:
 
     pr = sub.add_parser("rotate", help="rotate (regenerate) secret")
     pr.add_argument("key_id")
+
+    sub.add_parser("import-legacy",
+                   help="import RTVOICE_API_KEY env as legacy-default")
 
     args = p.parse_args(argv)
     if args.cmd == "version":
