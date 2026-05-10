@@ -11,10 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY services/common /app/common
+COPY services/rtvoice-admin /app/rtvoice-admin
 COPY services/realtime-server/requirements.txt /app/
 RUN pip install --upgrade pip && \
     pip install -r /app/requirements.txt && \
-    pip install --no-cache-dir /app/common
+    pip install --no-cache-dir /app/common && \
+    pip install --no-cache-dir /app/rtvoice-admin
 COPY services/realtime-server/app /app/app
 COPY services/realtime-server/static /app/static
 ENV PYTHONPATH=/app/common:/app
