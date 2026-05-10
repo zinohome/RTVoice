@@ -9,6 +9,63 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.13.0] — 2026-05-10 — SP6 Multi-Tenant Auth
+
+平台化重构第七阶段：单 key 共享 → 多 key 多租户 ready。
+
+### Added
+
+- **`services/common/rtvoice_auth/`** — 共享 auth lib
+  - `Key` Pydantic v2 model（id / secret_hash / name / quota / scopes / revoked_at / legacy）
+  - `YamlKeyStore` + `RedisKeyStore`（双 backend，env 切换）
+  - `verify_key(secret, scope, store)` + 4 错误类（InvalidToken / TokenRevoked / ScopeDenied / QuotaExceeded）
+  - `QuotaTracker`：sessions_concurrent + sessions_per_hour rolling 执行
+  - `auto_migrate_legacy`：服务启动时空 store + RTVOICE_API_KEY → legacy-default key
+- **`services/rtvoice-admin/`** — 独立 CLI 工具
+  - 6 命令：create / list / show / revoke / rotate / import-legacy
+  - 用 argparse + RTVOICE_KEYS_BACKEND env 选 backend
+  - prod 用 `docker exec rtvoice-realtime rtvoice-admin ...`
+- 4 服务 (realtime/stt/tts/token) 集成 `require_key` + scope 验证
+- realtime-server `POST /v1/sessions` 走 quota acquire/release
+- WS handler 三路 Bearer 验 → store 查 key record
+- `Session.key_id` 字段；cleanup 调 release_session
+- Redis 容器（profile=auth-redis）+ rtvoice_redis_data 卷
+- 4 services environment 加 `RTVOICE_KEYS_BACKEND/FILE/REDIS_URL`
+- `data/keys.yaml` 占位
+
+### Changed
+
+- realtime-server `creator_key_hash` 改用 `key.id`（替代 SP3 hash_key 匿名 16 字节 sha）
+- token-server `require_api_key` 用 `verify_key`（scope=tokens）；slowapi IP 限保留
+- 4 Dockerfile 加 `COPY services/common /app/common` + `pip install rtvoice_auth`；compose build context 改 monorepo root
+- `.env.example`：SP6 段（YAML default / Redis 切换说明）
+- `OPERATIONS.md` §7：multi-tenant 启用 / per-app key / YAML→Redis 切换 / 撤销 legacy / quota 排障
+- `CONVENTIONS.md` §6：+`auth.token_revoked` / `auth.scope_denied` / `auth.quota_per_hour` / `auth.quota_concurrent`
+
+### 验证（autonomous）
+
+- ✅ rtvoice_auth 28 单元测试（models 3 / store_yaml 6 / store_redis 5 / verify 5 / quota 6 / lifespan 3）
+- ✅ admin CLI 10 测试（2 smoke + 5 commands + 3 import-legacy）
+- ✅ realtime-server +5 endpoint 测试（valid/invalid/quota_concurrent/revoked/scope_denied）
+- ✅ token-server 3 新测试（沙盒新建 tests dir）
+- ✅ stt/tts CORS+auth 验证留 prod E2E（沙盒无 tests dir）
+- ✅ 总测试 119 → 165+
+- ⏳ prod 集成：daocloud mirror redis pull + 4 服务 force recreate + autonomous A1-A8
+
+### 设计决策（D-2026-05-10-D.1~D.6）
+
+- API Key per App，不做 OAuth2/JWT 用户级（应用自管用户；可演进）
+- YAML（dev）+ Redis（prod）双 backend env 切换
+- CLI 工具无 admin HTTP（攻击面小）；用 docker exec
+- Hard cutover + 自动迁移 legacy（prod 升级零停机）
+- Quota 基础执行：concurrent + per_hour；token bucket 留 SP7+
+- token-server slowapi（IP）+ per-key（auth）共存（不同维度）
+- common lib 用 monorepo COPY + PYTHONPATH（避免 PyPI 内部 lib 发布）
+
+详见 [SP6 设计](./docs/superpowers/specs/2026-05-10-sp6-multi-tenant-auth-design.md) + [实施 plan](./docs/superpowers/plans/2026-05-10-sp6-multi-tenant-auth.md)。
+
+---
+
 ## [Unreleased]
 
 待规划：
