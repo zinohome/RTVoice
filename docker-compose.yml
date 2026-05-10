@@ -83,10 +83,10 @@ services:
       DEV_AUTO_INJECT_KEY: ${DEV_AUTO_INJECT_KEY:-false}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
-      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys.yaml}
+      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys/keys.yaml}
       RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
     volumes:
-      - ${RTVOICE_KEYS_HOST_FILE:-./data/keys.yaml}:/data/keys.yaml:rw
+      - ${RTVOICE_KEYS_HOST_DIR:-./data/keys}:/data/keys:rw
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2).status==200 else 1)"]
       interval: 10s
@@ -146,11 +146,11 @@ services:
       RTVOICE_AUDIT_QUEUE_MAX: ${RTVOICE_AUDIT_QUEUE_MAX:-1000}
       RTVOICE_PROMPT_MAX_CHARS: ${RTVOICE_PROMPT_MAX_CHARS:-2000}
       RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
-      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys.yaml}
+      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys/keys.yaml}
       RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
     volumes:
       - ${RTVOICE_AUDIT_HOST_DIR:-./data/transcripts}:/data/transcripts:rw
-      - ${RTVOICE_KEYS_HOST_FILE:-./data/keys.yaml}:/data/keys.yaml:rw
+      - ${RTVOICE_KEYS_HOST_DIR:-./data/keys}:/data/keys:rw
     expose:
       - "9000"
     healthcheck:
@@ -248,10 +248,10 @@ services:
       RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
       RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
       RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
-      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys.yaml}
+      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys/keys.yaml}
       RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
     volumes:
-      - ${RTVOICE_KEYS_HOST_FILE:-./data/keys.yaml}:/data/keys.yaml:rw
+      - ${RTVOICE_KEYS_HOST_DIR:-./data/keys}:/data/keys:rw
     # 内部服务，端口不映射到宿主（仅 docker network 可达）
     expose:
       - "9090"
@@ -327,10 +327,10 @@ services:
       RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
       RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
       RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
-      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys.yaml}
+      RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys/keys.yaml}
       RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
     volumes:
-      - ${RTVOICE_KEYS_HOST_FILE:-./data/keys.yaml}:/data/keys.yaml:rw
+      - ${RTVOICE_KEYS_HOST_DIR:-./data/keys}:/data/keys:rw
     expose:
       - "9880"
     deploy:
