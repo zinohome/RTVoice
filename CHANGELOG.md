@@ -19,6 +19,52 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.12.0] — 2026-05-09 — SP5 Adoption Bridge
+
+平台化重构第六阶段：SP1-SP4 全 platform-side；SP5 是把 platform 推到"真用户能上手"的桥梁。
+
+### Added
+
+- **`clients/web/`** — 4-tab 纯 HTML/JS demo（STT / TTS / Realtime / Tokens）
+  - 零 build 链；4 tab HTML 完全静态写在 `index.html`（无 JS innerHTML）；JS 仅 wire 事件
+  - Web Audio API 流式 PCM 播放（24k mono int16）
+  - getUserMedia + ScriptProcessor 录 16k mono int16 PCM
+  - Realtime tab 完整对话流（transcript.partial / response.text / session.update / memory.clear）
+  - 配置 localStorage 持久化（API base + Bearer）
+- **CORS Middleware** — realtime/stt/tts 三服务加 FastAPI CORSMiddleware
+  - env `RTVOICE_CORS_ORIGINS` 默认 `*`，prod 收紧示例：`https://app.com,https://demo.com`
+  - allow_credentials=False
+  - token-server **不**加（减少 LiveKit secret 暴露面）
+
+### Changed
+
+- `realtime-server` image tag `v0.9.0` → `v0.12.0`（SP2 起一直没改导致 metrics/info 误导）
+- `realtime-server` FastAPI app version + `/info.version` 同步 0.12.0
+- 3 服务 docker-compose environment 加 `RTVOICE_CORS_ORIGINS`
+- `.env.example` 顶部加国内部署提醒；CORS 段
+- `OPERATIONS.md` §6 加国内 docker mirror cookbook + Grafana 排障 4 步法
+- `clients/python/README.md` 加 "Try inside container" 段（host 无 pip 时）
+
+### 验证（autonomous）
+
+- ✅ realtime-server CORS 2 单元测试 + version 1 测试
+- ✅ stt/tts CORS middleware 加载（沙盒无 tests dir，prod E2E 验证）
+- ✅ docker-compose validate / YAML lint
+- ✅ web demo 文件结构齐 + Python http server serve
+- ⏳ prod 集成：Grafana A6 unblock（daocloud mirror）+ 4 tabs 浏览器验收
+
+### 设计决策
+
+- clients/web/ 用纯 HTML/CSS/ES modules：与 SP3 静态测试页同款理念，零依赖
+- 4 tab HTML 全静态写在 index.html：避免 JS innerHTML XSS 风险，结构更清晰
+- token-server 不加 CORS：浏览器一般不直连 LiveKit token；server-to-server 不受 CORS 影响
+- daocloud mirror 单镜像 pull + tag（不改 daemon.json）：可逆，不影响其他容器
+- Web Audio ScriptProcessorNode 仍用（deprecated 但 ubiquitous）；AudioWorklet 等 SP6+
+
+详见 [SP5 设计](./docs/superpowers/specs/2026-05-09-sp5-adoption-bridge-design.md) + [实施 plan](./docs/superpowers/plans/2026-05-09-sp5-adoption-bridge.md)。
+
+---
+
 ## [0.11.0] — 2026-05-09 — SP4 Bridge: Python SDK + SP3 残项 + A-lite 仪表盘
 
 平台化重构第五阶段：把 RTVoice 从"platform 已建好"推进到"platform 已能被用起来 + 看得见"。
