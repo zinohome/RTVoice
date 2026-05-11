@@ -79,9 +79,40 @@ async def lifespan(app: FastAPI):
     app.state.scope = "realtime"
     session_mgr = SessionManager(quota=app.state.quota)
     session_mgr.start_expire_loop()
+
+    # SP7: hot reload watcher
+    async def _on_keys_changed():
+        await app.state.key_store.load()
+        log.info("key store hot-reloaded")
+
+    from rtvoice_auth.watcher import YamlFileWatcher, RedisPubSubListener
+    from rtvoice_auth.store import YamlKeyStore
+    from rtvoice_auth.store_redis import RedisKeyStore
+    debounce_ms = int(os.environ.get("RTVOICE_KEYS_RELOAD_DEBOUNCE_MS", "100"))
+    app.state.key_watcher = None
+    if isinstance(app.state.key_store, YamlKeyStore):
+        app.state.key_watcher = YamlFileWatcher(
+            path=str(app.state.key_store.path),
+            on_change=_on_keys_changed,
+            debounce_ms=debounce_ms,
+        )
+        app.state.key_watcher.start()
+    elif isinstance(app.state.key_store, RedisKeyStore):
+        app.state.key_watcher = RedisPubSubListener(
+            redis_client=app.state.key_store._r,
+            on_change=_on_keys_changed,
+            debounce_ms=debounce_ms,
+        )
+        await app.state.key_watcher.start()
+
     log.info("realtime-server lifespan: ready")
     yield
     log.info("realtime-server lifespan: shutdown")
+    if hasattr(app.state, "key_watcher") and app.state.key_watcher is not None:
+        try:
+            await app.state.key_watcher.stop()
+        except Exception:
+            log.exception("key_watcher stop failed")
     if session_mgr:
         await session_mgr.stop_expire_loop()
         for s in session_mgr.all_sessions():

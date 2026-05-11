@@ -412,3 +412,44 @@ def test_scope_denied_returns_403(monkeypatch, tmp_path):
                    headers={"Authorization": f"Bearer {secret}"})
         assert r.status_code == 403
         assert r.json()["code"] == "auth.scope_denied"
+
+
+def test_hot_reload_yaml_picks_up_new_key(monkeypatch, tmp_path):
+    """admin CLI 改 keys.yaml 后服务侧 < 1s 自动 pickup."""
+    import asyncio
+    import hashlib
+    from datetime import datetime, timezone
+    from rtvoice_auth.store import YamlKeyStore
+    from rtvoice_auth.models import Key
+    from fastapi.testclient import TestClient
+
+    yaml_path = tmp_path / "keys.yaml"
+    secret = "hot-reload-secret-32-chars-aaaaa"
+    h = hashlib.sha256(secret.encode()).hexdigest()
+
+    monkeypatch.setenv("RTVOICE_KEYS_BACKEND", "yaml")
+    monkeypatch.setenv("RTVOICE_KEYS_FILE", str(yaml_path))
+    monkeypatch.setenv("RTVOICE_API_KEY", "")
+
+    import sys
+    for m in list(sys.modules):
+        if m.startswith("app."):
+            del sys.modules[m]
+    from app.main import app
+    with TestClient(app) as c:
+        r = c.post("/v1/sessions", json={},
+                   headers={"Authorization": f"Bearer {secret}"})
+        assert r.status_code == 401
+
+        s = YamlKeyStore(str(yaml_path))
+        asyncio.run(s.load())
+        asyncio.run(s.put(Key(id="kh", secret_hash=h, name="h",
+                              scopes=["realtime"],
+                              created_at=datetime.now(timezone.utc))))
+
+        import time
+        time.sleep(0.8)
+
+        r = c.post("/v1/sessions", json={},
+                   headers={"Authorization": f"Bearer {secret}"})
+        assert r.status_code == 201, f"expected 201, got {r.status_code}: {r.text}"
