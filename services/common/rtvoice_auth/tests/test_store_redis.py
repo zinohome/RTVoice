@@ -70,3 +70,41 @@ async def test_redis_store_list_all(fake_redis):
                         created_at=datetime.now(timezone.utc)))
     keys = s.list_all()
     assert {k.id for k in keys} == {"k0", "k1", "k2"}
+
+
+@pytest.mark.asyncio
+async def test_redis_store_reload_picks_up_new_key(fake_redis):
+    from rtvoice_auth.store_redis import RedisKeyStore
+    from rtvoice_auth.models import Key
+
+    s1 = RedisKeyStore(fake_redis)
+    await s1.load()
+    s2 = RedisKeyStore(fake_redis)
+    await s2.load()
+    await s2.put(Key(id="rx", secret_hash="rh", name="r",
+                     created_at=datetime.now(timezone.utc)))
+    assert s1.find_by_hash("rh") is None
+    await s1.load()
+    assert s1.find_by_hash("rh") is not None
+
+
+@pytest.mark.asyncio
+async def test_redis_store_publish_change(fake_redis):
+    """publish_change(key_id) 发布到 channel."""
+    from rtvoice_auth.store_redis import RedisKeyStore
+
+    s = RedisKeyStore(fake_redis)
+    pubsub = fake_redis.pubsub()
+    await pubsub.subscribe("rtvoice:keys:changed")
+    # discard subscribe ack
+    await asyncio.wait_for(pubsub.get_message(timeout=1), timeout=1.5)
+
+    await s.publish_change("test_key")
+
+    msg = await asyncio.wait_for(pubsub.get_message(timeout=1), timeout=1.5)
+    assert msg["type"] == "message"
+    data = msg["data"]
+    if isinstance(data, bytes):
+        data = data.decode()
+    assert data == "test_key"
+    await pubsub.aclose()

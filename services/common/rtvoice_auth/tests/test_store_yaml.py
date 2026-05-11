@@ -81,3 +81,38 @@ async def test_yaml_store_list_all(tmp_path):
     keys = s.list_all()
     assert len(keys) == 3
     assert {k.id for k in keys} == {"k0", "k1", "k2"}
+
+
+@pytest.mark.asyncio
+async def test_yaml_store_reload_picks_up_new_key(tmp_path):
+    """外部进程改 yaml 文件后 store.load() 能读到新 key（无需进程重启）."""
+    from rtvoice_auth.store import YamlKeyStore
+    from rtvoice_auth.models import Key
+
+    p = tmp_path / "keys.yaml"
+    s1 = YamlKeyStore(str(p))
+    await s1.load()
+    s2 = YamlKeyStore(str(p))
+    await s2.load()
+    await s2.put(Key(id="kx", secret_hash="hx", name="x",
+                     created_at=datetime.now(timezone.utc)))
+    assert s1.find_by_hash("hx") is None
+    await s1.load()
+    assert s1.find_by_hash("hx") is not None
+
+
+@pytest.mark.asyncio
+async def test_yaml_store_reload_picks_up_revoke(tmp_path):
+    from rtvoice_auth.store import YamlKeyStore
+    from rtvoice_auth.models import Key
+
+    p = tmp_path / "keys.yaml"
+    s = YamlKeyStore(str(p))
+    await s.load()
+    await s.put(Key(id="kr", secret_hash="hr", name="r",
+                    created_at=datetime.now(timezone.utc)))
+    s2 = YamlKeyStore(str(p))
+    await s2.load()
+    await s2.revoke("kr")
+    await s.load()
+    assert s.find_by_id("kr").revoked_at is not None

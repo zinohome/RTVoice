@@ -70,6 +70,10 @@ class RedisKeyStore:
     def any_keys(self) -> bool:
         return bool(self._cache)
 
+    async def publish_change(self, key_id: str) -> None:
+        """通知所有订阅者：某 key 变更（key_id 仅日志用，订阅者整盘 reload）."""
+        await self._r.publish("rtvoice:keys:changed", key_id)
+
     @staticmethod
     def _encode_key(k: Key) -> dict[str, str]:
         d = k.model_dump(mode="json")
