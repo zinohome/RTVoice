@@ -40,16 +40,15 @@ RUN pip install --upgrade pip && \
 ARG MODEL_NAME=sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
 ARG HF_REPO=csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
 
+COPY scripts/download_model.sh /usr/local/bin/download_model.sh
+RUN chmod +x /usr/local/bin/download_model.sh
+
 RUN mkdir -p /app/models/${MODEL_NAME} && cd /app/models/${MODEL_NAME} && \
     base="https://huggingface.co/${HF_REPO}/resolve/main" && \
-    for f in \
-        "encoder-epoch-99-avg-1.int8.onnx" \
-        "decoder-epoch-99-avg-1.int8.onnx" \
-        "joiner-epoch-99-avg-1.int8.onnx" \
-        "tokens.txt" \
-    ; do \
-        wget -q -O "$f" "${base}/${f}" || (echo "FAILED: $f"; exit 1); \
-    done
+    /usr/local/bin/download_model.sh "${base}/encoder-epoch-99-avg-1.int8.onnx" "encoder-epoch-99-avg-1.int8.onnx" 1048576 && \
+    /usr/local/bin/download_model.sh "${base}/decoder-epoch-99-avg-1.int8.onnx" "decoder-epoch-99-avg-1.int8.onnx" 102400 && \
+    /usr/local/bin/download_model.sh "${base}/joiner-epoch-99-avg-1.int8.onnx" "joiner-epoch-99-avg-1.int8.onnx" 1048576 && \
+    /usr/local/bin/download_model.sh "${base}/tokens.txt" "tokens.txt" 1024
 
 RUN apt-get purge -y --auto-remove wget && rm -rf /var/lib/apt/lists/*
 
