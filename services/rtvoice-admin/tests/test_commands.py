@@ -111,3 +111,29 @@ async def test_cmd_import_legacy_skips_when_no_env(store, monkeypatch):
     monkeypatch.delenv("RTVOICE_API_KEY", raising=False)
     out = await cmd_import_legacy(s)
     assert out["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_cmd_create_publishes_change_on_redis(monkeypatch):
+    """Redis backend：cmd_create 末尾 PUBLISH rtvoice:keys:changed."""
+    import fakeredis.aioredis
+    from rtvoice_auth.store_redis import RedisKeyStore
+    from rtvoice_admin.commands import cmd_create
+
+    r = fakeredis.aioredis.FakeRedis()
+    s = RedisKeyStore(r)
+    await s.load()
+
+    pubsub = r.pubsub()
+    await pubsub.subscribe("rtvoice:keys:changed")
+    await pubsub.get_message(timeout=1)
+
+    await cmd_create(s, name="t", sessions_concurrent=1, sessions_per_hour=10,
+                     scopes=["stt"])
+
+    msg = await pubsub.get_message(timeout=2)
+    assert msg is not None
+    assert msg["type"] == "message"
+
+    await pubsub.aclose()
+    await r.aclose()

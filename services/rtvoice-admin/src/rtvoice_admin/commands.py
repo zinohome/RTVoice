@@ -40,6 +40,7 @@ async def cmd_create(
         notes=notes,
     )
     await store.put(k)
+    await _maybe_publish_change(store, key_id)
     return {
         "id": key_id,
         "secret": secret,
@@ -70,7 +71,10 @@ async def cmd_show(store: Any, *, key_id: str) -> dict | None:
 
 
 async def cmd_revoke(store: Any, *, key_id: str) -> bool:
-    return await store.revoke(key_id)
+    ok = await store.revoke(key_id)
+    if ok:
+        await _maybe_publish_change(store, key_id)
+    return ok
 
 
 async def cmd_rotate(store: Any, *, key_id: str) -> dict:
@@ -81,4 +85,15 @@ async def cmd_rotate(store: Any, *, key_id: str) -> dict:
     new_secret = _new_secret()
     k.secret_hash = hashlib.sha256(new_secret.encode()).hexdigest()
     await store.put(k)
+    await _maybe_publish_change(store, key_id)
     return {"id": key_id, "secret": new_secret}
+
+
+async def _maybe_publish_change(store, key_id: str) -> None:
+    """Redis backend → PUBLISH；YAML 不需要（watchdog 自动监 file write）."""
+    try:
+        from rtvoice_auth.store_redis import RedisKeyStore
+        if isinstance(store, RedisKeyStore):
+            await store.publish_change(key_id)
+    except Exception:
+        pass
