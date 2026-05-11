@@ -585,7 +585,7 @@ docker compose restart realtime-server
 
 ---
 
-## 8. 监控检查项
+## §9 监控检查项
 
 如果你跑了 `docker-compose.monitoring.yml`，Grafana 看这些指标判健康：
 
@@ -601,7 +601,7 @@ docker compose restart realtime-server
 
 ---
 
-## 8. 已知限制
+## §10 已知限制
 
 - **重连后 sherpa-onnx 是新 stream**：当前 utterance 数据丢失，用户需重复一次。这是设计权衡（用"丢局部"换"全局可用"），不是 bug。
 - **mid-stream LLM 异常截断不拼 fallback**：用户听到半句话停止。设计上是为了避免"半句拼一句兜底"听起来很奇怪。如果想改成更激进的恢复，改 `llm_client.py::stream`。
