@@ -1,11 +1,14 @@
 """Admin CLI commands implementing key lifecycle."""
 from __future__ import annotations
 import hashlib
+import logging
 import secrets
 from datetime import datetime, timezone
 from typing import Any
 
 from rtvoice_auth.models import Key
+
+logger = logging.getLogger(__name__)
 
 
 def _new_id() -> str:
@@ -91,9 +94,10 @@ async def cmd_rotate(store: Any, *, key_id: str) -> dict:
 
 async def _maybe_publish_change(store, key_id: str) -> None:
     """Redis backend → PUBLISH；YAML 不需要（watchdog 自动监 file write）."""
+    from rtvoice_auth.store_redis import RedisKeyStore
+    if not isinstance(store, RedisKeyStore):
+        return
     try:
-        from rtvoice_auth.store_redis import RedisKeyStore
-        if isinstance(store, RedisKeyStore):
-            await store.publish_change(key_id)
-    except Exception:
-        pass
+        await store.publish_change(key_id)
+    except Exception as e:
+        logger.warning("publish_change failed for %s: %s", key_id, e)
