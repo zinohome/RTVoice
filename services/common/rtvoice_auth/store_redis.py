@@ -22,6 +22,11 @@ class RedisKeyStore:
         self._r = redis_client
         self._cache: dict[str, Key] = {}
 
+    @property
+    def client(self):
+        """Public access to the underlying redis client (for watcher subscriptions)."""
+        return self._r
+
     async def load(self) -> None:
         ids_bytes = await self._r.smembers("rtvoice:keys")
         ids = [b.decode() if isinstance(b, bytes) else b for b in ids_bytes]

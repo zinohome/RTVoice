@@ -99,7 +99,7 @@ async def lifespan(app: FastAPI):
         app.state.key_watcher.start()
     elif isinstance(app.state.key_store, RedisKeyStore):
         app.state.key_watcher = RedisPubSubListener(
-            redis_client=app.state.key_store._r,
+            redis_client=app.state.key_store.client,
             on_change=_on_keys_changed,
             debounce_ms=debounce_ms,
         )
