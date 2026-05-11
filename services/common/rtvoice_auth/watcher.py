@@ -83,3 +83,53 @@ class YamlFileWatcher:
             self._observer = None
         await self._debouncer.stop()
         log.info("yaml file watcher stopped")
+
+
+class RedisPubSubListener:
+    """订阅 'rtvoice:keys:changed' channel；自带 reconnect on disconnect."""
+
+    def __init__(self, redis_client, on_change: ReloadCallback,
+                 channel: str = "rtvoice:keys:changed", debounce_ms: int = 100):
+        self._r = redis_client
+        self._channel = channel
+        self._debouncer = _Debouncer(on_change, debounce_ms)
+        self._task: asyncio.Task | None = None
+        self._closed = False
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._loop())
+
+    async def _loop(self) -> None:
+        while not self._closed:
+            try:
+                pubsub = self._r.pubsub()
+                await pubsub.subscribe(self._channel)
+                log.info("redis pubsub subscribed: %s", self._channel)
+                try:
+                    async for msg in pubsub.listen():
+                        if self._closed:
+                            break
+                        if msg.get("type") == "message":
+                            self._debouncer.fire()
+                finally:
+                    try:
+                        await pubsub.unsubscribe(self._channel)
+                        await pubsub.aclose()
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("redis pubsub loop error; reconnect in 1s")
+                await asyncio.sleep(1)
+
+    async def stop(self) -> None:
+        self._closed = True
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await self._debouncer.stop()
+        log.info("redis pubsub listener stopped")
