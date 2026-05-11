@@ -9,6 +9,51 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.14.0] — 2026-05-11 — SP7 Auth Hot Reload + Build Stability
+
+修补 SP6 prod 验收暴露的两大痛点。
+
+### Added
+
+- **`services/common/rtvoice_auth/watcher.py`** — 共享 watcher
+  - `_Debouncer`：短时间多次 fire 只触一次 callback（默认 100ms）
+  - `YamlFileWatcher`：watchdog Observer 后台线程 + `loop.call_soon_threadsafe` 唤起 asyncio debouncer；监父目录，handler 内 basename 过滤
+  - `RedisPubSubListener`：订阅 `rtvoice:keys:changed`；自带 reconnect on disconnect
+- **`scripts/download_model.sh`** — wget + size check + retry × 3
+- **`RedisKeyStore.publish_change(key_id)`** — admin CLI 写后通知所有订阅者
+- 4 服务 main.py lifespan 集成 watcher start/stop
+- env `RTVOICE_KEYS_RELOAD_DEBOUNCE_MS=100`（可调）
+
+### Changed
+
+- admin CLI `create` / `revoke` / `rotate` 末尾调 `_maybe_publish_change`
+  （Redis backend → PUBLISH；YAML backend → file write 自动触发 watcher）
+- `services/stt-server/Dockerfile`{,.gpu}：wget 段改用 `download_model.sh`；
+  各模型 min_bytes：encoder/joiner 1MB、decoder 100KB、tokens 1KB
+- `OPERATIONS.md` §6.5：HF mirror 备份指南
+- `OPERATIONS.md` §8：hot reload 工作原理 + 排障
+
+### 验证（autonomous）
+
+- ✅ watcher 6 单元测试（_Debouncer 2 + YAML 1 + Redis 3）
+- ✅ store integration 4 测试（YAML reload 2 + Redis reload 2）
+- ✅ admin commands publish 1 测试
+- ✅ download_model.sh subprocess 2 测试（1 pass + 1 skipif wget-no-file://）
+- ✅ realtime-server hot reload e2e 1 测试
+- ✅ 总测试 165+ → 178+
+- ⏳ prod：admin CLI create → < 1s 全 4 服务 pickup；stt rebuild 防 HF 抖动
+
+### 设计决策（D-2026-05-11-E.1~E.4）
+
+- YAML watchdog + Redis pubsub 双 backend 各自最优
+- wget --tries=1 + size check + 外层 3 次 retry + sleep 3s
+- 整盘 reload + 100ms debounce（store 已 in-memory dict，整盘 cheap）
+- `scripts/download_model.sh` 在 monorepo root，各 Dockerfile COPY 调用
+
+详见 [SP7 设计](./docs/superpowers/specs/2026-05-11-sp7-auth-hot-reload-build-stability-design.md) + [实施 plan](./docs/superpowers/plans/2026-05-11-sp7-auth-hot-reload-build-stability.md)。
+
+---
+
 ## [0.13.0] — 2026-05-10 — SP6 Multi-Tenant Auth
 
 平台化重构第七阶段：单 key 共享 → 多 key 多租户 ready。
