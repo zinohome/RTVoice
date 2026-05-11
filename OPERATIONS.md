@@ -427,6 +427,30 @@ docker exec rtvoice-grafana kill -HUP 1
 `monitoring/grafana/dashboards/dashboards.yml` 内 `updateIntervalSeconds: 10` 已开 hot reload。
 若仍不刷新：`docker compose restart grafana`。
 
+### 6.5 HuggingFace 模型 build 时下载失败
+
+stt-server / 其它服务 build 时通过 `scripts/download_model.sh` 下载 HF 模型。
+默认走 `https://huggingface.co/...`；国内网络抖动会触发 retry × 3 + size check 防 0-byte（SP7 v0.14+）。
+
+若 3 次重试全失败，建议切到 hf-mirror：
+
+```bash
+# Dockerfile 内的 ${HF_REPO} 不变；只把 base URL 改成 mirror
+# 修改 services/stt-server/Dockerfile{,gpu} 行：
+#   base="https://huggingface.co/${HF_REPO}/resolve/main"
+# 改为：
+#   base="https://hf-mirror.com/${HF_REPO}/resolve/main"
+```
+
+或临时设环境变量后 rebuild：
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com docker compose --profile prod \
+    build --no-cache stt-server
+```
+
+如已 build 成功的 image 模型损坏（0-byte），单独 `docker compose ... build --no-cache stt-server` 重建即可。
+
 ---
 
 ## §7 多租户认证（SP6, v0.13+）
@@ -501,6 +525,63 @@ docker compose restart realtime-server
 #### 现象：401 auth.token_revoked
 - key 已被 revoke；用 `rtvoice-admin list` 确认状态
 - 客户端切换到新 key
+
+---
+
+## §8 Auth Hot Reload（SP7, v0.14+）
+
+### 8.1 工作原理
+
+`rtvoice-admin` 命令（create / revoke / rotate）写 key 后，4 个服务 **<500ms 自动 pickup**（YAML backend）或 **<200ms**（Redis backend）。无需重启 service。
+
+实现机制：
+- **YAML backend**：watchdog 监 `/data/keys/keys.yaml` 父目录的文件变更；触发 100ms debounce 后整盘 reload
+- **Redis backend**：admin CLI 写 key 后 `PUBLISH rtvoice:keys:changed`；4 服务订阅同 channel，触发 reload
+
+### 8.2 配置 debounce 时长
+
+```bash
+# .env：
+RTVOICE_KEYS_RELOAD_DEBOUNCE_MS=100   # 默认；可改 50 / 200 等
+```
+
+### 8.3 排障
+
+#### 现象：admin CLI 写后服务侧仍 stale（401 token_revoked 不生效）
+
+```bash
+# 看服务日志是否触发 reload（YAML / Redis 都有 log）
+docker logs rtvoice-realtime 2>&1 | grep "hot-reloaded"
+
+# 没看到 reload log：
+# 1. YAML：检查 keys.yaml 父目录可写（SP6-fix-2 父目录 mount，watchdog 监 inotify）
+docker exec rtvoice-realtime ls -la /data/keys/
+
+# 2. Redis：检查 RedisPubSubListener 是否在跑
+docker exec rtvoice-realtime python3 -c "
+import asyncio
+async def main():
+    import redis.asyncio as r
+    c = r.from_url('redis://redis:6379/0')
+    ps = c.pubsub()
+    await ps.subscribe('rtvoice:keys:changed')
+    info = await c.pubsub_numsub('rtvoice:keys:changed')
+    print('subscribers:', info)
+asyncio.run(main())
+"
+# 期望 subscribers >= 4（4 服务都订阅）
+
+# 3. 强制 reload（紧急）：restart service
+docker compose restart realtime-server
+```
+
+#### 现象：服务启动 log 无 "yaml file watcher started"
+- 可能 watchdog 包没装：`docker exec rtvoice-realtime python3 -c "import watchdog; print(watchdog.__version__)"`
+- v0.13.0 起 watchdog>=4.0 是 rtvoice_auth deps
+
+#### 现象：YAML 频繁 reload（CPU 飙）
+- 多次写触发：调高 `RTVOICE_KEYS_RELOAD_DEBOUNCE_MS=500`
+- inotify watch leak：重启服务
 
 ---
 
