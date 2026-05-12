@@ -60,6 +60,7 @@ from rtvoice_auth.models import Key
 from rtvoice_auth.verify import verify_key
 from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDenied
 from rtvoice_auth.lifespan import auto_migrate_legacy
+from rtvoice_auth.ws import pick_bearer_subprotocol
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -500,7 +501,7 @@ async def tts_stream_ws(ws: WebSocket) -> None:
         await ws.close(code=4401, reason="unauthorized")
         log.warning("[ws-tts] 鉴权失败 client=%s", ws.client)
         return
-    await ws.accept()
+    await ws.accept(subprotocol=pick_bearer_subprotocol(ws))
 
     # 1) 接收 metadata
     try:

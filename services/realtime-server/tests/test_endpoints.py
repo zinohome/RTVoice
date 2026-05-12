@@ -139,6 +139,43 @@ def test_ws_creator_binding_mismatch(client_with_auth):
             ws.receive_text()
 
 
+def test_ws_accept_echoes_bearer_subprotocol(client_with_auth):
+    """SP9 T1 — fix D4-F4: WS upgrade 必 echo Sec-WebSocket-Protocol，否则浏览器 close(1006)。
+
+    回归守门：client 用 subprotocols=["bearer.<token>"] 鉴权，
+    服务器 accept() 必带 subprotocol="bearer.<token>" 同字面回传。
+    """
+    token = "test-key-32chars-test-key-32chars"
+    r = client_with_auth.post(
+        "/v1/sessions",
+        json={},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    sid = r.json()["session_id"]
+    # 用 subprotocol 鉴权（不在 header 里带 Authorization）
+    with client_with_auth.websocket_connect(
+        f"/v1/realtime/{sid}",
+        subprotocols=[f"bearer.{token}"],
+    ) as ws:
+        assert ws.accepted_subprotocol == f"bearer.{token}"
+
+
+def test_ws_accept_no_subprotocol_when_header_auth(client_with_auth):
+    """对照测试：Authorization header 鉴权时 accept 不传 subprotocol。"""
+    token = "test-key-32chars-test-key-32chars"
+    r = client_with_auth.post(
+        "/v1/sessions",
+        json={},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    sid = r.json()["session_id"]
+    with client_with_auth.websocket_connect(
+        f"/v1/realtime/{sid}",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as ws:
+        assert ws.accepted_subprotocol is None
+
+
 def test_create_session_with_prompt(client):
     r = client.post("/v1/sessions", json={"prompt": "你是 IT 客服"})
     assert r.status_code == 201
@@ -255,10 +292,10 @@ def test_cors_actual_request_has_acao_header(client):
     assert "access-control-allow-origin" in {k.lower() for k in r.headers}
 
 
-def test_info_version_is_0_12_0(client):
+def test_info_version_is_0_14_0(client):
     r = client.get("/info")
     assert r.status_code == 200
-    assert r.json()["version"] == "0.12.0"
+    assert r.json()["version"] == "0.14.0"
 
 
 # -------------------------------------------------------------------

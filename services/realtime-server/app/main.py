@@ -46,6 +46,7 @@ from rtvoice_auth.verify import verify_key
 from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDenied, QuotaExceeded
 from rtvoice_auth.quota import QuotaTracker
 from rtvoice_auth.lifespan import auto_migrate_legacy
+from rtvoice_auth.ws import pick_bearer_subprotocol
 
 logging.basicConfig(
     level=config.LOG_LEVEL,
@@ -319,7 +320,7 @@ async def realtime_ws(ws: WebSocket, session_id: str) -> None:
         await ws.close(code=4410, reason="session_expired")
         return
 
-    await ws.accept()
+    await ws.accept(subprotocol=pick_bearer_subprotocol(ws))
     if not session_mgr.attach_ws(session_id, ws):
         await ws.close(code=1011, reason="attach_failed")
         return
