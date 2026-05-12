@@ -133,7 +133,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="RTVoice Token Server",
-    version="0.14.0",
+    version="0.15.0",
     description="为客户端签发 LiveKit JWT。Bearer key (rtvoice_auth) + slowapi rate limit。",
     lifespan=lifespan,
 )
