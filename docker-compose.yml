@@ -63,7 +63,7 @@ services:
     build:
       context: .
       dockerfile: services/token-server/Dockerfile
-    image: rtvoice/token-server:v0.1.0
+    image: rtvoice/token-server:v0.14.0
     container_name: rtvoice-token
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -111,7 +111,7 @@ services:
     build:
       context: .
       dockerfile: services/realtime-server/Dockerfile
-    image: rtvoice/realtime-server:v0.13.0
+    image: rtvoice/realtime-server:v0.14.0
     container_name: rtvoice-realtime
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -177,7 +177,7 @@ services:
     build:
       context: ./services/agent-worker
       dockerfile: Dockerfile
-    image: rtvoice/agent-worker:v0.5.0
+    image: rtvoice/agent-worker:v0.14.0
     container_name: rtvoice-agent
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -236,7 +236,7 @@ services:
     build:
       context: .
       dockerfile: services/stt-server/Dockerfile
-    image: rtvoice/stt-server:v0.3.0
+    image: rtvoice/stt-server:v0.14.0
     container_name: rtvoice-stt
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -314,7 +314,7 @@ services:
     build:
       context: .
       dockerfile: services/tts-server/${TTS_DOCKERFILE:-Dockerfile}
-    image: rtvoice/tts-server:v0.5.0
+    image: rtvoice/tts-server:v0.14.0
     container_name: rtvoice-tts
     profiles: ["dev", "prod"]
     restart: unless-stopped

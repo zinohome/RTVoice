@@ -42,7 +42,7 @@ services:
   # Token Server — 公网/限流（dev 同代码，环境变量切 prod）
   # ---------------------------------------------------------------
   token-server:
-    image: rtvoice/token-server:v0.5.0
+    image: rtvoice/token-server:v0.14.0
     ports:
       - "${BIND_HOST}:${TOKEN_SERVER_PORT:-8000}:8000"
     environment:
@@ -59,7 +59,7 @@ services:
     build:
       context: .
       dockerfile: services/stt-server/Dockerfile.gpu
-    image: rtvoice/stt-server-gpu:v0.5.0
+    image: rtvoice/stt-server-gpu:v0.14.0
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STT_NUM_THREADS: 1                  # GPU 时 CPU 线程减少
@@ -179,7 +179,7 @@ services:
   # Agent Worker — 协议层不变，跑 CPU 即可（不分 GPU）
   # ---------------------------------------------------------------
   agent-worker:
-    image: rtvoice/agent-worker:v0.5.0
+    image: rtvoice/agent-worker:v0.14.0
     # 让容器能解析 host.docker.internal 到宿主 IP
     # 用于连宿主上的 ollama (典型 1Panel/Portainer 已有 ollama 容器)
     extra_hosts:
