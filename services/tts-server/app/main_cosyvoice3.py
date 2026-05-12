@@ -61,6 +61,10 @@ from rtvoice_auth.verify import verify_key
 from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDenied
 from rtvoice_auth.lifespan import auto_migrate_legacy
 from rtvoice_auth.ws import pick_bearer_subprotocol
+from rtvoice_auth.instrumentation import RequestMetricsMiddleware
+from rtvoice_auth.openapi import add_bearer_security_scheme
+from rtvoice_auth.metrics import TTS_CHARS_TOTAL
+from rtvoice_auth.metrics_labels import safe_key_id
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
