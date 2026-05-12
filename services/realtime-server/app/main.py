@@ -239,6 +239,8 @@ async def health() -> dict[str, str]:
 @app.get("/info")
 async def info() -> dict:
     return {
+        # SP10 G4 — service 字段（与其他 service /info 一致）；保留 "name" 向后兼容
+        "service": "realtime-server",
         "name": "realtime-server",
         "version": "0.16.0",
         "capabilities": {
