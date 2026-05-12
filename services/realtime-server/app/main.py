@@ -47,6 +47,9 @@ from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDeni
 from rtvoice_auth.quota import QuotaTracker
 from rtvoice_auth.lifespan import auto_migrate_legacy
 from rtvoice_auth.ws import pick_bearer_subprotocol
+from rtvoice_auth.instrumentation import RequestMetricsMiddleware
+from rtvoice_auth.openapi import add_bearer_security_scheme
+from rtvoice_auth.metrics import REALTIME_SESSION_DURATION_SECONDS
 
 logging.basicConfig(
     level=config.LOG_LEVEL,
@@ -122,7 +125,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="RTVoice Realtime Voice Server",
-    version="0.15.0",
+    version="0.16.0",
     lifespan=lifespan,
 )
 
@@ -140,6 +143,11 @@ app.add_middleware(
 
 app.add_exception_handler(HTTPException, http_exception_handler())
 app.add_exception_handler(RequestValidationError, validation_exception_handler())
+
+# SP10 G3 — per-key request metrics
+app.add_middleware(RequestMetricsMiddleware, service_name="realtime-server")
+# SP10 G4 — OpenAPI Bearer securityScheme
+add_bearer_security_scheme(app)
 
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -187,9 +195,12 @@ async def require_key(
         raise api_error(401, "auth.missing_token", "Authorization: Bearer required")
     secret = authorization[len("Bearer "):]
     try:
-        return await verify_key(secret,
-                                scope=request.app.state.scope,
-                                store=request.app.state.key_store)
+        key = await verify_key(secret,
+                               scope=request.app.state.scope,
+                               store=request.app.state.key_store)
+        # SP10 G3 — 把 key_id 喂给 RequestMetricsMiddleware
+        request.state.key_id = key.id
+        return key
     except InvalidToken as e:
         raise api_error(401, e.code, e.message)
     except TokenRevoked as e:
@@ -229,7 +240,7 @@ async def health() -> dict[str, str]:
 async def info() -> dict:
     return {
         "name": "realtime-server",
-        "version": "0.15.0",
+        "version": "0.16.0",
         "capabilities": {
             "session_api": True,
             "ws_realtime": True,

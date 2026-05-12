@@ -124,8 +124,18 @@ class SessionManager:
         sess = self._sessions.pop(session_id, None)
         if sess is None:
             return  # idempotent
+        duration = (_now() - sess.created_at).total_seconds()
         log.info("session %s cleanup (reason=%s, lifetime=%.1fs)",
-                 session_id, reason, (_now() - sess.created_at).total_seconds())
+                 session_id, reason, duration)
+        # SP10 G3 — per-key session duration
+        try:
+            from rtvoice_auth.metrics import REALTIME_SESSION_DURATION_SECONDS
+            from rtvoice_auth.metrics_labels import safe_key_id
+            REALTIME_SESSION_DURATION_SECONDS.labels(
+                key_id=safe_key_id(sess.key_id),
+            ).observe(duration)
+        except Exception:
+            log.exception("session duration metric observe failed")
         sess.state = "CLEANUP"
         if sess.current_turn_task and not sess.current_turn_task.done():
             sess.current_turn_task.cancel()

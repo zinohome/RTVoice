@@ -45,6 +45,10 @@ from rtvoice_auth.verify import verify_key
 from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDenied
 from rtvoice_auth.lifespan import auto_migrate_legacy
 from rtvoice_auth.ws import pick_bearer_subprotocol
+from rtvoice_auth.instrumentation import RequestMetricsMiddleware
+from rtvoice_auth.openapi import add_bearer_security_scheme
+from rtvoice_auth.metrics import STT_AUDIO_SECONDS_TOTAL
+from rtvoice_auth.metrics_labels import safe_key_id
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -184,7 +188,7 @@ async def lifespan(app: FastAPI):
             log.exception("key_watcher stop failed")
 
 
-app = FastAPI(title="RTVoice STT Server", version="0.15.0", lifespan=lifespan)
+app = FastAPI(title="RTVoice STT Server", version="0.16.0", lifespan=lifespan)
 
 _cors_raw = os.environ.get("RTVOICE_CORS_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -200,6 +204,10 @@ app.add_middleware(
 
 app.add_exception_handler(HTTPException, http_exception_handler())
 app.add_exception_handler(RequestValidationError, validation_exception_handler())
+
+# SP10 G3 + G4
+app.add_middleware(RequestMetricsMiddleware, service_name="stt-server")
+add_bearer_security_scheme(app)
 
 # --- Prometheus metrics ---
 WS_ACTIVE = Gauge("rtvoice_stt_ws_connections_active", "Currently open /asr WS connections")
@@ -220,14 +228,26 @@ async def health() -> dict[str, str]:
 
 @app.get("/info")
 async def info() -> dict:
+    # SP10 G4 — 4 service /info 统一返 service/version/capabilities/models
     return {
-        "model": MODEL_NAME,
-        "sample_rate": SAMPLE_RATE,
-        "num_threads": NUM_THREADS,
-        "endpoint_rules": {
-            "rule1_silence_s": RULE1_TRAILING_SILENCE_S,
-            "rule2_silence_s": RULE2_TRAILING_SILENCE_S,
-            "rule3_min_utt_s": RULE3_MIN_UTT_LEN_S,
+        "service": "stt-server",
+        "version": "0.16.0",
+        "capabilities": {
+            "streaming": True,
+            "subprotocol_bearer": True,
+            "endpoint_detection": False,
+        },
+        "models": {
+            "stt": MODEL_NAME,
+            "sample_rate": SAMPLE_RATE,
+        },
+        "config": {
+            "num_threads": NUM_THREADS,
+            "endpoint_rules": {
+                "rule1_silence_s": RULE1_TRAILING_SILENCE_S,
+                "rule2_silence_s": RULE2_TRAILING_SILENCE_S,
+                "rule3_min_utt_s": RULE3_MIN_UTT_LEN_S,
+            },
         },
     }
 
@@ -312,6 +332,13 @@ async def asr_ws(ws: WebSocket) -> None:
                     if samples.size > 0:
                         # accept_waveform 是同步快操作，无需 to_thread
                         stream.accept_waveform(SAMPLE_RATE, samples)
+                        # SP10 G3 — per-key audio seconds counter
+                        try:
+                            STT_AUDIO_SECONDS_TOTAL.labels(
+                                key_id=safe_key_id(key),
+                            ).inc(samples.size / SAMPLE_RATE)
+                        except Exception:
+                            pass
                 elif data_text:
                     cmd = data_text.strip().upper()
                     if cmd == "EOS":

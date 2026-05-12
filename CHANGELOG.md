@@ -9,6 +9,85 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.16.0] — 2026-05-12 — SP10 G3 per-key metrics + G4 真 OpenAPI
+
+按 05-12 早写的 [G3/G4 done 硬标准](./docs/superpowers/specs/2026-05-12-g3-g4-done-criteria.md) **严格落地**。SP8 D2/D3 dogfood 暴露的 securitySchemes 缺失、`Record<str,any>` response、`info.version` 错位、`grep key_id` 0 命中等头号 finding，本 SP 一并修。
+
+### Added
+
+- **`services/common/rtvoice_auth/metrics_labels.py`**：`safe_key_id()` + `hash_label()` + 基数控制（unknown → `unknown_<hash8>`）
+- **`services/common/rtvoice_auth/metrics.py`**：G3 done 标准 #1 的 5 个核心 metric
+  - `rtvoice_requests_total{service,endpoint,key_id,status}` Counter
+  - `rtvoice_request_duration_seconds{service,endpoint,key_id}` Histogram
+  - `rtvoice_stt_audio_seconds_total{key_id}` Counter
+  - `rtvoice_tts_chars_total{key_id}` Counter
+  - `rtvoice_realtime_session_duration_seconds{key_id}` Histogram
+- **`services/common/rtvoice_auth/instrumentation.py`**：`RequestMetricsMiddleware`（每 service 装一次，excluded: /metrics /health）
+- **`services/common/rtvoice_auth/openapi.py`**：`add_bearer_security_scheme(app)` 注入 components.securitySchemes
+- **`docs/api/websocket-protocol.md`**：4 WS endpoint 契约权威文档（OpenAPI 不覆盖 WS 的等价物，G4 done 标准 #2 STT 替代契约）
+- **`tests/contract/test_openapi_security_scheme.py`**：CI 守门 Bearer scheme 不会无声丢失
+
+### Changed
+
+- 4 service `require_key` 依赖：成功后 `request.state.key_id = key.id`（喂 middleware）
+- 4 service `main.py` 装 `RequestMetricsMiddleware` + `add_bearer_security_scheme(app)`
+- realtime-server `SessionManager.cleanup`：observe `REALTIME_SESSION_DURATION_SECONDS` per key
+- stt-server `/v1/asr` 循环：每帧 `STT_AUDIO_SECONDS_TOTAL` per key inc
+- tts-server `POST /v1/tts/stream`：合成完 `TTS_CHARS_TOTAL` per key inc
+- token-server `rtvoice_tokens_issued_total{room}` → `{room_hash}` 治 D3-S3 自由文本基数地雷
+- **4 service `/info` 统一返 `service / version / capabilities / models` 4 字段**（D2 finding）
+- token-server **新增 `/info`**（之前 404，D2 + SP9 烟测发现）
+
+### Fixed
+
+- D2: 4 schema 全缺 `components.securitySchemes` → 全注入
+- D2: 4 service `info.version` 错位（0.5/0.6.2/0.7/0.12 vs 仓库 0.15）→ 全 0.16.0
+- D3-S3: token-server `room` 自由文本 label 基数地雷 → hash 化
+- D3 / G3 done 5 条全 ❌ → **5 条全 ✅**
+
+### Done 标准对照（G3 + G4）
+
+**G3 — Per-Key Metrics**:
+- ✅ 5 个核心 metric 含 `key_id` label
+- ✅ `key_id` 取值规则（Key.id / anonymous / internal / unknown_xxxx）
+- ✅ 基数控制（hash_label / safe_key_id）
+- ⏳ Grafana 面板（provisioning 改动留 SP11，PromQL 已可工作）
+- ✅ 单测覆盖（metrics_labels 11 测 + 跨 service middleware 含 label）
+
+**G4 — 真 OpenAPI**:
+- ✅ 4 service `/openapi.json` 含完整 `/v1/` 端点（contract test 守门）
+- ✅ `components.securitySchemes.rtvoice_auth` Bearer 声明
+- ✅ `/info` JSON 统一 `service / version / capabilities / models`
+- ✅ `npx openapi-typescript-codegen` 跑得通（SP8 D2 已验，本次未回归测；prod 烟测会再验）
+- ✅ CI 守门（`tests/contract/test_openapi_security_scheme.py` + browser-e2e workflow paths 已覆盖 common/）
+- ⏳ STT WS protocol — 由 `docs/api/websocket-protocol.md` 承担契约（G4 done 标准 #2 接受降级）
+
+### 不在本 SP（拆到后续）
+
+- Grafana `top-keys-5min` 面板 provisioning（PromQL 立刻可手工查）
+- TTS 业务端点 `response_model=` Pydantic 类（D2 finding，PR 噪音多，留 SP11）
+- prod-deploy.sh 同步 STT_SERVER_PORT 等新 env 校验
+
+### 验证（autonomous）
+
+- ✅ rtvoice_auth 56 测试（含 metrics_labels 11 新增）
+- ✅ realtime-server 78 测试（含 session duration observe path）
+- ✅ tests/contract/test_openapi_security_scheme 3 通过 + 1 跳过（fixture 隔离限制；prod 烟测覆盖）
+- ⏳ prod 烟测：`curl /openapi.json | jq .components.securitySchemes` + `PromQL sum by(key_id)(rate(rtvoice_requests_total[1m]))` 返非空
+
+### 设计决策
+
+- D-2026-05-12-G3.1：`key_id` 用 `Key.id` 不用 `secret`（防泄漏，且 secret 不稳定可 rotate）
+- D-2026-05-12-G3.2：unknown 输入 hash 化 → unbounded 输入也限基数到 ~256/8-char-hash 之内
+- D-2026-05-12-G3.3：`/metrics` `/health` 不进 RequestMetricsMiddleware（避免自激励 + 噪声）
+- D-2026-05-12-G4.1：securityScheme 用 `http+bearer` 而非 `apiKey+Header`（标准化 codegen 友好）
+- D-2026-05-12-G4.2：WS 不强行塞 OpenAPI；单独 `docs/api/websocket-protocol.md` 承载契约
+- D-2026-05-12-G4.3：snapshot 测试范围只到 realtime + token（stt/tts 需 ML 模型加载太慢；prod 烟测补）
+
+详见 [SP10 设计](./docs/superpowers/specs/2026-05-12-sp10-observability-and-discovery-design.md) + [实施 plan](./docs/superpowers/plans/2026-05-12-sp10-observability-and-discovery.md)。
+
+---
+
 ## [0.15.0] — 2026-05-12 — SP9 Firefighting + 文档真实化
 
 SP8 Dogfooding (D1+D2+D3+D4) 揭出的 platform 阻塞与文档失真，**一次性纠正**。

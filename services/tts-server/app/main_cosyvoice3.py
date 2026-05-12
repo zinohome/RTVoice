@@ -227,7 +227,7 @@ async def lifespan(app: FastAPI):
             log.exception("key_watcher stop failed")
 
 
-app = FastAPI(title="RTVoice TTS Server (Fun-CosyVoice 3)", version="0.15.0", lifespan=lifespan)
+app = FastAPI(title="RTVoice TTS Server (Fun-CosyVoice 3)", version="0.16.0", lifespan=lifespan)
 
 _cors_raw = os.environ.get("RTVOICE_CORS_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -242,6 +242,10 @@ app.add_middleware(
 )
 
 app.add_exception_handler(HTTPException, http_exception_handler())
+
+# SP10 G3 + G4
+app.add_middleware(RequestMetricsMiddleware, service_name="tts-server")
+add_bearer_security_scheme(app)
 app.add_exception_handler(RequestValidationError, validation_exception_handler())
 
 # Prometheus 指标（与 Kokoro 版同名，dashboard 不变）
@@ -293,9 +297,12 @@ async def require_key(
         raise api_error(401, "auth.missing_token", "Authorization: Bearer required")
     secret = authorization[len("Bearer "):]
     try:
-        return await verify_key(secret,
-                                scope=request.app.state.scope,
-                                store=request.app.state.key_store)
+        key = await verify_key(secret,
+                               scope=request.app.state.scope,
+                               store=request.app.state.key_store)
+        # SP10 G3 — 喂 key_id 给 RequestMetricsMiddleware
+        request.state.key_id = key.id
+        return key
     except InvalidToken as e:
         raise api_error(401, e.code, e.message)
     except TokenRevoked as e:
@@ -326,15 +333,24 @@ async def health() -> dict[str, str]:
 
 @app.get("/info")
 async def info() -> dict:
+    # SP10 G4 — 4 service /info 统一返 service/version/capabilities/models
     return {
-        "backend": "cosyvoice3",
-        "model": "Fun-CosyVoice3-0.5B-2512",
-        "sample_rate": SAMPLE_RATE,
-        "default_voice": DEFAULT_VOICE,
-        "voice_count": len(_cosyvoice_voices),
+        "service": "tts-server",
+        "version": "0.16.0",
+        "capabilities": {
+            "streaming": True,
+            "text_streaming": True,        # agent-worker 探测此字段决定走 ws 流式
+            "voice_clone": True,
+            "subprotocol_bearer": True,
+        },
+        "models": {
+            "tts": "Fun-CosyVoice3-0.5B-2512",
+            "backend": "cosyvoice3",
+            "sample_rate": SAMPLE_RATE,
+            "default_voice": DEFAULT_VOICE,
+            "voice_count": len(_cosyvoice_voices),
+        },
         "ready": _cosyvoice is not None,
-        # agent-worker 探测此字段决定走 ws 流式还是单次 HTTP（v0.6 路径）
-        "text_streaming": True,
     }
 
 
@@ -455,6 +471,11 @@ async def tts_stream(req: TTSRequest, request: Request,
     voice = _resolve_voice(req.voice)
     if _cosyvoice_voices and voice not in _cosyvoice_voices:
         raise api_error(400, "tts.voice_not_found", f"未知音色 voice={req.voice!r} → {voice!r}; 可用={_cosyvoice_voices}")
+    # SP10 G3 — per-key chars total
+    try:
+        TTS_CHARS_TOTAL.labels(key_id=safe_key_id(key)).inc(len(req.text or ""))
+    except Exception:
+        pass
     return StreamingResponse(
         _synthesize_stream(req, request),
         media_type="application/octet-stream",

@@ -47,6 +47,9 @@ from rtvoice_auth.models import Key
 from rtvoice_auth.verify import verify_key
 from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDenied
 from rtvoice_auth.lifespan import auto_migrate_legacy
+from rtvoice_auth.instrumentation import RequestMetricsMiddleware
+from rtvoice_auth.openapi import add_bearer_security_scheme
+from rtvoice_auth.metrics_labels import hash_label
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -133,7 +136,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="RTVoice Token Server",
-    version="0.15.0",
+    version="0.16.0",
     description="为客户端签发 LiveKit JWT。Bearer key (rtvoice_auth) + slowapi rate limit。",
     lifespan=lifespan,
 )
@@ -141,6 +144,10 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_exception_handler(HTTPException, http_exception_handler())
 app.add_exception_handler(RequestValidationError, validation_exception_handler())
+
+# SP10 G3 + G4
+app.add_middleware(RequestMetricsMiddleware, service_name="token-server")
+add_bearer_security_scheme(app)
 
 
 def _rate_limit_dep(request: Request) -> None:
@@ -156,8 +163,9 @@ def _rate_limit_dep(request: Request) -> None:
     return None
 
 # Prometheus：自动 http_request_duration / http_requests_total + 自定义 counter
+# SP10 G3 T8 — `room` 改成 `room_hash`（SHA-256 前 8 字符）治 D3-S3 基数地雷
 TOKENS_ISSUED = Counter("rtvoice_tokens_issued_total", "Total LiveKit JWTs issued",
-                        ["room"])
+                        ["room_hash"])
 AUTH_FAILURES = Counter("rtvoice_token_auth_failures_total", "401 responses on /v1/tokens",
                         ["reason"])
 Instrumentator(
@@ -178,7 +186,9 @@ async def require_api_key(
         raise api_error(401, "auth.missing_token", "Missing Authorization: Bearer header")
     secret = authorization[len("Bearer "):]
     try:
-        await verify_key(secret, scope="tokens", store=request.app.state.key_store)
+        key = await verify_key(secret, scope="tokens", store=request.app.state.key_store)
+        # SP10 G3 — 喂 key_id 给 RequestMetricsMiddleware
+        request.state.key_id = key.id
     except InvalidToken as e:
         AUTH_FAILURES.labels(reason="invalid").inc()
         raise api_error(401, e.code, e.message)
@@ -232,6 +242,21 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/info")
+def info() -> dict:
+    """SP10 G4 — service capability discovery（4 service 同形）。"""
+    return {
+        "service": "token-server",
+        "version": "0.16.0",
+        "capabilities": {
+            "issue_livekit_jwt": True,
+            "rate_limit_per_minute": RATE_LIMIT_PER_MINUTE,
+        },
+        "models": {},
+        "livekit_public_url": LIVEKIT_PUBLIC_URL,
+    }
+
+
 @app.post(
     "/v1/tokens",
     response_model=TokenResponse,
@@ -263,7 +288,7 @@ def issue_token(
         .to_jwt()
     )
 
-    TOKENS_ISSUED.labels(room=req.room).inc()
+    TOKENS_ISSUED.labels(room_hash=hash_label(req.room)).inc()
     log.info(
         "token issued: room=%s identity=%s client=%s",
         req.room,
