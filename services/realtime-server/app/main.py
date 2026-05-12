@@ -24,7 +24,7 @@ from fastapi import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -247,6 +247,31 @@ async def info() -> dict:
     }
 
 
+def _build_ws_url(request: Request, session_id: str) -> str:
+    """SP9 T3 — ws_url 外部可达。
+
+    优先级：
+      1. config.PUBLIC_WS_BASE（显式 override，比如 wss://your-domain.com）
+      2. X-Forwarded-Host + X-Forwarded-Proto（反代场景）
+      3. Host header + 从 request.url.scheme 推断 ws/wss
+    旧行为（默认 PUBLIC_WS_BASE=ws://realtime-server:9000 容器主机名）只在
+    env 显式设置时才使用，避免 D4-F3 那种"返了容器主机名给浏览器"的尴尬。
+    """
+    if config.PUBLIC_WS_BASE and not config.PUBLIC_WS_BASE.startswith("ws://realtime-server"):
+        base = config.PUBLIC_WS_BASE
+    else:
+        fwd_host = request.headers.get("x-forwarded-host")
+        fwd_proto = request.headers.get("x-forwarded-proto")
+        if fwd_host:
+            ws_scheme = "wss" if fwd_proto == "https" else "ws"
+            base = f"{ws_scheme}://{fwd_host}"
+        else:
+            host = request.headers.get("host", "")
+            ws_scheme = "wss" if request.url.scheme == "https" else "ws"
+            base = f"{ws_scheme}://{host}" if host else config.PUBLIC_WS_BASE
+    return f"{base}/v1/realtime/{session_id}"
+
+
 @app.post(
     "/v1/sessions",
     response_model=SessionCreateResponse,
@@ -293,13 +318,38 @@ async def create_session(
 
     return SessionCreateResponse(
         session_id=sess.id,
-        ws_url=f"{config.PUBLIC_WS_BASE}/v1/realtime/{sess.id}",
+        ws_url=_build_ws_url(request, sess.id),
         expires_at=sess.expires_at.isoformat(),
         voice=voice,
         speed=req.speed,
         prompt=prompt,
         audit_persist=req.audit_persist,
     )
+
+
+@app.delete(
+    "/v1/sessions/{session_id}",
+    status_code=204,
+    summary="End a Realtime Voice session early (SP9 T6)",
+    description="客户端主动结束 session：释放 quota / 关 WS / 触发 cleanup。"
+                "对不存在 / 已结束的 session 返 204（幂等）。",
+    tags=["sessions"],
+    responses={
+        401: {"model": ErrorResponse, "description": "Auth failed"},
+        403: {"model": ErrorResponse, "description": "Not session owner"},
+    },
+)
+async def delete_session(
+    session_id: str,
+    key: Key = Depends(require_key),
+) -> Response:
+    sess = session_mgr.get(session_id) if session_mgr else None
+    if sess is not None:
+        # 仅 creator 可关；不是 owner → 403 (不是 404 防泄漏存在性)
+        if sess.creator_key_hash != key.id:
+            raise api_error(403, "session.not_owner", "session belongs to another key")
+        await session_mgr.cleanup(session_id, reason="client_close")
+    return Response(status_code=204)
 
 
 @app.websocket("/v1/realtime/{session_id}")

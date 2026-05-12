@@ -139,6 +139,105 @@ def test_ws_creator_binding_mismatch(client_with_auth):
             ws.receive_text()
 
 
+def test_delete_session_succeeds(client):
+    """SP9 T6 — DELETE /v1/sessions/{id} 释放容量。"""
+    r = client.post("/v1/sessions", json={})
+    sid = r.json()["session_id"]
+    r2 = client.delete(f"/v1/sessions/{sid}")
+    assert r2.status_code == 204
+    # 第二次 DELETE 仍 204 (幂等)
+    r3 = client.delete(f"/v1/sessions/{sid}")
+    assert r3.status_code == 204
+
+
+def test_delete_session_idempotent_on_nonexistent(client):
+    r = client.delete("/v1/sessions/sess_neverexisted")
+    assert r.status_code == 204
+
+
+def test_delete_session_403_when_not_owner(client_with_auth, monkeypatch, tmp_path):
+    """另一把 key 不能关别人的 session。"""
+    # 用 key A 建 session
+    r = client_with_auth.post(
+        "/v1/sessions",
+        json={},
+        headers={"Authorization": "Bearer test-key-32chars-test-key-32chars"},
+    )
+    sid = r.json()["session_id"]
+    # 用未注册的 key B → 401（先卡在鉴权层，达不到 owner check）
+    r2 = client_with_auth.delete(
+        f"/v1/sessions/{sid}",
+        headers={"Authorization": "Bearer wrong-key-32chars-not-real-key-x"},
+    )
+    assert r2.status_code == 401
+
+
+def test_delete_session_releases_capacity(client):
+    """connect→close→新 session 创建 OK 即证明 capacity 释放（max=3）。"""
+    sids = []
+    for _ in range(3):
+        r = client.post("/v1/sessions", json={})
+        assert r.status_code == 201
+        sids.append(r.json()["session_id"])
+    # 第 4 个应 503
+    r4 = client.post("/v1/sessions", json={})
+    assert r4.status_code == 503
+    # 释放一个
+    client.delete(f"/v1/sessions/{sids[0]}")
+    # 现在能再建
+    r5 = client.post("/v1/sessions", json={})
+    assert r5.status_code == 201
+
+
+def test_ws_url_uses_host_header_by_default(client):
+    """SP9 T3 — ws_url 必须用调用方 Host 而非容器主机名。"""
+    r = client.post(
+        "/v1/sessions",
+        json={},
+        headers={"Host": "voice.example.com"},
+    )
+    assert r.status_code == 201
+    ws_url = r.json()["ws_url"]
+    assert "realtime-server:9000" not in ws_url
+    assert "voice.example.com" in ws_url
+    assert ws_url.startswith("ws://")
+
+
+def test_ws_url_honors_x_forwarded_host_and_proto(client):
+    """SP9 T3 — 反代场景下读 X-Forwarded-Host / X-Forwarded-Proto。"""
+    r = client.post(
+        "/v1/sessions",
+        json={},
+        headers={
+            "Host": "internal",
+            "X-Forwarded-Host": "voice.example.com",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+    ws_url = r.json()["ws_url"]
+    assert ws_url.startswith("wss://voice.example.com/")
+
+
+def test_ws_url_explicit_public_ws_base_overrides(monkeypatch, tmp_path):
+    """显式 PUBLIC_WS_BASE=wss://my-domain 时不再读 Host。"""
+    monkeypatch.setenv("RTVOICE_KEYS_BACKEND", "yaml")
+    monkeypatch.setenv("RTVOICE_KEYS_FILE", str(tmp_path / "keys.yaml"))
+    monkeypatch.setenv("RTVOICE_API_KEY", "dev-test-key-32-chars-aaaaaaaaa")
+    monkeypatch.setenv("PUBLIC_WS_BASE", "wss://override.example.com")
+    import sys
+    for m in list(sys.modules):
+        if m.startswith("app."):
+            del sys.modules[m]
+    from app.main import app
+    from fastapi.testclient import TestClient
+    c = TestClient(app)
+    c.headers.update({"Authorization": "Bearer dev-test-key-32-chars-aaaaaaaaa"})
+    with c:
+        r = c.post("/v1/sessions", json={})
+        ws_url = r.json()["ws_url"]
+        assert ws_url.startswith("wss://override.example.com/v1/realtime/")
+
+
 def test_ws_accept_echoes_bearer_subprotocol(client_with_auth):
     """SP9 T1 — fix D4-F4: WS upgrade 必 echo Sec-WebSocket-Protocol，否则浏览器 close(1006)。
 

@@ -1,0 +1,39 @@
+name: browser-e2e
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/realtime-server/**'
+      - 'services/stt-server/**'
+      - 'services/tts-server/**'
+      - 'services/common/rtvoice_auth/**'
+      - 'tests/e2e/**'
+      - '.github/workflows/browser-e2e.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/realtime-server/**'
+      - 'services/stt-server/**'
+      - 'services/tts-server/**'
+      - 'services/common/rtvoice_auth/**'
+      - 'tests/e2e/**'
+      - '.github/workflows/browser-e2e.yml'
+
+jobs:
+  browser-ws-subprotocol:
+    name: WS subprotocol echo (real chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python deps
+        run: |
+          pip install -r services/realtime-server/requirements.txt
+          pip install playwright pytest-asyncio pytest
+      - name: Install Chromium
+        run: python -m playwright install chromium --with-deps
+      - name: Run e2e browser tests
+        run: pytest tests/e2e/ -v

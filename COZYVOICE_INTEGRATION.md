@@ -2,7 +2,24 @@
 
 本文档示范如何把 RTVoice 集成到任意客户端项目作为本地后端。CozyVoice 是其一示例；其他场景（Discord bot / 客服系统 / 自动化 / 移动 app）参照同样模式。
 
-**对象读者**：CozyVoice 项目的开发者。前提：RTVoice prod 已部署（按 [DEPLOY.md](./DEPLOY.md)），跑在 v0.7.0+。
+**对象读者**：CozyVoice / 任意第三方客户端项目的开发者。前提：RTVoice prod 已部署（按 [DEPLOY.md](./DEPLOY.md)），跑在 **v0.15.0+**（v0.14 加 multi-tenant auth + hot-reload；v0.15 加 prod 端口对外 + WS subprotocol echo 协议层修复）。
+
+---
+
+## 0. 端口拓扑速览（SP9 T7 新增）
+
+**先读这节再继续**——决定哪些 URL 你能从浏览器 / 三方进程访问。
+
+| Service | 容器内 port | prod host 暴露 (v0.15+) | 用途 | 公共 endpoints |
+|---|---|---|---|---|
+| token-server | 8000 | `${BIND_HOST}:8000` ✅ | LiveKit JWT 颁发 | POST /v1/tokens |
+| realtime-server | 9000 | `${BIND_HOST}:9000` ✅ | Realtime Voice session + Web Demo | POST /v1/sessions, WS /v1/realtime/{id}, /static/ |
+| stt-server | 9090 | `${BIND_HOST}:9090` ✅ (SP9 T4) | STT | WS /v1/asr |
+| tts-server | 9880 | `${BIND_HOST}:9880` ✅ (SP9 T4) | TTS | GET/POST /v1/voices, POST /v1/tts/stream, WS /v1/tts/stream_ws |
+| livekit-server | 7880/7881 | 公网开放 | WebRTC realtime media | （见 LiveKit 官方） |
+
+**v0.14 及之前** stt/tts 不对外暴露——只能从同机 docker network 调（拓扑 A）。
+**v0.15+** 全部对外可达，浏览器 / 三方进程直连各 service URL 都行。
 
 ---
 
@@ -23,27 +40,55 @@
 
 ## 2. 准备：RTVoice 端配置
 
-### 2.1 设鉴权 key（一次性）
+### 2.1 给你的应用颁一把 API key（v0.14 新做法）
+
+**v0.14 之前**（已弃用）：单 `RTVOICE_API_KEY` env + rebuild 三个服务。
+**v0.14+ 现做法**：multi-tenant admin CLI 颁 key，**热加载**，不重启服务。
 
 ```bash
 ssh root@192.168.66.163
 cd /data/RTVoice
 
-# 生成 32 字符 key（保密 —— 同时存到 CozyVoice 的 .env）
-KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-echo "RTVOICE_API_KEY=$KEY"
+# 在 realtime-server 容器里跑 admin CLI 创建一把 key
+docker exec rtvoice-realtime rtvoice-admin create \
+  --name cozyvoice-app \
+  --scopes stt,tts,tokens,realtime \
+  --sessions-concurrent 10 \
+  --sessions-per-hour 1000 \
+  --notes "CozyVoice 应用集成"
 
-# 加到 RTVoice 的 .env
-echo "RTVOICE_API_KEY=$KEY" >> .env
-
-# rebuild + restart 让 stt-server / tts-server / agent-worker 三方同步加载 key
-docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod \
-               build stt-server tts-server agent-worker
-docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod \
-               up -d stt-server tts-server agent-worker
+# 输出形如：
+# {"id": "key_xxxxx", "secret": "BASE64-RANDOM-43-CHARS", ...}
+# ⚠️ secret 仅显示这一次，立刻保存到 CozyVoice 的 .env 作 RTVOICE_API_KEY
 ```
 
-> 验证：`curl -i http://127.0.0.1:9090/v1/asr`（无 token）应该 → 拒绝 / 4401。
+**热加载验证**：写完后**约 100ms** 4 个 service 的 watcher 自动 reload keys.yaml；立刻 curl 就能用，**不需 rebuild / restart**。
+
+**Scopes 含义**（v0.14 新增——D1 finding F3）：
+| scope | 允许调用 |
+|---|---|
+| `stt` | stt-server `/v1/asr` |
+| `tts` | tts-server `/v1/voices` (GET) / `/v1/tts/stream` / `/v1/tts/stream_ws` |
+| `tokens` | token-server `/v1/tokens` |
+| `realtime` | realtime-server `/v1/sessions` + WS |
+
+key 创建时必须含所有要用的 scope；少一个就 403 `auth.scope_denied`。
+
+**验证**：`curl -i http://192.168.66.163:9090/v1/asr`（无 token）→ 401 / unauthorized。
+带 token：`curl -H "Authorization: Bearer $RTVOICE_API_KEY" http://192.168.66.163:9090/info` → 200。
+
+### 2.1b 三种凭据分层（D1 finding F2 新增）
+
+RTVoice 全栈实际有**三种**凭据，别混淆：
+
+| 凭据 | 颁发方 | 作用 | 用在哪 |
+|---|---|---|---|
+| **API key (Bearer)** | admin CLI 颁 (本节) | 长期有效的应用身份 | 所有 RTVoice service 调用 `Authorization: Bearer <secret>` |
+| **LiveKit JWT** | token-server `/v1/tokens` 现场颁 | 短期（≤24h）的房间访问凭证 | 客户端连 LiveKit room 用 |
+| **session_id** | realtime-server `/v1/sessions` 现场颁 | 单次 Realtime Voice 对话 token | WS `/v1/realtime/{session_id}` URL 拼进 |
+
+**链路**：你拿 API key → 调 `/v1/tokens` 拿 LiveKit JWT 给浏览器 → 浏览器连 LiveKit room。
+或：你拿 API key → 调 `/v1/sessions` 拿 session_id → WS 连 realtime → server 用 session_id 路由对话。
 
 ### 2.2 留一个 docker network 名（CozyVoice 要 join）
 
@@ -95,9 +140,12 @@ RTVOICE_API_KEY=<上一步生成的 32 字符 key>
 docker compose up -d cozyvoice-app
 docker exec <cozyvoice 容器> python3 -c "
 import urllib.request, os
-r = urllib.request.urlopen(f'http://tts-server:9880/info', timeout=5,
-  headers={'Authorization': f'Bearer {os.environ[\"RTVOICE_API_KEY\"]}'})
-print(r.read().decode())
+# urllib 不支持 urlopen(headers=...)，要用 Request 对象（D1-F8 修正）
+req = urllib.request.Request(
+    'http://tts-server:9880/info',
+    headers={'Authorization': f'Bearer {os.environ[\"RTVOICE_API_KEY\"]}'},
+)
+print(urllib.request.urlopen(req, timeout=5).read().decode())
 "
 # 期望：{"backend":"cosyvoice3","model":"Fun-CosyVoice3-0.5B-2512", ...}
 ```
@@ -130,11 +178,20 @@ print(r.read().decode())
 
 ## §5.0 Recommended: 用 rtvoice-client SDK
 
-v0.11+ 起官方 SDK 可用。**强烈推荐替代手写 httpx/websockets。**
+**当前状态 (v0.15)**：SDK 源码在仓库 `clients/python/`，**未发布到 PyPI**。
+
+安装方式（任选其一）：
 
 ```bash
-pip install rtvoice-client
+# 方式 1：从 git URL pip install（推荐）
+pip install "git+https://github.com/zinohome/RTVoice.git#subdirectory=clients/python"
+
+# 方式 2：本地 clone 后 editable install
+git clone https://github.com/zinohome/RTVoice
+pip install -e ./RTVoice/clients/python
 ```
+
+PyPI 发布在后续 release 计划中——届时这一段会改回 `pip install rtvoice-client`。
 
 ```python
 from rtvoice_client import Client
@@ -534,6 +591,32 @@ voice.example.com {
 }
 ```
 Caddy 自动 ACME 申请 cert（需开放 80/443 公网）。
+
+---
+
+## 7.4 音频格式速查表（SP9 T7 新增 / D1-F5）
+
+所有 STT/TTS endpoint 假设：
+
+| 用途 | 编码 | sample_rate | channels | bytes/sample | 备注 |
+|---|---|---|---|---|---|
+| STT WS 上传音频 | PCM int16 LE | 16000 Hz | 1 (mono) | 2 | 整段 `bytes` 一帧或分帧 send_bytes 都行 |
+| TTS HTTP 返回 | WAV (RIFF) | 24000 Hz | 1 | 2 | 单次 POST /v1/tts/stream Response body |
+| TTS WS server→client 帧 | raw PCM int16 LE | 24000 Hz | 1 | 2 | metadata 帧首声明 `sample_rate` |
+
+不匹配会导致识别质量极差或合成失真——别用 44.1kHz / float32 直接喂。
+
+## 7.5 库版本要求（D1-F6）
+
+| Python 库 | 最低版本 | 原因 |
+|---|---|---|
+| `websockets` | ≥ 11.0 | additional_headers / subprotocols 参数 |
+| `httpx` | ≥ 0.27 | async stream + auth |
+| `aiohttp` (替代 httpx) | ≥ 3.9 | (可选) |
+
+## 7.6 自环测试 caveat（D1-F8）
+
+文档示例若把 TTS 合成的音频塞回 STT 自环回测，识别结果**会很糟糕**（"你好世界" 可能识别为 "能够做得比我比我..."）。这是因为合成语音对 STT 训练集 OOD（out-of-distribution），**不代表真录音质量**。验证 STT 识别能力请用真人录音或 LibriSpeech / AISHELL 测试集。
 
 ---
 

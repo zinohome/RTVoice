@@ -9,6 +9,71 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.15.0] — 2026-05-12 — SP9 Firefighting + 文档真实化
+
+SP8 Dogfooding (D1+D2+D3+D4) 揭出的 platform 阻塞与文档失真，**一次性纠正**。
+背景：复盘发现"集成体验自评 6.5/10"过乐观，真实状态 ≈ 4/10——五天 SP1-SP7 大量纸面 ✅，
+真消费者眼里 WS 协议层不通 / 三对等 offering 在 URL 表面缺失 / 文档骗了消费者。
+
+### Added
+
+- **Real chromium e2e regression test** (`tests/e2e/test_browser_ws_subprotocol.py`)
+  + 新增 `.github/workflows/browser-e2e.yml` CI 守门——浏览器严格 RFC 6455 检查是唯一能挡此类回归的方式
+- **`pick_bearer_subprotocol()` helper** (`services/common/rtvoice_auth/ws.py`) + 6 单测
+- **`DELETE /v1/sessions/{session_id}`** (realtime-server) — 客户端主动释放 quota / 关 WS / 触发 cleanup；幂等
+- **`_build_ws_url(request, session_id)`** 反代友好的 ws_url 构造：读 X-Forwarded-Host / Host header，PUBLIC_WS_BASE 只在显式 override 时生效
+- **prod compose 暴露 stt-server / tts-server host 端口** (`docker-compose.prod.yml` + `STT_SERVER_PORT` / `TTS_SERVER_PORT` env)——"三对等 offering" 在 prod URL 表面真生效
+- **Web demo 真打包进 realtime-server 镜像**：`Dockerfile` 改 `COPY clients/web /app/static`（替代旧 SP3 4KB 测试页）
+- **`COZYVOICE_INTEGRATION.md` §0 端口拓扑** + §2.1b 三种凭据分层（API key / LiveKit JWT / session_id）+ scopes 清单
+- **`COZYVOICE_INTEGRATION.md` §7.4 音频格式速查表** + §7.5 库版本要求 + §7.6 自环测试 caveat
+
+### Changed
+
+- **3 个 WS endpoint** `accept()` 改为传 `subprotocol=pick_bearer_subprotocol(ws)`（**头号 bug fix**）：
+  - realtime-server `/v1/realtime/{id}`
+  - stt-server `/v1/asr`
+  - tts-server `/v1/tts/stream_ws`
+- `COZYVOICE_INTEGRATION.md §2.1` 颁 key 流程整段重写：旧 single-key + rebuild → 新 `rtvoice-admin create` + hot-reload
+- `COZYVOICE_INTEGRATION.md §5.0` `pip install rtvoice-client` → git URL pip install（PyPI 实际没发布过）
+- `COZYVOICE_INTEGRATION.md §3.3` 修 `urllib.request.urlopen(headers=)` 语法错例
+
+### Fixed
+
+- **🔥 D4-F4 (阻塞)**：WS server 不 echo `Sec-WebSocket-Protocol` → Chrome / Firefox close(1006) → **所有浏览器无法连 WS**。
+  curl / starlette TestClient 不强制 RFC 6455 §4.2.2 所以一直漏测——SP9 用真 chromium 守门
+- **D4-F3**：`ws_url` 返容器主机名 `realtime-server:9000` 外部不可达 → 改用 Host header / X-Forwarded-Host
+- **D4-F1 / F2**：prod web demo 是 SP3 旧 4KB 页 + stt/tts 端口不对外 → 镜像重打 + compose 暴露
+- **D3-S2**：HTTP `POST /v1/sessions` 创建后无对应 DELETE，session 卡满 30s idle 才回收 → 加 DELETE + 主动 cleanup
+- **D1-F10**：文档假承诺 `pip install rtvoice-client`（PyPI 上没有这个包）
+- 顺手修：`test_info_version` `0.12.0` → `0.14.0`（早上 commit `67b5125` bump 源码时漏改测试）
+
+### 不在本 SP（拆 SP10 单独做）
+
+- G3 per-key Prometheus label 真落地（D3 暴露的 5 条 done 标准全 ❌）
+- G4 真 OpenAPI schema（D2 暴露的 securitySchemes 缺失 / tts response Record\<str,any\> / stt schema 空壳 / 4 service `info.version` 错位）
+- `services/realtime-server/static/` 旧 SP3 测试页是否完全删除（保留 backup 留下次决定）
+
+### 验证（autonomous）
+
+- ✅ `rtvoice_auth.ws` 6 单测全过
+- ✅ `realtime-server` 78 测试全过（4 个 DELETE 测 + 3 个 ws_url 测 + 2 个 subprotocol echo 测 + 1 个 version 修订）
+- ✅ Real chromium e2e (`tests/e2e/`) 在 dev sandbox 跑通：浏览器 onopen ✅ + `ws.protocol == "bearer.<token>"` ✅
+- ⏳ prod redeploy 后端到端 STT / TTS 浏览器实测——进 `MANUAL_VALIDATION_QUEUE.md`（类 A 主观体验）
+- ⏳ CI `.github/workflows/browser-e2e.yml` 首次跑通在远端 PR
+
+### 设计决策
+
+- D-2026-05-12-A.1：subprotocol echo 直接 echo 原文 `bearer.<token>`（不引入 marker protocol），保 backward-compat 老客户端
+- D-2026-05-12-A.2：DELETE 不存在 session 返 204（幂等），不返 404（防泄漏存在性给攻击者）
+- D-2026-05-12-A.3：DELETE 非 owner 返 403 而非 404（同上）
+- D-2026-05-12-A.4：prod 端口暴露前 audit 鉴权——TTS admin endpoints 用 `_check_admin_auth`(TTS_ADMIN_API_KEY)，业务端点全 `require_key`；/health /info 故意公开
+- D-2026-05-12-A.5：`_build_ws_url` 默认 PUBLIC_WS_BASE 容器主机名失效，改读 Host；显式 `PUBLIC_WS_BASE=wss://...` 仍 override（向后兼容反代部署）
+- D-2026-05-12-C.1：`rtvoice-client` 仍不上 PyPI（避免维护负担），文档改为 git URL pip install——后续 release 再考虑 PyPI
+
+详见 [SP9 设计](./docs/superpowers/specs/2026-05-12-sp9-firefighting-design.md) + [实施 plan](./docs/superpowers/plans/2026-05-12-sp9-firefighting.md) + [SP8 D1-D4 findings](./docs/superpowers/findings/)。
+
+---
+
 ## [0.14.0] — 2026-05-11 — SP7 Auth Hot Reload + Build Stability
 
 修补 SP6 prod 验收暴露的两大痛点。
