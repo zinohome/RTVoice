@@ -41,7 +41,9 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 - ✅ download_model.sh subprocess 2 测试（1 pass + 1 skipif wget-no-file://）
 - ✅ realtime-server hot reload e2e 1 测试
 - ✅ 总测试 165+ → 178+
-- ⏳ prod：admin CLI create → < 1s 全 4 服务 pickup；stt rebuild 防 HF 抖动
+- ✅ **prod 实测 (2026-05-12)**：admin CLI create → token-server pickup **108ms**（< 1s 目标）；
+  stt-server-gpu v0.14.0 build 全通；keys.yaml watcher 100ms debounce 工作
+- ⏳ 待用户验收（进 `MANUAL_VALIDATION_QUEUE.md`）：浏览器端 / 三方 client 真接入 / 长稳跑
 
 ### 设计决策（D-2026-05-11-E.1~E.4）
 

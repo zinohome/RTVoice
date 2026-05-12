@@ -30,9 +30,11 @@ declare -A CONTAINER_FOR=(
   [token-server]="rtvoice-token"
   [stt-server]="rtvoice-stt"
   [tts-server]="rtvoice-tts"
+  [realtime-server]="rtvoice-realtime"
   [agent-worker]="rtvoice-agent"
 )
-SERVICES=(livekit-server token-server stt-server tts-server agent-worker)
+# 顺序：token (auth gateway) → stt/tts (引擎) → realtime (依赖 stt+tts) → agent
+SERVICES=(livekit-server token-server stt-server tts-server realtime-server agent-worker)
 
 confirm() {
   local msg="$1"
@@ -45,7 +47,8 @@ require_env_prod() {
     echo "❌ .env 不存在；先 cp .env.example .env 并填入 prod 值" >&2
     exit 1
   fi
-  for k in LIVEKIT_API_KEY LIVEKIT_API_SECRET APP_API_KEY BIND_HOST LIVEKIT_PUBLIC_URL; do
+  # SP6+ 必填：LiveKit 凭证 + RTVoice 内部 API key（agent → stt/tts/token）
+  for k in LIVEKIT_API_KEY LIVEKIT_API_SECRET RTVOICE_API_KEY BIND_HOST LIVEKIT_PUBLIC_URL RTVOICE_KEYS_HOST_DIR; do
     val=$(grep -E "^${k}=" .env | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
     if [[ -z "$val" ]]; then
       echo "❌ .env 缺 ${k}（生产必填）" >&2
@@ -53,14 +56,20 @@ require_env_prod() {
     fi
   done
   # 安全检查：不允许 dev 默认值上 prod
-  for k in APP_API_KEY LIVEKIT_API_SECRET; do
+  for k in RTVOICE_API_KEY LIVEKIT_API_SECRET; do
     val=$(grep -E "^${k}=" .env | head -1 | cut -d= -f2-)
     if [[ "$val" == *"changeme"* || "$val" == *"devsecret"* ]]; then
       echo "❌ .env 中 ${k} 仍是默认弱值。生产必须重新生成。" >&2
-      echo "   生成：python3 -c 'import secrets; print(secrets.token_urlsafe(32))'" >&2
+      echo "   生成：rtvoice-admin create --name internal --scopes stt,tts,tokens,realtime" >&2
       exit 1
     fi
   done
+  # keys.yaml 存在性（SP6 yaml backend 必备）
+  keys_dir=$(grep -E "^RTVOICE_KEYS_HOST_DIR=" .env | head -1 | cut -d= -f2-)
+  if [[ -n "$keys_dir" && ! -f "${keys_dir}/keys.yaml" ]]; then
+    echo "❌ ${keys_dir}/keys.yaml 不存在；先用 rtvoice-admin create 生成" >&2
+    exit 1
+  fi
 }
 
 phase1_inspect() {

@@ -121,7 +121,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="RTVoice Realtime Voice Server",
-    version="0.12.0",
+    version="0.14.0",
     lifespan=lifespan,
 )
 
@@ -228,7 +228,7 @@ async def health() -> dict[str, str]:
 async def info() -> dict:
     return {
         "name": "realtime-server",
-        "version": "0.12.0",
+        "version": "0.14.0",
         "capabilities": {
             "session_api": True,
             "ws_realtime": True,
