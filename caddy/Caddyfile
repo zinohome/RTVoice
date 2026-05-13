@@ -21,6 +21,11 @@
 
 {
     auto_https disable_redirects
+    # SP12: 关 HTTP/3，只保留 h1+h2 — 之前 HTTP/3 + docker-proxy 路径导致
+    # client TLS handshake 收 server internal_error (sp11 finding)
+    servers {
+        protocols h1 h2
+    }
     # 自签 CA 必须显式枚举要颁的主体 / IP
     pki {
         ca local {
