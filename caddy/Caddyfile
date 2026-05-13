@@ -46,6 +46,12 @@
     handle /admin {
         redir /admin/ permanent
     }
+    # /admin/ 单独处理 → 显式映射到 /static/admin/index.html
+    # (FastAPI StaticFiles 默认 html=False，不会自动 serve index.html)
+    handle /admin/ {
+        rewrite * /static/admin/index.html
+        reverse_proxy realtime-server:9000
+    }
     handle_path /admin/* {
         reverse_proxy realtime-server:9000 {
             rewrite /static/admin{uri}
