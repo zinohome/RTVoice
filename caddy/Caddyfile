@@ -21,9 +21,16 @@
 
 {
     auto_https disable_redirects
+    # 自签 CA 必须显式枚举要颁的主体 / IP
+    pki {
+        ca local {
+            name "RTVoice Internal CA"
+        }
+    }
 }
 
-:443 {
+# IP 直接访问场景（无域名 LAN）— 明确列出可用主体让 tls internal 颁 cert
+192.168.66.163, 127.0.0.1, localhost {
     tls internal
 
     # --- realtime-server (web demo + session + WS) ---
