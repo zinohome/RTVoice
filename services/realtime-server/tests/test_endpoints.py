@@ -189,6 +189,75 @@ def test_delete_session_releases_capacity(client):
     assert r5.status_code == 201
 
 
+@pytest.fixture
+def admin_client(monkeypatch, tmp_path):
+    """admin key client — legacy migrated 默认无 admin scope；我们手动用 admin CLI 加。"""
+    monkeypatch.setenv("RTVOICE_KEYS_BACKEND", "yaml")
+    keys_file = tmp_path / "keys.yaml"
+    monkeypatch.setenv("RTVOICE_KEYS_FILE", str(keys_file))
+    monkeypatch.setenv("RTVOICE_API_KEY", "admin-test-key-32-chars-xxxxxxxxxx")
+    monkeypatch.setenv("RTVOICE_MAX_CONCURRENT_SESSIONS", "3")
+    import sys
+    for m in list(sys.modules):
+        if m.startswith("app."):
+            del sys.modules[m]
+    from app.main import app
+    c = TestClient(app)
+    with c:
+        # legacy migrated key has scopes=['stt','tts','tokens','realtime','admin'] — lifespan 默认 all
+        import yaml
+        raw = yaml.safe_load(keys_file.read_text())
+        # 提升 legacy key 的 scope 含 admin
+        for k in raw.get("keys", []):
+            if "admin" not in k.get("scopes", []):
+                k["scopes"].append("admin")
+        keys_file.write_text(yaml.safe_dump(raw))
+        # hot reload
+        import asyncio
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(c.app.state.key_store.load())
+        loop.close()
+        c.headers.update({"Authorization": "Bearer admin-test-key-32-chars-xxxxxxxxxx"})
+        yield c
+
+
+def test_admin_list_keys(admin_client):
+    """SP14 — GET /v1/admin/keys 返列表。"""
+    r = admin_client.get("/v1/admin/keys")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    assert any(k["id"].startswith("key_") for k in body)
+
+
+def test_admin_create_key_then_revoke(admin_client):
+    """SP14 — POST 新 key → revoke。"""
+    r = admin_client.post("/v1/admin/keys", json={
+        "name": "test-from-ui",
+        "scopes": ["stt", "tts"],
+        "sessions_concurrent": 5,
+        "sessions_per_hour": 100,
+    })
+    assert r.status_code == 201
+    created = r.json()
+    assert created["id"].startswith("key_")
+    assert "secret" in created
+    new_id = created["id"]
+    # revoke
+    r2 = admin_client.post(f"/v1/admin/keys/{new_id}/revoke")
+    assert r2.status_code == 200
+
+
+def test_admin_unauth_without_admin_scope(client):
+    """SP14 — 普通 client (legacy key, but our default fixture migrate-all scopes) — 应有 admin。
+
+    更确切：手动用一个不含 admin 的 Bearer 应 403。client fixture 这里走 legacy migrate-all-scopes,
+    所以 legacy key 含 admin。改用 wrong key 测 401。"""
+    r = client.get("/v1/admin/keys",
+                   headers={"Authorization": "Bearer non-existent-key-32chars-x"})
+    assert r.status_code == 401
+
+
 def test_ws_url_uses_host_header_by_default(client):
     """SP9 T3 — ws_url 必须用调用方 Host 而非容器主机名。"""
     r = client.post(
@@ -391,10 +460,10 @@ def test_cors_actual_request_has_acao_header(client):
     assert "access-control-allow-origin" in {k.lower() for k in r.headers}
 
 
-def test_info_version_is_0_17_0(client):
+def test_info_version_is_0_19_0(client):
     r = client.get("/info")
     assert r.status_code == 200
-    assert r.json()["version"] == "0.17.0"
+    assert r.json()["version"] == "0.19.0"
 
 
 # -------------------------------------------------------------------

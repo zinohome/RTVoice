@@ -188,7 +188,7 @@ async def lifespan(app: FastAPI):
             log.exception("key_watcher stop failed")
 
 
-app = FastAPI(title="RTVoice STT Server", version="0.17.0", lifespan=lifespan)
+app = FastAPI(title="RTVoice STT Server", version="0.19.0", lifespan=lifespan)
 
 _cors_raw = os.environ.get("RTVOICE_CORS_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -231,7 +231,7 @@ async def info() -> dict:
     # SP10 G4 — 4 service /info 统一返 service/version/capabilities/models
     return {
         "service": "stt-server",
-        "version": "0.17.0",
+        "version": "0.19.0",
         "capabilities": {
             "streaming": True,
             "subprotocol_bearer": True,

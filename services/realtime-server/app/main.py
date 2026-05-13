@@ -50,6 +50,7 @@ from rtvoice_auth.ws import pick_bearer_subprotocol
 from rtvoice_auth.instrumentation import RequestMetricsMiddleware
 from rtvoice_auth.openapi import add_bearer_security_scheme
 from rtvoice_auth.metrics import REALTIME_SESSION_DURATION_SECONDS
+from app.admin_api import router as admin_router
 
 logging.basicConfig(
     level=config.LOG_LEVEL,
@@ -125,7 +126,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="RTVoice Realtime Voice Server",
-    version="0.17.0",
+    version="0.19.0",
     lifespan=lifespan,
 )
 
@@ -148,6 +149,9 @@ app.add_exception_handler(RequestValidationError, validation_exception_handler()
 app.add_middleware(RequestMetricsMiddleware, service_name="realtime-server")
 # SP10 G4 — OpenAPI Bearer securityScheme
 add_bearer_security_scheme(app)
+
+# SP14 — Admin API（keys lifecycle over HTTP；scope='admin' required）
+app.include_router(admin_router)
 
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -242,7 +246,7 @@ async def info() -> dict:
         # SP10 G4 — service 字段（与其他 service /info 一致）；保留 "name" 向后兼容
         "service": "realtime-server",
         "name": "realtime-server",
-        "version": "0.17.0",
+        "version": "0.19.0",
         "capabilities": {
             "session_api": True,
             "ws_realtime": True,

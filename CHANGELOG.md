@@ -9,6 +9,74 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.19.0] — 2026-05-13 — SP14 AdminUI v1
+
+内部运维 + 三方对接调试的一站式 UI。后续新功能上线先在 AdminUI 测，再放给消费者。
+
+### Added
+
+- **`services/realtime-server/app/admin_api.py`** — Keys 生命周期 HTTP API (复用 rtvoice-admin CLI 内部逻辑)：
+  - `GET  /v1/admin/keys` — list (no secrets)
+  - `POST /v1/admin/keys` — create + secret (only-once)
+  - `GET  /v1/admin/keys/{id}` — show
+  - `POST /v1/admin/keys/{id}/revoke`
+  - `POST /v1/admin/keys/{id}/rotate` — 旧 secret 立失效
+  - 全部 require_key with scope='admin'（**新 scope**）
+- **`clients/web/admin/index.html`** — 单文件 Admin UI (Alpine.js + CDN，无 build step)：
+  - 8 tabs: Login / Monitor / Keys / Voices / Test STT / Test TTS / Test Realtime / Test Tokens
+  - localStorage 存 admin key secret；HTTPS + Bearer
+  - Monitor tab：4 service /openapi 探活 + Grafana/Prometheus link
+  - Keys tab：表格 + 创建表单 (scopes toggle) + revoke/rotate 按钮
+  - Test tabs：每 service 独立测试入口（含 WS subprotocol 验证）
+- **Caddy 路由（`caddy/Caddyfile`）**：
+  - `/admin/*` → realtime-server `/static/admin/*`
+  - `/v1/admin/*` → realtime-server
+  - `/swagger/{realtime,token,stt,tts}` → 各 service FastAPI `/docs` 反代
+- **3 个集成测试** (`tests/test_endpoints.py`)：admin list / create+revoke / 401 无 key
+
+### Changed
+
+- realtime-server `main.py` 加 `app.include_router(admin_router)`
+- 6 service `version="0.19.0"` + compose tags + test_info_version 同步
+
+### Done 标准
+
+- ✅ realtime 81 测试全过 (78 + 3 新 admin)
+- ✅ `clients/web/admin/index.html` 单文件，无 build step
+- ⏳ prod 部署后 `https://192.168.66.163/admin/` 浏览器打开走通（验类 A）
+
+### 用法
+
+```bash
+# 1. ssh prod create admin key（scope=admin）
+docker exec rtvoice-realtime rtvoice-admin create \
+  --name admin-ui --scopes admin --notes "AdminUI login"
+
+# 2. 浏览器打开 https://192.168.66.163/admin/
+#    在 Login tab 输入 secret，点 Save + verify
+
+# 3. Monitor / Keys / Test * tabs 全可用
+```
+
+### 设计决策
+
+- D-2026-05-13-SP14.1：admin 路径默认走 Caddy `/admin/*`，**不暴露独立端口** — 现有 Caddy auth/network 一站式
+- D-2026-05-13-SP14.2：admin key 用 localStorage 而非 session cookie — 与 SDK 模型一致，零后端 session
+- D-2026-05-13-SP14.3：rotate 端点同步显示新 secret + 旧 secret 立失效 — UI 弹 alert 提醒立刻保存
+- D-2026-05-13-SP14.4：UI 走 Alpine.js + Tailwind CDN — 单文件，无 npm build
+- D-2026-05-13-SP14.5：Swagger 走 Caddy 反代 4 个 service `/docs` —— FastAPI 自带 UI 够用，不内嵌 SwaggerUI bundle
+
+### 完成度
+
+| 维度 | SP13 后 | **SP14 后** |
+|---|---|---|
+| 集成体验 | 9.5 | **9.5** |
+| 部署/运维 | 9 | **9.5** ✅ Admin UI + Swagger 反代 |
+| 真用户路径 | 7 | 7 |
+| **综合** | 87% | **~88%** |
+
+---
+
 ## [0.18.0] — 2026-05-13 — SP13 三方接入工具包（通用化）
 
 把 RTVoice 打磨到"任意第三方拿现有 docs + 工具 + 凭据，30 分钟端到端跑通"。

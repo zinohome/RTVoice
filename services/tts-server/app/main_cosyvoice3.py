@@ -231,7 +231,7 @@ async def lifespan(app: FastAPI):
             log.exception("key_watcher stop failed")
 
 
-app = FastAPI(title="RTVoice TTS Server (Fun-CosyVoice 3)", version="0.17.0", lifespan=lifespan)
+app = FastAPI(title="RTVoice TTS Server (Fun-CosyVoice 3)", version="0.19.0", lifespan=lifespan)
 
 _cors_raw = os.environ.get("RTVOICE_CORS_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -356,7 +356,7 @@ async def info() -> dict:
     # SP10 G4 — 4 service /info 统一返 service/version/capabilities/models
     return {
         "service": "tts-server",
-        "version": "0.17.0",
+        "version": "0.19.0",
         "capabilities": {
             "streaming": True,
             "text_streaming": True,        # agent-worker 探测此字段决定走 ws 流式

@@ -42,9 +42,43 @@
     tls internal
 
     # --- realtime-server (web demo + session + WS) ---
+    # SP14: /admin/* 路径 → realtime-server /static/admin/*
+    handle /admin {
+        redir /admin/ permanent
+    }
+    handle_path /admin/* {
+        reverse_proxy realtime-server:9000 {
+            rewrite /static/admin{uri}
+        }
+    }
+    handle /v1/admin/* {
+        reverse_proxy realtime-server:9000
+    }
     handle_path /static/* {
         reverse_proxy realtime-server:9000 {
             rewrite /static{uri}
+        }
+    }
+
+    # SP14: Swagger UI 反代 — /swagger/{svc} → 各 service /docs
+    handle /swagger/realtime* {
+        reverse_proxy realtime-server:9000 {
+            rewrite /docs
+        }
+    }
+    handle /swagger/token* {
+        reverse_proxy token-server:8000 {
+            rewrite /docs
+        }
+    }
+    handle /swagger/stt* {
+        reverse_proxy stt-server:9090 {
+            rewrite /docs
+        }
+    }
+    handle /swagger/tts* {
+        reverse_proxy tts-server:9880 {
+            rewrite /docs
         }
     }
     handle /v1/sessions* {

@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RTVoice Admin</title>
+<script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+<style>
+  :root { --primary: #0d4f7c; --ok: #1a7f1a; --err: #d33; --warn: #c77; --bg: #f4f6f8; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, "Segoe UI", sans-serif; margin: 0; background: var(--bg); color: #222; }
+  header { background: var(--primary); color: white; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; }
+  header h1 { margin: 0; font-size: 18px; }
+  .auth-status { font-size: 13px; opacity: .85; }
+  .auth-status.ok { color: #9ce8a4; }
+  .auth-status.err { color: #ffb4b4; }
+  nav { background: white; border-bottom: 1px solid #e0e0e0; padding: 0 16px; overflow-x: auto; white-space: nowrap; }
+  nav button { background: none; border: none; padding: 10px 14px; cursor: pointer; font-size: 14px; color: #555; border-bottom: 2px solid transparent; }
+  nav button.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+  main { padding: 16px 24px; max-width: 1200px; margin: 0 auto; }
+  .card { background: white; border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px; margin-bottom: 14px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 200px; }
+  label { display: block; font-size: 13px; margin: 8px 0; }
+  input[type=text], input[type=password], input[type=number], textarea, select {
+    width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font: inherit; font-family: monospace;
+  }
+  textarea { font-family: -apple-system, system-ui, sans-serif; min-height: 60px; }
+  button.btn { background: var(--primary); color: white; border: none; padding: 7px 14px; border-radius: 4px; cursor: pointer; }
+  button.btn:hover { opacity: .9; }
+  button.btn.danger { background: var(--err); }
+  button.btn.ghost { background: none; color: var(--primary); border: 1px solid var(--primary); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px; text-align: left; border-bottom: 1px solid #eee; }
+  th { background: #fafafa; font-weight: 600; }
+  pre.log { background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 280px; overflow: auto; white-space: pre-wrap; }
+  .pill { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 11px; }
+  .pill.ok { background: #d4edda; color: #155724; }
+  .pill.err { background: #f8d7da; color: #721c24; }
+  .pill.warn { background: #fff3cd; color: #856404; }
+  .badge { display: inline-block; background: #e9ecef; color: #495057; padding: 2px 6px; border-radius: 3px; font-size: 11px; margin-right: 4px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .stat-card { background: white; padding: 16px; border-radius: 6px; border: 1px solid #e0e0e0; }
+  .stat-card .num { font-size: 24px; font-weight: 600; color: var(--primary); }
+  .stat-card .lbl { font-size: 12px; color: #777; }
+</style>
+</head>
+<body>
+
+<div x-data="admin()" x-init="init()">
+
+  <header>
+    <h1>RTVoice Admin</h1>
+    <span class="auth-status" :class="{ ok: hasKey, err: !hasKey }" x-text="hasKey ? '✓ admin key set' : '✗ login required'"></span>
+  </header>
+
+  <nav>
+    <template x-for="t in tabs" :key="t.id">
+      <button :class="{ active: tab === t.id }" @click="tab = t.id" x-text="t.label"></button>
+    </template>
+  </nav>
+
+  <main>
+
+  <!-- ============ Login tab ============ -->
+  <div x-show="tab === 'login'" class="card">
+    <h3>登录</h3>
+    <p style="font-size:13px;color:#666">输入含 scope=<code>admin</code> 的 key。Secret 存浏览器 localStorage。
+      <strong>第一次没 admin key？</strong><br>
+      ssh 到 prod 跑：<br>
+      <code>docker exec rtvoice-realtime rtvoice-admin create --name admin --scopes admin --notes "AdminUI login"</code><br>
+      把返回的 <code>secret</code> 填到下方。</p>
+    <label>RTVoice base URL <input type="text" x-model="cfg.base"></label>
+    <label>Admin key secret <input type="password" x-model="cfg.key" placeholder="paste from rtvoice-admin create"></label>
+    <button class="btn" @click="login()">Save + verify</button>
+    <button class="btn ghost" @click="logout()" x-show="hasKey">Logout</button>
+    <pre class="log" x-show="logs.login" x-text="logs.login"></pre>
+  </div>
+
+  <!-- ============ Monitor tab ============ -->
+  <div x-show="tab === 'monitor'">
+    <h3>Service status</h3>
+    <div class="grid-4">
+      <template x-for="(s, idx) in services" :key="idx">
+        <div class="stat-card">
+          <div class="lbl" x-text="s.label"></div>
+          <div class="num" :style="s.status === 'ok' ? 'color:var(--ok)' : 'color:var(--err)'" x-text="s.status === 'ok' ? '✓' : '✗'"></div>
+          <div style="font-size:11px;color:#888" x-text="s.detail"></div>
+        </div>
+      </template>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3>Quick links</h3>
+      <p><a :href="cfg.base + ':3000'" target="_blank">Grafana — per-key dashboard</a> (admin/admin)</p>
+      <p><a :href="cfg.base + ':9091'" target="_blank">Prometheus UI</a> (alerts / rules / targets)</p>
+      <p><a :href="cfg.base + '/openapi/realtime.json'" target="_blank">OpenAPI realtime</a> · <a :href="cfg.base + '/openapi/stt.json'" target="_blank">stt</a> · <a :href="cfg.base + '/openapi/tts.json'" target="_blank">tts</a> · <a :href="cfg.base + '/openapi/token.json'" target="_blank">token</a></p>
+    </div>
+
+    <div class="card">
+      <h3>Refresh</h3>
+      <button class="btn" @click="refreshServices()">Refresh services status</button>
+      <pre class="log" x-show="logs.monitor" x-text="logs.monitor"></pre>
+    </div>
+  </div>
+
+  <!-- ============ Keys tab ============ -->
+  <div x-show="tab === 'keys'">
+    <div class="card">
+      <h3>Create new key</h3>
+      <div class="row">
+        <label>Name <input type="text" x-model="newKey.name" placeholder="my-app"></label>
+        <label>Concurrent sessions max <input type="number" x-model.number="newKey.sessions_concurrent" min="1" max="100"></label>
+        <label>Per-hour sessions max <input type="number" x-model.number="newKey.sessions_per_hour" min="1" max="10000"></label>
+      </div>
+      <label>Scopes (toggle)</label>
+      <template x-for="s in ['stt','tts','tokens','realtime','admin']" :key="s">
+        <label style="display:inline-block;margin-right:14px">
+          <input type="checkbox" :value="s" x-model="newKey.scopes"> <span x-text="s"></span>
+        </label>
+      </template>
+      <label style="margin-top:8px">Notes <textarea x-model="newKey.notes" placeholder="optional"></textarea></label>
+      <button class="btn" @click="createKey()">Create</button>
+      <pre class="log" x-show="logs.createKey" x-text="logs.createKey"></pre>
+    </div>
+
+    <div class="card">
+      <h3>All keys <button class="btn ghost" @click="loadKeys()" style="float:right;font-size:12px">Refresh</button></h3>
+      <table>
+        <thead><tr><th>id</th><th>name</th><th>scopes</th><th>concurrent</th><th>created</th><th>revoked</th><th>ops</th></tr></thead>
+        <tbody>
+          <template x-for="k in keys" :key="k.id">
+            <tr>
+              <td><code x-text="k.id"></code></td>
+              <td x-text="k.name"></td>
+              <td>
+                <template x-for="s in k.scopes" :key="s"><span class="badge" x-text="s"></span></template>
+              </td>
+              <td x-text="k.sessions_concurrent_max"></td>
+              <td x-text="k.created_at?.slice(0,10) || ''"></td>
+              <td>
+                <span x-show="k.revoked_at" class="pill err">revoked</span>
+                <span x-show="!k.revoked_at" class="pill ok">active</span>
+              </td>
+              <td>
+                <button class="btn danger" style="font-size:11px;padding:3px 8px" x-show="!k.revoked_at"
+                        @click="revokeKey(k.id)">Revoke</button>
+                <button class="btn ghost" style="font-size:11px;padding:3px 8px" x-show="!k.revoked_at"
+                        @click="rotateKey(k.id)">Rotate secret</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ============ Voices tab ============ -->
+  <div x-show="tab === 'voices'">
+    <div class="card">
+      <h3>Available TTS voices</h3>
+      <button class="btn ghost" @click="loadVoices()">Refresh</button>
+      <ul>
+        <template x-for="v in voices" :key="v">
+          <li><code x-text="v"></code></li>
+        </template>
+      </ul>
+      <p style="font-size:12px;color:#888">Voice clone admin endpoint 需要 TTS_ADMIN_API_KEY 配置（与 admin key 不同；env 配）。</p>
+      <pre class="log" x-show="logs.voices" x-text="logs.voices"></pre>
+    </div>
+  </div>
+
+  <!-- ============ STT test ============ -->
+  <div x-show="tab === 'test-stt'" class="card">
+    <h3>STT — upload PCM 16kHz mono</h3>
+    <p style="font-size:13px;color:#666">本测试用 WS /v1/asr。需要 admin key 的 scope 含 <code>stt</code>，
+      或换一把 stt-scoped key 在 Login tab。</p>
+    <label>Upload WAV / PCM file <input type="file" @change="onSttFile($event)" accept="audio/*,application/octet-stream"></label>
+    <button class="btn" @click="testSTT()">Send via WS</button>
+    <pre class="log" x-show="logs.stt" x-text="logs.stt"></pre>
+  </div>
+
+  <!-- ============ TTS test ============ -->
+  <div x-show="tab === 'test-tts'" class="card">
+    <h3>TTS — synthesize</h3>
+    <p style="font-size:13px;color:#666">需要 admin key scope 含 <code>tts</code>。</p>
+    <label>Text <textarea x-model="ttsForm.text">你好，这是 RTVoice TTS 测试。</textarea></label>
+    <div class="row">
+      <label>Voice <input type="text" x-model="ttsForm.voice"></label>
+      <label>Speed <input type="number" x-model.number="ttsForm.speed" step="0.1" min="0.5" max="2.0"></label>
+    </div>
+    <button class="btn" @click="testTTS()">Synthesize + play</button>
+    <audio id="tts-audio" controls style="margin-top:8px;width:100%"></audio>
+    <pre class="log" x-show="logs.tts" x-text="logs.tts"></pre>
+  </div>
+
+  <!-- ============ Realtime test ============ -->
+  <div x-show="tab === 'test-realtime'" class="card">
+    <h3>Realtime — session + WS handshake</h3>
+    <p style="font-size:13px;color:#666">本测试创 session + 连 WS（subprotocol bearer），验证协议层通畅。
+      完整对话流（mic 录音 + 实时识别）见 <a href="../" target="_blank">/static/</a> 完整 demo。</p>
+    <button class="btn" @click="testRealtime()">Create session + connect WS</button>
+    <pre class="log" x-show="logs.realtime" x-text="logs.realtime"></pre>
+  </div>
+
+  <!-- ============ Tokens test ============ -->
+  <div x-show="tab === 'test-tokens'" class="card">
+    <h3>Tokens — LiveKit JWT 颁发 + decode</h3>
+    <p style="font-size:13px;color:#666">需要 admin key scope 含 <code>tokens</code>。</p>
+    <div class="row">
+      <label>Room <input type="text" x-model="tokForm.room"></label>
+      <label>Identity <input type="text" x-model="tokForm.identity"></label>
+    </div>
+    <button class="btn" @click="testTokens()">POST /v1/tokens</button>
+    <pre class="log" x-show="logs.tokens" x-text="logs.tokens"></pre>
+  </div>
+
+  </main>
+</div>
+
+<script>
+function admin() {
+  return {
+    tab: 'login',
+    tabs: [
+      { id: 'login', label: 'Login' },
+      { id: 'monitor', label: 'Monitor' },
+      { id: 'keys', label: 'Keys' },
+      { id: 'voices', label: 'Voices' },
+      { id: 'test-stt', label: 'Test STT' },
+      { id: 'test-tts', label: 'Test TTS' },
+      { id: 'test-realtime', label: 'Test Realtime' },
+      { id: 'test-tokens', label: 'Test Tokens' },
+    ],
+    cfg: { base: '', key: '' },
+    hasKey: false,
+    services: [
+      { id: 'realtime', label: 'realtime-server', status: '?', detail: '' },
+      { id: 'token', label: 'token-server', status: '?', detail: '' },
+      { id: 'stt', label: 'stt-server', status: '?', detail: '' },
+      { id: 'tts', label: 'tts-server', status: '?', detail: '' },
+    ],
+    keys: [],
+    voices: [],
+    newKey: { name: '', scopes: ['stt','tts','tokens','realtime'], sessions_concurrent: 5, sessions_per_hour: 100, notes: '' },
+    ttsForm: { text: '你好，这是 RTVoice TTS 测试。', voice: 'default_zh_female', speed: 1.0 },
+    tokForm: { room: 'admin-test', identity: 'admin' },
+    sttFileBlob: null,
+    logs: { login: '', monitor: '', createKey: '', voices: '', stt: '', tts: '', realtime: '', tokens: '' },
+
+    init() {
+      try {
+        const c = JSON.parse(localStorage.getItem('rtvoice_admin') || '{}');
+        this.cfg.base = c.base || window.location.origin;
+        this.cfg.key = c.key || '';
+      } catch (e) {}
+      this.hasKey = !!this.cfg.key;
+      if (this.hasKey) this.tab = 'monitor';
+    },
+
+    auth() { return this.cfg.key ? { 'Authorization': 'Bearer ' + this.cfg.key } : {}; },
+
+    setLog(name, text, isErr) {
+      this.logs[name] = (isErr ? '❌ ' : '') + text;
+    },
+
+    async login() {
+      this.cfg.base = this.cfg.base.replace(/\/$/, '');
+      try {
+        const r = await fetch(this.cfg.base + '/v1/admin/keys', { headers: this.auth() });
+        if (r.status === 401) { this.setLog('login', '401 unauthorized — secret 不对', true); return; }
+        if (r.status === 403) { this.setLog('login', '403 — secret 有效但缺 scope=admin', true); return; }
+        if (!r.ok) { this.setLog('login', 'HTTP ' + r.status + ': ' + await r.text(), true); return; }
+        const list = await r.json();
+        localStorage.setItem('rtvoice_admin', JSON.stringify(this.cfg));
+        this.hasKey = true;
+        this.keys = list;
+        this.setLog('login', '✓ logged in. ' + list.length + ' keys visible. Switch to Monitor tab.');
+        this.tab = 'monitor';
+        this.refreshServices();
+      } catch (e) { this.setLog('login', String(e), true); }
+    },
+
+    logout() {
+      this.cfg.key = ''; this.hasKey = false;
+      localStorage.removeItem('rtvoice_admin');
+      this.tab = 'login';
+    },
+
+    async refreshServices() {
+      this.setLog('monitor', 'fetching...');
+      // realtime via Caddy /info; per-service openapi.json for liveness check
+      const checks = [
+        { svc: 'realtime', path: '/openapi/realtime.json' },
+        { svc: 'token',    path: '/openapi/token.json' },
+        { svc: 'stt',      path: '/openapi/stt.json' },
+        { svc: 'tts',      path: '/openapi/tts.json' },
+      ];
+      for (const c of checks) {
+        try {
+          const r = await fetch(this.cfg.base + c.path);
+          const ok = r.ok;
+          const body = ok ? await r.json() : null;
+          const svc = this.services.find(s => s.id === c.svc);
+          svc.status = ok ? 'ok' : 'err';
+          svc.detail = ok ? ('v' + (body?.info?.version || '?')) : ('HTTP ' + r.status);
+        } catch (e) {
+          const svc = this.services.find(s => s.id === c.svc);
+          svc.status = 'err'; svc.detail = String(e);
+        }
+      }
+      this.setLog('monitor', 'updated at ' + new Date().toLocaleTimeString());
+    },
+
+    async loadKeys() {
+      const r = await fetch(this.cfg.base + '/v1/admin/keys', { headers: this.auth() });
+      if (r.ok) this.keys = await r.json();
+    },
+
+    async createKey() {
+      try {
+        const r = await fetch(this.cfg.base + '/v1/admin/keys', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, this.auth()),
+          body: JSON.stringify(this.newKey),
+        });
+        if (!r.ok) { this.setLog('createKey', 'HTTP ' + r.status + ': ' + await r.text(), true); return; }
+        const created = await r.json();
+        this.setLog('createKey',
+          '✅ key created\n  id: ' + created.id + '\n  secret: ' + created.secret +
+          '\n  ⚠️ Save secret NOW — only displayed once.');
+        await this.loadKeys();
+      } catch (e) { this.setLog('createKey', String(e), true); }
+    },
+
+    async revokeKey(id) {
+      if (!confirm('Revoke key ' + id + '? key 撤销后无法恢复。')) return;
+      const r = await fetch(this.cfg.base + '/v1/admin/keys/' + id + '/revoke',
+        { method: 'POST', headers: this.auth() });
+      if (r.ok) await this.loadKeys();
+      else alert('Revoke failed: HTTP ' + r.status);
+    },
+
+    async rotateKey(id) {
+      if (!confirm('Rotate secret for ' + id + '? 旧 secret 立即失效。')) return;
+      const r = await fetch(this.cfg.base + '/v1/admin/keys/' + id + '/rotate',
+        { method: 'POST', headers: this.auth() });
+      if (r.ok) {
+        const body = await r.json();
+        alert('New secret (save NOW):\n\n' + body.secret);
+      } else alert('Rotate failed: HTTP ' + r.status);
+    },
+
+    async loadVoices() {
+      try {
+        const r = await fetch(this.cfg.base + '/v1/voices', { headers: this.auth() });
+        if (!r.ok) { this.setLog('voices', 'HTTP ' + r.status, true); return; }
+        const body = await r.json();
+        this.voices = body.voices || [];
+        this.setLog('voices', this.voices.length + ' voices available');
+      } catch (e) { this.setLog('voices', String(e), true); }
+    },
+
+    onSttFile(ev) { this.sttFileBlob = ev.target.files[0] || null; },
+
+    async testSTT() {
+      if (!this.sttFileBlob) { this.setLog('stt', 'no file selected', true); return; }
+      this.setLog('stt', 'reading file...');
+      const ab = await this.sttFileBlob.arrayBuffer();
+      // 简化：假设是 PCM int16 LE 16kHz mono raw（or WAV — skip RIFF header）
+      let pcmStart = 0;
+      const dv = new DataView(ab);
+      if (ab.byteLength > 44 && dv.getUint32(0, false) === 0x52494646 /* RIFF */) {
+        pcmStart = 44;
+      }
+      const pcm = ab.slice(pcmStart);
+      this.setLog('stt', 'connecting WS...');
+      const wsUrl = this.cfg.base.replace(/^http/, 'ws') + '/v1/asr';
+      const ws = new WebSocket(wsUrl, ['bearer.' + this.cfg.key]);
+      let log = '';
+      ws.onopen = () => { log += 'open. sending ' + pcm.byteLength + ' bytes...\n'; this.setLog('stt', log); ws.send(pcm); ws.send('EOS'); };
+      ws.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          log += '[' + ev.type + '] ' + (ev.text || ev.message || '') + '\n';
+          this.setLog('stt', log);
+          if (ev.type === 'final') ws.close();
+        } catch {}
+      };
+      ws.onerror = () => { this.setLog('stt', log + 'ERR', true); };
+      ws.onclose = (e) => { this.setLog('stt', log + 'closed ' + e.code); };
+    },
+
+    async testTTS() {
+      this.setLog('tts', 'requesting...');
+      try {
+        const r = await fetch(this.cfg.base + '/v1/tts/stream', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, this.auth()),
+          body: JSON.stringify(this.ttsForm),
+        });
+        if (!r.ok) { this.setLog('tts', 'HTTP ' + r.status + ': ' + await r.text(), true); return; }
+        const buf = await r.arrayBuffer();
+        const wav = wrapWav(new Int16Array(buf), 24000);
+        const blob = new Blob([wav], { type: 'audio/wav' });
+        document.getElementById('tts-audio').src = URL.createObjectURL(blob);
+        this.setLog('tts', '✓ ' + buf.byteLength + ' bytes PCM → playing');
+      } catch (e) { this.setLog('tts', String(e), true); }
+    },
+
+    async testRealtime() {
+      this.setLog('realtime', 'creating session...');
+      try {
+        const r = await fetch(this.cfg.base + '/v1/sessions', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, this.auth()),
+          body: JSON.stringify({ voice: 'default_zh_female' }),
+        });
+        if (!r.ok) { this.setLog('realtime', 'HTTP ' + r.status + ': ' + await r.text(), true); return; }
+        const sess = await r.json();
+        let log = '✓ session ' + sess.session_id + '\nws_url = ' + sess.ws_url + '\nconnecting WS...\n';
+        this.setLog('realtime', log);
+        const ws = new WebSocket(sess.ws_url, ['bearer.' + this.cfg.key]);
+        ws.onopen = () => { log += '✓ WS onopen, protocol=' + ws.protocol + '\n'; this.setLog('realtime', log); };
+        ws.onclose = (e) => { log += 'closed code=' + e.code + ' reason=' + (e.reason || '-') + '\n'; this.setLog('realtime', log); };
+        ws.onmessage = (e) => { log += '← ' + (typeof e.data === 'string' ? e.data.slice(0,200) : '<bin>') + '\n'; this.setLog('realtime', log); };
+        setTimeout(() => {
+          try { ws.close(); } catch {}
+          fetch(this.cfg.base + '/v1/sessions/' + sess.session_id, { method: 'DELETE', headers: this.auth() });
+        }, 15000);
+      } catch (e) { this.setLog('realtime', String(e), true); }
+    },
+
+    async testTokens() {
+      try {
+        const r = await fetch(this.cfg.base + '/v1/tokens', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, this.auth()),
+          body: JSON.stringify(this.tokForm),
+        });
+        if (!r.ok) { this.setLog('tokens', 'HTTP ' + r.status + ': ' + await r.text(), true); return; }
+        const body = await r.json();
+        // Decode JWT payload
+        let claims = '';
+        try {
+          const part = body.token.split('.')[1];
+          claims = JSON.stringify(JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))), null, 2);
+        } catch {}
+        this.setLog('tokens', '✓ JWT len=' + body.token.length + '\nLiveKit URL: ' + body.url + '\n\nclaims:\n' + claims);
+      } catch (e) { this.setLog('tokens', String(e), true); }
+    },
+  };
+}
+
+function wrapWav(pcm, sampleRate) {
+  const n = pcm.length, sz = n * 2;
+  const buf = new ArrayBuffer(44 + sz);
+  const v = new DataView(buf);
+  function w(o, s) { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); }
+  w(0, 'RIFF'); v.setUint32(4, 36 + sz, true); w(8, 'WAVE'); w(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, sz, true);
+  new Int16Array(buf, 44, n).set(pcm);
+  return buf;
+}
+</script>
+</body>
+</html>
