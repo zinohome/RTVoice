@@ -231,7 +231,7 @@ async def lifespan(app: FastAPI):
             log.exception("key_watcher stop failed")
 
 
-app = FastAPI(title="RTVoice TTS Server (Fun-CosyVoice 3)", version="0.16.0", lifespan=lifespan)
+app = FastAPI(title="RTVoice TTS Server (Fun-CosyVoice 3)", version="0.17.0", lifespan=lifespan)
 
 _cors_raw = os.environ.get("RTVOICE_CORS_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -273,6 +273,22 @@ class TTSRequest(BaseModel):
     voice: str | None = Field(None, description="SFT 音色名 或 Kokoro 别名")
     lang: str | None = Field(None, description="忽略 (CosyVoice 自动判语言)")
     speed: float = Field(1.0, ge=0.5, le=2.0)
+
+
+# SP11 T2 — G4 response_model 补全（D2 finding：之前 dict → openapi Record<str,any>）
+class VoicesListResponse(BaseModel):
+    voices: list[str] = Field(..., description="可用 SFT 音色 ID 列表")
+
+
+class AddVoiceResponse(BaseModel):
+    spk_id: str
+    voice_count: int = Field(..., description="注册后总音色数")
+
+
+class DeleteVoiceResponse(BaseModel):
+    spk_id: str
+    deleted: bool
+    voice_count: int
 
 
 def _resolve_voice(voice: str | None) -> str:
@@ -340,7 +356,7 @@ async def info() -> dict:
     # SP10 G4 — 4 service /info 统一返 service/version/capabilities/models
     return {
         "service": "tts-server",
-        "version": "0.16.0",
+        "version": "0.17.0",
         "capabilities": {
             "streaming": True,
             "text_streaming": True,        # agent-worker 探测此字段决定走 ws 流式
@@ -358,9 +374,9 @@ async def info() -> dict:
     }
 
 
-@app.get("/v1/voices")
-async def voices(key: Key = Depends(require_key)) -> dict:
-    return {"voices": _cosyvoice_voices}
+@app.get("/v1/voices", response_model=VoicesListResponse)
+async def voices(key: Key = Depends(require_key)) -> VoicesListResponse:
+    return VoicesListResponse(voices=_cosyvoice_voices)
 
 
 def _tensor_to_pcm_bytes(samples: torch.Tensor) -> bytes:
@@ -467,7 +483,16 @@ async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: st
                 pass
 
 
-@app.post("/v1/tts/stream")
+@app.post(
+    "/v1/tts/stream",
+    # SP11 T2 — binary audio response 用 responses 显式声明 content-type（response_model 不适用）
+    responses={
+        200: {
+            "description": "PCM int16 LE 24kHz mono streaming audio",
+            "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}},
+        },
+    },
+)
 async def tts_stream(req: TTSRequest, request: Request,
                      key: Key = Depends(require_key)):
     if _cosyvoice is None:
@@ -684,14 +709,14 @@ def _validate_spk_id(spk_id: str) -> str:
     return spk_id
 
 
-@app.post("/v1/voices", status_code=201)
+@app.post("/v1/voices", status_code=201, response_model=AddVoiceResponse)
 async def add_voice(
     spk_id: str = Form(..., description="新音色 ID（不能与现有冲突）"),
     prompt_text: str = Form(..., min_length=1, max_length=200,
                             description="参考音频对应的文本（≥3 秒发音）"),
     file: UploadFile = File(..., description="参考音频 wav (16kHz mono 推荐, 3-30 秒)"),
     _auth: None = Depends(_check_admin_auth),
-) -> dict:
+) -> AddVoiceResponse:
     if _cosyvoice is None:
         raise api_error(503, "tts.not_ready", "CosyVoice 尚未加载")
 
@@ -736,14 +761,14 @@ async def add_voice(
     # 刷新 voices 列表
     global _cosyvoice_voices
     _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
-    return {"spk_id": spk_id, "voice_count": len(_cosyvoice_voices)}
+    return AddVoiceResponse(spk_id=spk_id, voice_count=len(_cosyvoice_voices))
 
 
-@app.delete("/v1/voices/{spk_id}")
+@app.delete("/v1/voices/{spk_id}", response_model=DeleteVoiceResponse)
 async def delete_voice(
     spk_id: str,
     _auth: None = Depends(_check_admin_auth),
-) -> dict:
+) -> DeleteVoiceResponse:
     if _cosyvoice is None:
         raise api_error(503, "tts.not_ready", "CosyVoice 尚未加载")
     spk_id = _validate_spk_id(spk_id)
@@ -764,6 +789,6 @@ async def delete_voice(
     global _cosyvoice_voices
     _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
     log.info("[admin] deleted voice spk_id=%s", spk_id)
-    return {"spk_id": spk_id, "deleted": True, "voice_count": len(_cosyvoice_voices)}
+    return DeleteVoiceResponse(spk_id=spk_id, deleted=True, voice_count=len(_cosyvoice_voices))
 
 

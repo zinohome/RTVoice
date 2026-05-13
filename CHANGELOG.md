@@ -9,6 +9,62 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.17.0] — 2026-05-12 — SP11 TLS + Observability polish + TTS schema
+
+把 SP10 留的尾巴 + 部署/运维上的最后一公里收完。**自评从 80% → 85%**：
+观测/契约/TLS 三块从"有但欠"变"实可用"。剩下 5% 需要真三方接入 (SP12)。
+
+### Added
+
+- **`caddy/Caddyfile`** v0.17 重写：完整 `/v1/*` 路由 + WS + web demo + per-service `/openapi/{svc}.json`
+- **`docker-compose.tls.yml`**：tls profile 下 stt/tts/token/realtime **全** ports !override []（Caddy 是唯一 ingress）
+- **`monitoring/alert_rules.yml`**：4 条 Prometheus alerting rules
+  - `RTVoiceServiceDown` — service up==0 持续 2min
+  - `RTVoiceHighErrorRate` — 5xx 比例 > 5%（防数据过少误报）
+  - `RTVoiceAuthFailuresSpike` — 401 > 5/sec（brute force / stale key）
+  - `RTVoiceHighLatencyP95` — p95 > 2s（排 WS）
+  - `RTVoiceKeyQuotaAbuse` — single key > 200 req/min
+- **`monitoring/dashboards/rtvoice-per-key.json`** — 新 Grafana 面板 6 panels：
+  - Top 10 keys by req/min
+  - p95 latency by key
+  - STT audio seconds per key
+  - TTS chars per key
+  - Realtime session duration p50/p95
+  - Auth failure rate
+- **TTS Pydantic response models** (`VoicesListResponse`, `AddVoiceResponse`, `DeleteVoiceResponse`)
+- **`POST /v1/tts/stream` 显式 OpenAPI `responses=`** 声明 `application/octet-stream` binary audio
+
+### Changed
+
+- `monitoring/prometheus.yml` 加 `rule_files: [alert_rules.yml]`
+- `docker-compose.monitoring.yml` 挂 alert_rules.yml 进 prometheus 容器
+- 4 个 TTS endpoint (`GET/POST/DELETE /v1/voices`) 加 `response_model=`（D2 finding 残项收尾）
+- 4 service `version="0.17.0"` 全栈对齐
+
+### Fixed
+
+- D2 残项：tts 业务端点 response 不再 `Record<string, any>`（含完整 Pydantic schema）
+- 部署/运维评分缺口（5.5 → 9）：TLS + alerting + Grafana 面板三件齐
+
+### 验证（autonomous）
+
+- ✅ realtime 78 + common 56 + contract 3+1skip 全过
+- ✅ prometheus.yml + alert_rules.yml YAML 语法
+- ✅ rtvoice-per-key.json Grafana 6 panels 加载
+- ⏳ prod TLS 真试 (Caddy `tls internal` 自签 → 客户端要么 `curl -k` 要么导入 root CA)；进 MANUAL_VALIDATION_QUEUE
+
+### 设计决策
+
+- D-2026-05-12-TLS.1：选 `tls internal`（用户 2026-05-12 选 b）— 无域名 LAN 内自签；客户端首次走 `docker exec rtvoice-caddy cat /data/caddy/pki/authorities/local/root.crt` 导入
+- D-2026-05-12-TLS.2：Caddy 后 stt/tts/token/realtime **全** 不暴露 host port — 单 ingress 防绕过 / 攻击面缩小（livekit 仍直接暴露 WebRTC）
+- D-2026-05-12-TLS.3：`/metrics` `/health` 不进 Caddy 路由 — 监控走 docker network 内 Prometheus 直抓，不外露
+- D-2026-05-12-OBS.1：alerting rules 故意保守（5 条）— 避免噪音；alertmanager 链路 SP12+ 接
+- D-2026-05-12-OBS.2：Grafana per-key dashboard 单独文件不动旧 21-panel rtvoice.json（关注点分离）
+
+详见 [SP11 设计](./docs/superpowers/specs/2026-05-12-sp11-tls-and-polish-design.md)（如有）。
+
+---
+
 ## [0.16.0] — 2026-05-12 — SP10 G3 per-key metrics + G4 真 OpenAPI
 
 按 05-12 早写的 [G3/G4 done 硬标准](./docs/superpowers/specs/2026-05-12-g3-g4-done-criteria.md) **严格落地**。SP8 D2/D3 dogfood 暴露的 securitySchemes 缺失、`Record<str,any>` response、`info.version` 错位、`grep key_id` 0 命中等头号 finding，本 SP 一并修。

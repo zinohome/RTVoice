@@ -1,55 +1,99 @@
-# RTVoice Caddy 反代模板（v0.6.1）
+# RTVoice Caddy 反代（v0.17 / SP11）
 #
-# 选一种部署模式：
-#   A) 公网 + 域名 + Let's Encrypt 自动证书（推荐）
-#   B) 内网 IP + 本地自签证书（Caddy 'tls internal'，客户端要信任 root CA）
+# 内网 IP + Caddy 内置 'tls internal' 自签 CA。
+# 客户端首次访问需信任 Caddy 自签根 CA：
+#   docker exec rtvoice-caddy cat /data/caddy/pki/authorities/local/root.crt > caddy-root.crt
+# 然后导入到客户端系统信任链（OS / 浏览器），或 curl -k 跳过校验。
 #
-# Bearer 鉴权由后端 stt-server / tts-server 负责（RTVOICE_API_KEY），
-# Caddy 这层只做 TLS 终止 + 路径反代。
+# 所有 RTVoice service 都在 docker 内部，**不**对宿主直接 expose（见 docker-compose.tls.yml
+# 的 ports: !override []）；Caddy 是唯一 ingress（除 livekit-server 的 WebRTC）。
+#
+# 路由（一个 :443 vhost，按 path 分发）：
+#   /v1/tokens                    → token-server:8000
+#   /v1/sessions* /v1/realtime/*  → realtime-server:9000
+#   /v1/asr                       → stt-server:9090 (WS)
+#   /v1/tts/* /v1/voices*         → tts-server:9880
+#   /static/* /                   → realtime-server:9000 (web demo)
+#   /openapi/{svc}.json           → 各 service /openapi.json（codegen 友好聚合）
+#
+# 故意不暴露：
+#   /metrics  /health → 不外露（监控走 docker network 内 Prometheus 直抓）
 
-# ============================================================
-# 模式 A: 公网域名（取消注释，把 voice.example.com 换成你的域名）
-# ============================================================
-# voice.example.com {
-#     # /asr 路径反代到 STT WS
-#     handle /asr* {
-#         reverse_proxy stt-server:9090
-#     }
-#     # /tts/* 和 /voices/* 反代到 TTS HTTP
-#     handle /tts/* {
-#         reverse_proxy tts-server:9880
-#     }
-#     handle /voices* {
-#         reverse_proxy tts-server:9880
-#     }
-#     # 默认拒绝
-#     respond 404
-#     # access log
-#     log {
-#         output file /data/access.log {
-#             roll_size 50mb
-#             roll_keep 5
-#         }
-#     }
-# }
+{
+    auto_https disable_redirects
+}
 
-# ============================================================
-# 模式 B: 内网 IP / 本地自签（默认；改 IP 即可用）
-# ============================================================
-# 客户端首次需信任 caddy 自签的 root CA：
-#   docker exec rtvoice-caddy cat /data/caddy/pki/authorities/local/root.crt
-# 拷贝到调用机的系统信任链
 :443 {
     tls internal
 
-    handle /asr* {
+    # --- realtime-server (web demo + session + WS) ---
+    handle_path /static/* {
+        reverse_proxy realtime-server:9000 {
+            rewrite /static{uri}
+        }
+    }
+    handle /v1/sessions* {
+        reverse_proxy realtime-server:9000
+    }
+    handle /v1/realtime/* {
+        reverse_proxy realtime-server:9000
+    }
+
+    # --- token-server ---
+    handle /v1/tokens {
+        reverse_proxy token-server:8000
+    }
+
+    # --- stt-server (WS) ---
+    handle /v1/asr {
         reverse_proxy stt-server:9090
     }
-    handle /tts/* {
+
+    # --- tts-server ---
+    handle /v1/tts/* {
         reverse_proxy tts-server:9880
     }
-    handle /voices* {
+    handle /v1/voices* {
         reverse_proxy tts-server:9880
     }
-    respond 404
+
+    # --- capability discovery: /info 走 realtime ---
+    handle /info {
+        reverse_proxy realtime-server:9000
+    }
+
+    # --- /openapi/{svc}.json 聚合 ---
+    handle /openapi/token.json {
+        rewrite * /openapi.json
+        reverse_proxy token-server:8000
+    }
+    handle /openapi/realtime.json {
+        rewrite * /openapi.json
+        reverse_proxy realtime-server:9000
+    }
+    handle /openapi/stt.json {
+        rewrite * /openapi.json
+        reverse_proxy stt-server:9090
+    }
+    handle /openapi/tts.json {
+        rewrite * /openapi.json
+        reverse_proxy tts-server:9880
+    }
+
+    # 默认入口：realtime web demo
+    handle / {
+        reverse_proxy realtime-server:9000
+    }
+
+    # 其他都 404
+    handle {
+        respond 404
+    }
+
+    log {
+        output file /data/access.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+    }
 }

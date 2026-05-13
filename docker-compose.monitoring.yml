@@ -20,6 +20,7 @@ services:
     networks: [rtvoice_net]
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - rtvoice_prometheus_data:/prometheus
     ports:
       - "${BIND_HOST:-127.0.0.1}:9091:9090"  # 9090 给 stt-server，避开
