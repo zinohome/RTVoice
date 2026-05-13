@@ -1,4 +1,13 @@
-# SP11 TLS — handshake internal_error finding（待 SP12 修）
+# SP11 TLS — handshake internal_error finding（**SP12 已修** ✅）
+
+**SP12 解决（commit `bec8b20`）**：根因是 curl 对 IP 直访不发 SNI，Caddy 用
+LocalAddr (容器 IP `172.18.0.10`) 找 cert 找不到。修：global `default_sni 192.168.66.163`
+让无 SNI 请求默认走该主体的 cert。**HTTPS 全 5 端点 200 + POST /v1/tokens with auth 200。**
+
+---
+（以下原 SP11 finding 内容留作排查参考）
+
+
 
 **症状**：Caddy 启动正常 + 自签 cert 三个 SAN (`192.168.66.163` / `127.0.0.1` / `localhost`) 都成功 obtain。
 但 host 上 `curl -sk https://...` 全 HTTP 000，openssl s_client 能拿到 cert chain

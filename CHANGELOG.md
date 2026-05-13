@@ -9,6 +9,34 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.17.1] — 2026-05-13 — SP12 TLS handshake fix + Grafana mount cleanup
+
+SP11 的两个运维缺口收尾。
+
+### Fixed
+
+- **Caddy `default_sni 192.168.66.163`**：之前 curl/无 SNI 请求 → caddy 用容器 IP 找 cert
+  → `no certificate matching` → TLS internal_error。default_sni 让无 SNI 走主体 cert。
+  HTTPS 全 5 路径 + POST /v1/tokens 全 200 实测通过。
+- **删 base `docker-compose.yml` 中重复的 prometheus + grafana 定义**：
+  两份配置 volume 路径冲突 (`monitoring/grafana/*` vs `monitoring/grafana-provisioning/*`)
+  导致 grafana 启动 `read-only file system` mount error。
+  现在 monitoring overlay 是唯一来源；grafana 启动正常。
+
+### Verified
+
+- ✅ https://192.168.66.163/info → 200
+- ✅ https://192.168.66.163/openapi/{token,realtime,stt,tts}.json → 4×200
+- ✅ Bearer auth via Caddy → 200
+- ✅ Grafana up + per-key dashboard 自动 provision
+- ✅ Prometheus 5 alerting rules loaded
+
+### 完成度更新
+
+部署/运维 7.5 → **9**（TLS 真启 + alerting + Grafana 都 ✅）。综合 ~ **85%**。
+
+---
+
 ## [0.17.0] — 2026-05-12 — SP11 TLS + Observability polish + TTS schema
 
 把 SP10 留的尾巴 + 部署/运维上的最后一公里收完。**自评从 80% → 85%**：
