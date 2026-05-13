@@ -25,15 +25,15 @@
     servers {
         protocols h1 h2
     }
+    # SP12 关键修：curl 等 client 对 IP 直访不发 SNI；caddy 用 LocalAddr
+    # 容器 IP（172.18.0.x）找 cert 找不到 → TLS internal_error alert。
+    # default_sni 让无 SNI 请求默认走 192.168.66.163 主体。
+    default_sni 192.168.66.163
     # 自签 CA 必须显式枚举要颁的主体 / IP
     pki {
         ca local {
             name "RTVoice Internal CA"
         }
-    }
-    # SP12 排查：DEBUG log 看 handshake 细节
-    log default {
-        level DEBUG
     }
 }
 
