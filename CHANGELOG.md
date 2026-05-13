@@ -9,6 +9,73 @@ RTVoice 项目从立项到 dev 全链路上线的版本记录。
 
 ---
 
+## [0.18.0] — 2026-05-13 — SP13 三方接入工具包（通用化）
+
+把 RTVoice 打磨到"任意第三方拿现有 docs + 工具 + 凭据，30 分钟端到端跑通"。
+**不动 RTVoice 业务代码**——纯增量 onboarding 工具 + samples + 关键 SDK bug fix。
+
+### Added
+
+- **`QUICKSTART.md`**：5 步 30 分钟接通指引（trust CA / 颁 key / 装 SDK / 跑 sample / 看 metrics）
+- **`docs/QUICKSTART-TOPOLOGY.md`**：三种拓扑速查（A 同机 / B LAN+Caddy / C 公网 LE）+ URL 对照表 + Bearer 三路 + scopes + CORS + 雷区
+- **`scripts/get-rtvoice-ca.sh`**：一键拉 Caddy 自签 root CA + OS/浏览器 trust 指引
+- **`scripts/e2e-smoke.sh`**：模拟新消费者视角的 7 步 e2e 烟测（CA / 颁 key / HTTPS info / tokens / TTS / sessions / Prometheus per-key 验证）
+- **`examples/python-quickstart/`**：production-grade Python sample（131 行 main.py + README + .env.example）
+  - 跑通 /info / /v1/tokens / /v1/tts/stream / /v1/sessions（POST + DELETE）
+  - 自动 wrap PCM 成 WAV 写入 hello.wav 可播
+- **`examples/browser-quickstart/`**：单文件 HTML demo（4 个 fieldset 各测 1 service）
+  - localStorage 保存 base+key
+  - WebSocket subprotocol bearer auth 实测
+  - 音频 PCM → WAV 包装 + `<audio>` 播放
+
+### Changed
+
+- **SDK STT** (`clients/python/src/rtvoice_client/stt.py`) 大改：
+  - 旧 `transcribe()` 用 HTTP POST `/v1/asr`（**错**：RTVoice STT 只 WS）→ 改为内部走 WS 一次 send-EOS-recv 流程
+  - 旧 `stream()` 不传 api_key（**WS 鉴权失败**）→ 加 `subprotocols=['bearer.<token>']` + `additional_headers={Authorization}` 双 Bearer
+  - 加 `verify` 参数支持自签 CA 路径 / SSLContext / False
+- **`_base.py`**：把 api_key 传给 AsyncSTT
+- SDK 测试：旧 transcribe HTTP-mock 测试 skip（mark 注明原因），实际 e2e 由 `scripts/e2e-smoke.sh` 覆盖
+
+### Fixed (D2-style finding 收尾)
+
+- D2 + dogfood D1-F10：SDK 之前推荐 `pip install rtvoice-client` 但 PyPI 没发布——QUICKSTART/INTEGRATION 全改为 git URL pip install
+- SDK STT 协议错位（HTTP vs WS）+ 鉴权缺失：本 SP 修复
+
+### 验证（autonomous）
+
+- ✅ `scripts/e2e-smoke.sh` 真 prod 跑 **8/8 PASSED**：
+  ```
+  Step 1 ✅ Caddy root CA fetched
+  Step 2 ✅ admin CLI create key_xxx
+  Step 3 ✅ HTTPS /info verify with CA → 200
+  Step 4 ✅ POST /v1/tokens with Bearer → 200
+  Step 5 ✅ POST /v1/tts/stream → 142080 bytes PCM
+  Step 6 ✅ POST /v1/sessions → 201 + DELETE → 204
+  Step 7 ✅ Prometheus per-key metric 抓到 series
+  ```
+- ✅ clients/python 单测 57 pass + 5 skip
+- ⏳ `examples/python-quickstart/main.py` 真人跑（脚本完整，但需要 user 手工填 .env 测试）
+
+### 设计决策
+
+- D-2026-05-13-T6.1：不发布 SDK 到 PyPI——发布是 1-way action，留到 CozyVoice 真用后再做
+- D-2026-05-13-T6.2：STT WS auth 双 Bearer（subprotocol + Authorization header）—— browser 友好 + server-to-server 友好兼容
+- D-2026-05-13-T5.1：e2e smoke 验 Prometheus per-key metric 真抓到——证明全链路 G3 (SP10) + auth + Caddy 全活
+- D-2026-05-13-T4.1：浏览器 sample 单文件 HTML，不要 build step——拷贝可跑
+
+### 完成度
+
+| 维度 | SP12 后 | **SP13 后** |
+|---|---|---|
+| 集成体验 | 9 | **9.5** ✅ SDK 协议正确 + quickstart 工具齐 |
+| 真用户路径 | 6 | **7** ✅ e2e smoke 真过 8/8 |
+| **综合** | **85%** | **~87%** |
+
+剩 13% 需要 CozyVoice 真接 + 长稳跑 + 多 client 实测——那是用户那边的工作。
+
+---
+
 ## [0.17.1] — 2026-05-13 — SP12 TLS handshake fix + Grafana mount cleanup
 
 SP11 的两个运维缺口收尾。

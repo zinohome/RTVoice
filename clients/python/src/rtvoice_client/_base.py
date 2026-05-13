@@ -86,7 +86,8 @@ class AsyncClient:
     def stt(self):
         if self._stt is None:
             from rtvoice_client.stt import AsyncSTT
-            self._stt = AsyncSTT(self._http, self._urls["stt"])
+            # SP13 T6：传 api_key 给 STT，让 WS stream 用 subprotocol bearer 鉴权
+            self._stt = AsyncSTT(self._http, self._urls["stt"], self._api_key)
         return self._stt
 
     @property

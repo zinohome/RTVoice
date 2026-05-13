@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RTVoice — Browser Quickstart</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+  h1 { font-size: 22px; }
+  fieldset { border: 1px solid #ddd; padding: 12px; margin: 8px 0; }
+  label { display: block; margin: 8px 0; font-size: 14px; }
+  input[type=text], input[type=password] { width: 100%; padding: 6px; box-sizing: border-box; font-family: monospace; }
+  button { padding: 6px 14px; cursor: pointer; }
+  pre.log { background: #f4f4f4; padding: 8px; max-height: 240px; overflow: auto; font-size: 12px; }
+  .ok { color: #1a7f1a; }
+  .err { color: #d33; }
+  .info { color: #555; }
+</style>
+</head>
+<body>
+<h1>RTVoice — Browser Quickstart</h1>
+<p>单文件 HTML demo，验证 RTVoice 在你浏览器里能否端到端接通。<br>
+   <strong>前提</strong>：访问 <a href="https://192.168.66.163/static/" target="_blank">https://192.168.66.163/static/</a> 一次让浏览器导入 Caddy 自签 CA；或运行 <code>scripts/get-rtvoice-ca.sh</code> 后手动 trust。</p>
+
+<fieldset>
+  <legend>Config</legend>
+  <label>RTVoice base URL <input id="base" type="text" value="https://192.168.66.163"></label>
+  <label>Bearer (API key secret) <input id="key" type="password" placeholder="paste from rtvoice-admin create"></label>
+  <button onclick="saveCfg()">Save</button>
+  <span id="cfg-status" class="info"></span>
+</fieldset>
+
+<fieldset>
+  <legend>1) /info — health + version</legend>
+  <button onclick="testInfo()">Test /info</button>
+  <pre id="log-info" class="log"></pre>
+</fieldset>
+
+<fieldset>
+  <legend>2) /v1/tokens — LiveKit JWT</legend>
+  <label>Room <input id="room" type="text" value="browser-quickstart"></label>
+  <label>Identity <input id="identity" type="text" value="alice"></label>
+  <button onclick="testTokens()">POST /v1/tokens</button>
+  <pre id="log-tokens" class="log"></pre>
+</fieldset>
+
+<fieldset>
+  <legend>3) /v1/tts/stream — synthesize audio</legend>
+  <label>Text <input id="text" type="text" value="你好，浏览器接入测试通过。"></label>
+  <button onclick="testTTS()">POST /v1/tts/stream + play</button>
+  <pre id="log-tts" class="log"></pre>
+  <audio id="audio" controls></audio>
+</fieldset>
+
+<fieldset>
+  <legend>4) /v1/realtime/{sid} — WS subprotocol echo</legend>
+  <button onclick="testRealtime()">Create session + connect WS</button>
+  <pre id="log-rt" class="log"></pre>
+</fieldset>
+
+<script>
+function getCfg() {
+  return {
+    base: document.getElementById('base').value.replace(/\/$/, ''),
+    key:  document.getElementById('key').value.trim(),
+  };
+}
+function saveCfg() {
+  const c = getCfg();
+  localStorage.setItem('rtvoice_cfg', JSON.stringify(c));
+  document.getElementById('cfg-status').textContent =
+    'saved (base=' + c.base + ', key=' + (c.key ? '<hidden>' : 'EMPTY') + ')';
+}
+(function loadCfg() {
+  try {
+    const c = JSON.parse(localStorage.getItem('rtvoice_cfg') || '{}');
+    if (c.base) document.getElementById('base').value = c.base;
+    if (c.key)  document.getElementById('key').value = c.key;
+  } catch (e) {}
+})();
+
+function log(id, line, cls) {
+  const el = document.getElementById(id);
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = line + '\n';
+  el.appendChild(span);
+  el.scrollTop = el.scrollHeight;
+}
+function logClear(id) {
+  const el = document.getElementById(id);
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
+function authHdr() {
+  const c = getCfg();
+  return c.key ? { 'Authorization': 'Bearer ' + c.key } : {};
+}
+
+async function testInfo() {
+  logClear('log-info');
+  const { base } = getCfg();
+  try {
+    const r = await fetch(base + '/info');
+    const body = await r.json();
+    log('log-info', 'HTTP ' + r.status, r.ok ? 'ok' : 'err');
+    log('log-info', JSON.stringify(body, null, 2));
+  } catch (e) {
+    log('log-info', 'ERR: ' + e + '\n如果浏览器看 ERR_CERT_AUTHORITY_INVALID：先访问 ' + base + '/static/ 一次让浏览器 trust。', 'err');
+  }
+}
+
+async function testTokens() {
+  logClear('log-tokens');
+  const { base } = getCfg();
+  const room = document.getElementById('room').value;
+  const identity = document.getElementById('identity').value;
+  try {
+    const r = await fetch(base + '/v1/tokens', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, authHdr()),
+      body: JSON.stringify({ room: room, identity: identity }),
+    });
+    const body = await r.json();
+    log('log-tokens', 'HTTP ' + r.status, r.ok ? 'ok' : 'err');
+    if (r.ok) {
+      log('log-tokens', 'JWT len=' + body.token.length + ' room=' + body.room);
+    } else {
+      log('log-tokens', JSON.stringify(body), 'err');
+    }
+  } catch (e) {
+    log('log-tokens', 'ERR: ' + e, 'err');
+  }
+}
+
+async function testTTS() {
+  logClear('log-tts');
+  const { base } = getCfg();
+  const text = document.getElementById('text').value;
+  try {
+    const r = await fetch(base + '/v1/tts/stream', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, authHdr()),
+      body: JSON.stringify({ text: text, voice: 'default_zh_female', speed: 1.0 }),
+    });
+    log('log-tts', 'HTTP ' + r.status, r.ok ? 'ok' : 'err');
+    if (!r.ok) {
+      log('log-tts', await r.text(), 'err');
+      return;
+    }
+    const buf = await r.arrayBuffer();
+    log('log-tts', buf.byteLength + ' bytes PCM, wrap WAV, audio element');
+    const wav = wrapPcmAsWav(new Int16Array(buf), 24000);
+    const blob = new Blob([wav], { type: 'audio/wav' });
+    document.getElementById('audio').src = URL.createObjectURL(blob);
+  } catch (e) {
+    log('log-tts', 'ERR: ' + e, 'err');
+  }
+}
+
+async function testRealtime() {
+  logClear('log-rt');
+  const { base, key } = getCfg();
+  try {
+    const r = await fetch(base + '/v1/sessions', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, authHdr()),
+      body: JSON.stringify({ voice: 'default_zh_female' }),
+    });
+    if (!r.ok) {
+      log('log-rt', 'HTTP ' + r.status + ': ' + (await r.text()), 'err');
+      return;
+    }
+    const sess = await r.json();
+    log('log-rt', 'session ' + sess.session_id, 'ok');
+    log('log-rt', 'connecting WS with subprotocol bearer.<token> ...');
+    const ws = new WebSocket(sess.ws_url, ['bearer.' + key]);
+    ws.onopen = function () {
+      log('log-rt', 'WS onopen OK, protocol=' + ws.protocol, 'ok');
+    };
+    ws.onclose = function (e) {
+      log('log-rt', 'WS closed code=' + e.code + ' reason=' + (e.reason || '-'),
+          e.code === 1000 ? '' : 'err');
+    };
+    ws.onerror = function () { log('log-rt', 'WS error', 'err'); };
+    setTimeout(function () {
+      try { ws.close(); } catch (err) {}
+      fetch(base + '/v1/sessions/' + sess.session_id,
+            { method: 'DELETE', headers: authHdr() });
+    }, 30000);
+  } catch (e) {
+    log('log-rt', 'ERR: ' + e, 'err');
+  }
+}
+
+function wrapPcmAsWav(pcm, sampleRate) {
+  const numSamples = pcm.length;
+  const byteSize = numSamples * 2;
+  const buf = new ArrayBuffer(44 + byteSize);
+  const view = new DataView(buf);
+  function w(off, str) {
+    for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i));
+  }
+  w(0, 'RIFF');  view.setUint32(4, 36 + byteSize, true);
+  w(8, 'WAVE');  w(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  w(36, 'data');
+  view.setUint32(40, byteSize, true);
+  new Int16Array(buf, 44, numSamples).set(pcm);
+  return buf;
+}
+</script>
+</body>
+</html>
