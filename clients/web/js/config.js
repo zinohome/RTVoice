@@ -1,5 +1,5 @@
 const cfg = {
-  get base() { return localStorage.getItem("rtvoice_base") || "http://127.0.0.1:9000"; },
+  get base() { return localStorage.getItem("rtvoice_base") || window.location.origin; },
   set base(v) { localStorage.setItem("rtvoice_base", v); },
   get bearer() { return localStorage.getItem("rtvoice_bearer") || ""; },
   set bearer(v) { localStorage.setItem("rtvoice_bearer", v); },
