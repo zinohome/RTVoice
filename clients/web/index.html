@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>RTVoice Web Demo</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <header>
@@ -14,6 +14,7 @@
       <button class="tab" data-tab="tts">TTS</button>
       <button class="tab" data-tab="realtime">Realtime</button>
       <button class="tab" data-tab="tokens">Tokens</button>
+      <a href="/admin/" class="tab" style="text-decoration:none;color:inherit;border-bottom:2px solid transparent;padding:8px 12px">Admin</a>
     </nav>
   </header>
 
@@ -137,6 +138,6 @@
     <div id="log"></div>
   </aside>
 
-  <script type="module" src="js/app.js"></script>
+  <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>
