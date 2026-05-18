@@ -164,13 +164,25 @@ docker compose --profile prod --profile monitoring up -d
 
 > 前提：需要处于内网环境（或通过 VPN 连入 `192.168.66.x` 网段）。
 
+测试环境使用 Caddy 反向代理 + 自签 TLS 证书，**唯一对外入口为 HTTPS 443 端口**（LiveKit 除外）。各服务内部端口不对外暴露，请使用下表中的代理地址访问：
+
 | 服务 | 地址 | 说明 |
 |---|---|---|
-| **前端测试页** | `http://192.168.66.163:8000/` | Token Server 内置测试页，可直接在浏览器打开进行语音对话 |
-| **Realtime Voice API** | `http://192.168.66.163:9000/` | 创建 session：`POST /v1/sessions`；WebSocket：`ws://192.168.66.163:9000/v1/realtime/{session_id}` |
-| **STT API** | `ws://192.168.66.163:9090/v1/asr` | 流式语音识别 WebSocket |
-| **TTS API** | `http://192.168.66.163:9880/v1/tts/stream` | 流式语音合成 HTTP |
-| **LiveKit SFU** | `ws://192.168.66.163:7880` | WebRTC 信令（Agent Worker 模式使用） |
+| **前端测试页** | `https://192.168.66.163/` | Web Demo 语音对话页面 |
+| **Admin 管理页** | `https://192.168.66.163/admin/` | 8-tab 管理 UI（会话、配置、监控等） |
+| **Realtime Voice API** | `https://192.168.66.163/v1/sessions`（HTTP）<br>`wss://192.168.66.163/v1/realtime/{session_id}`（WebSocket） | 创建会话 / 实时语音通道 |
+| **STT API** | `wss://192.168.66.163/v1/asr` | 流式语音识别 WebSocket |
+| **TTS API** | `https://192.168.66.163/v1/tts/stream` | 流式语音合成 HTTP |
+| **LiveKit SFU** | `ws://192.168.66.163:7880` | WebRTC 信令（此端口独立暴露，不经过 Caddy） |
+
+#### 自签 TLS 证书说明
+
+测试环境的 Caddy 使用 `tls internal` 生成自签 CA 证书（IP 地址无法申请公开可信证书）。首次通过浏览器访问 `https://192.168.66.163/` 时会弹出"连接不安全"警告：
+
+- **快速方式**：点击「高级」→「继续访问（不安全）」即可进入页面。
+- **免警告方式**：从测试服务器导出 Caddy root CA 证书（`/data/caddy/pki/authorities/local/root.crt`），导入到本机的系统/浏览器信任证书库。
+
+使用 API 客户端（curl、Postman 等）时，需加 `-k`（curl）或关闭 SSL 校验，否则请求会因证书不受信任而失败。
 
 **鉴权**：如测试环境已配置 `RTVOICE_API_KEY`，访问 STT/TTS/Realtime API 需在请求头带 `Authorization: Bearer <key>`。测试页（Token Server）若 `DEV_AUTO_INJECT_KEY=true` 则自动注入，否则需手动输入。具体 key 值请向运维确认。
 
