@@ -146,6 +146,36 @@ docker compose --profile prod --profile monitoring up -d
 
 ---
 
+## 🏷 环境使用约定
+
+| 环境 | 用途 | 地址 | GPU |
+|---|---|---|---|
+| **开发机（本机）** | 部署前预检：验证链路、状态机、编排逻辑 | `127.0.0.1` | 无 |
+| **测试环境** | 功能测试：验证模型质量、端到端语音效果 | `192.168.66.163` | NVIDIA RTX 3060 12GB |
+
+### 规则
+
+1. **开发机本机仅做"部署到测试环境前的预检"**，不做功能测试。本机无 GPU，STT/TTS/LLM 使用 mock 或 CPU 小模型，测试结果不代表真实效果。
+2. **功能测试统一在 `192.168.66.163`（测试环境）进行。** 该环境有 GPU，运行 prod profile，使用真实引擎（sherpa-onnx GPU、Fun-CosyVoice 3、Ollama/vLLM）。
+3. **本机不应长期运行 `docker-compose`。** 预检完成后请执行 `docker compose down` 释放资源，避免"本地能跑就以为没问题"的误判。
+4. **所有功能验收以测试环境结果为准，本机运行结果不作为通过依据。**
+
+### 测试环境访问信息
+
+> 前提：需要处于内网环境（或通过 VPN 连入 `192.168.66.x` 网段）。
+
+| 服务 | 地址 | 说明 |
+|---|---|---|
+| **前端测试页** | `http://192.168.66.163:8000/` | Token Server 内置测试页，可直接在浏览器打开进行语音对话 |
+| **Realtime Voice API** | `http://192.168.66.163:9000/` | 创建 session：`POST /v1/sessions`；WebSocket：`ws://192.168.66.163:9000/v1/realtime/{session_id}` |
+| **STT API** | `ws://192.168.66.163:9090/v1/asr` | 流式语音识别 WebSocket |
+| **TTS API** | `http://192.168.66.163:9880/v1/tts/stream` | 流式语音合成 HTTP |
+| **LiveKit SFU** | `ws://192.168.66.163:7880` | WebRTC 信令（Agent Worker 模式使用） |
+
+**鉴权**：如测试环境已配置 `RTVOICE_API_KEY`，访问 STT/TTS/Realtime API 需在请求头带 `Authorization: Bearer <key>`。测试页（Token Server）若 `DEV_AUTO_INJECT_KEY=true` 则自动注入，否则需手动输入。具体 key 值请向运维确认。
+
+---
+
 ## License & 贡献
 
 [LICENSE](./LICENSE) · [CONTRIBUTING.md](./CONTRIBUTING.md)
