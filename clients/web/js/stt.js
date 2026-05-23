@@ -43,7 +43,7 @@ export function setupSTT() {
     log("evt", `STT: captured ${merged.byteLength} bytes`);
 
     try {
-      const r = await fetch(`${cfg.base.replace(/:9000$/, ":9090")}/v1/asr?sample_rate=16000`, {
+      const r = await fetch(`${cfg.base}/v1/asr?sample_rate=16000`, {
         method: "POST",
         headers: {
           "Content-Type": "application/octet-stream",

@@ -14,9 +14,7 @@ export function setupTokens() {
     }
     status.textContent = "请求中…";
     try {
-      const u = new URL(cfg.base);
-      u.port = "8000";
-      const r = await fetch(`${u.toString().replace(/\/$/, "")}/v1/tokens`, {
+      const r = await fetch(`${cfg.base.replace(/\/$/, "")}/v1/tokens`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...cfg.authHeaders() },
         body: JSON.stringify({ identity, room, ttl_minutes: ttl }),

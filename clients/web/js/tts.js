@@ -31,7 +31,7 @@ export function setupTTS() {
     let totalBytes = 0;
     const startedAt = Date.now();
     try {
-      const r = await fetch(`${cfg.base.replace(/:9000$/, ":9880")}/v1/tts/stream`, {
+      const r = await fetch(`${cfg.base}/v1/tts/stream`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
