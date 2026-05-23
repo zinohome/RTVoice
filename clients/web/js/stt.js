@@ -43,24 +43,47 @@ export function setupSTT() {
     log("evt", `STT: captured ${merged.byteLength} bytes`);
 
     try {
-      const r = await fetch(`${cfg.base}/v1/asr?sample_rate=16000`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/octet-stream",
-          ...cfg.authHeaders(),
-        },
-        body: merged.buffer,
-      });
-      if (!r.ok) {
-        const body = await r.text();
-        log("err", `STT: HTTP ${r.status} ${body.slice(0, 100)}`);
-        status.textContent = `失败 (${r.status})`;
-        return;
-      }
-      const j = await r.json();
-      resultIn.value = j.text || "";
-      log("user", `STT: ${j.text}`);
-      status.textContent = "完成";
+      const cfgU = new URL(cfg.base);
+      const wsProto = cfgU.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${wsProto}//${cfgU.host}/v1/asr`;
+      const protocols = cfg.bearer ? [`bearer.${cfg.bearer}`] : [];
+      const ws = new WebSocket(wsUrl, protocols);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        ws.send(merged.buffer);
+        ws.send("EOS");
+      };
+
+      ws.onmessage = (e) => {
+        if (typeof e.data !== "string") return;
+        let ev;
+        try { ev = JSON.parse(e.data); } catch { return; }
+        if (ev.type === "partial") {
+          status.textContent = `[partial] ${ev.text}`;
+        } else if (ev.type === "final") {
+          resultIn.value = ev.text || "";
+          log("user", `STT: ${ev.text}`);
+          status.textContent = "完成";
+          ws.close();
+        } else if (ev.type === "error") {
+          log("err", `STT: ${ev.message}`);
+          status.textContent = "失败";
+          ws.close();
+        }
+      };
+
+      ws.onerror = () => {
+        log("err", "STT: WebSocket 连接失败");
+        status.textContent = "失败";
+      };
+
+      ws.onclose = (e) => {
+        if (e.code !== 1000 && status.textContent === "识别中…") {
+          log("err", `STT: ws closed ${e.code}`);
+          status.textContent = "失败";
+        }
+      };
     } catch (e) {
       log("err", `STT: ${e.message}`);
       status.textContent = "失败";
