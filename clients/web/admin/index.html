@@ -157,17 +157,75 @@
 
   <!-- ============ Voices tab ============ -->
   <div x-show="tab === 'voices'">
+
+    <!-- TTS Admin Key -->
     <div class="card">
-      <h3>Available TTS voices</h3>
-      <button class="btn ghost" @click="loadVoices()">Refresh</button>
-      <ul>
-        <template x-for="v in voices" :key="v">
-          <li><code x-text="v"></code></li>
-        </template>
-      </ul>
-      <p style="font-size:12px;color:#888">Voice clone admin endpoint 需要 TTS_ADMIN_API_KEY 配置（与 admin key 不同；env 配）。</p>
+      <h3>TTS Admin Key</h3>
+      <p style="font-size:13px;color:#666">用于 voice clone 写操作（上传/删除）。读取音色列表只需 admin key。<br>
+        Key 存浏览器 localStorage，<strong>不上传服务器</strong>。</p>
+      <div class="row" style="align-items:flex-end">
+        <label>TTS_ADMIN_API_KEY
+          <input type="password" x-model="ttsAdminKey" placeholder="在 .env 里配置的值">
+        </label>
+        <div>
+          <button class="btn" @click="saveTtsAdminKey()" style="margin-top:22px">Save</button>
+          <button class="btn ghost" @click="clearTtsAdminKey()" x-show="ttsAdminKey" style="margin-top:22px;margin-left:6px">Clear</button>
+        </div>
+      </div>
+      <p style="font-size:12px;margin-top:6px" x-show="ttsAdminKey">
+        <span class="pill ok">✓ TTS admin key set</span>
+      </p>
+    </div>
+
+    <!-- Upload voice clone -->
+    <div class="card">
+      <h3>上传音色（Voice Clone）</h3>
+      <p style="font-size:13px;color:#666">参考音频推荐 3–30 秒，16kHz mono WAV。需要 TTS Admin Key。</p>
+      <div class="row">
+        <label>Speaker ID (spk_id)
+          <input type="text" x-model="newVoice.spk_id" placeholder="my_speaker">
+        </label>
+        <label>参考文本 (prompt_text)
+          <input type="text" x-model="newVoice.prompt_text" placeholder="参考音频里说的话">
+        </label>
+      </div>
+      <label style="margin-top:8px">参考音频（WAV）
+        <input type="file" @change="onVoiceFile($event)" accept="audio/*,.wav">
+      </label>
+      <div style="margin-top:10px">
+        <button class="btn" @click="uploadVoice()" :disabled="!ttsAdminKey || !newVoice.spk_id || !newVoice.prompt_text || !newVoiceFile">
+          上传音色
+        </button>
+        <span x-show="!ttsAdminKey" style="font-size:12px;color:var(--err);margin-left:10px">需先设置 TTS Admin Key</span>
+      </div>
+      <pre class="log" x-show="logs.voiceUpload" x-text="logs.voiceUpload"></pre>
+    </div>
+
+    <!-- Voice list -->
+    <div class="card">
+      <h3>音色列表 <button class="btn ghost" @click="loadVoices()" style="float:right;font-size:12px">Refresh</button></h3>
+      <table>
+        <thead><tr><th>spk_id</th><th>操作</th></tr></thead>
+        <tbody>
+          <template x-for="v in voices" :key="v">
+            <tr>
+              <td><code x-text="v"></code></td>
+              <td>
+                <button class="btn danger" style="font-size:11px;padding:3px 8px"
+                        x-show="ttsAdminKey"
+                        @click="deleteVoice(v)">删除</button>
+                <span x-show="!ttsAdminKey" style="font-size:11px;color:#aaa">设置 TTS Admin Key 后可删除</span>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="voices.length === 0">
+            <td colspan="2" style="color:#aaa;text-align:center">暂无自定义音色，点 Refresh 刷新</td>
+          </tr>
+        </tbody>
+      </table>
       <pre class="log" x-show="logs.voices" x-text="logs.voices"></pre>
     </div>
+
   </div>
 
   <!-- ============ STT test ============ -->
@@ -234,6 +292,7 @@ function admin() {
     ],
     cfg: { base: '', key: '' },
     hasKey: false,
+    ttsAdminKey: '',
     services: [
       { id: 'realtime', label: 'realtime-server', status: '?', detail: '' },
       { id: 'token', label: 'token-server', status: '?', detail: '' },
@@ -243,10 +302,12 @@ function admin() {
     keys: [],
     voices: [],
     newKey: { name: '', scopes: ['stt','tts','tokens','realtime'], sessions_concurrent: 5, sessions_per_hour: 100, notes: '' },
+    newVoice: { spk_id: '', prompt_text: '' },
+    newVoiceFile: null,
     ttsForm: { text: '你好，这是 RTVoice TTS 测试。', voice: 'default_zh_female', speed: 1.0 },
     tokForm: { room: 'admin-test', identity: 'admin' },
     sttFileBlob: null,
-    logs: { login: '', monitor: '', createKey: '', voices: '', stt: '', tts: '', realtime: '', tokens: '' },
+    logs: { login: '', monitor: '', createKey: '', voices: '', voiceUpload: '', stt: '', tts: '', realtime: '', tokens: '' },
 
     init() {
       try {
@@ -254,6 +315,7 @@ function admin() {
         this.cfg.base = c.base || window.location.origin;
         this.cfg.key = c.key || '';
       } catch (e) {}
+      this.ttsAdminKey = localStorage.getItem('rtvoice_tts_admin_key') || '';
       this.hasKey = !!this.cfg.key;
       if (this.hasKey) this.tab = 'monitor';
     },
@@ -351,14 +413,74 @@ function admin() {
       } else alert('Rotate failed: HTTP ' + r.status);
     },
 
+    saveTtsAdminKey() {
+      localStorage.setItem('rtvoice_tts_admin_key', this.ttsAdminKey);
+    },
+
+    clearTtsAdminKey() {
+      this.ttsAdminKey = '';
+      localStorage.removeItem('rtvoice_tts_admin_key');
+    },
+
+    ttsAdminAuth() {
+      return this.ttsAdminKey ? { 'Authorization': 'Bearer ' + this.ttsAdminKey } : {};
+    },
+
     async loadVoices() {
       try {
         const r = await fetch(this.cfg.base + '/v1/voices', { headers: this.auth() });
         if (!r.ok) { this.setLog('voices', 'HTTP ' + r.status, true); return; }
         const body = await r.json();
         this.voices = body.voices || [];
-        this.setLog('voices', this.voices.length + ' voices available');
+        this.setLog('voices', this.voices.length + ' voice(s) available');
       } catch (e) { this.setLog('voices', String(e), true); }
+    },
+
+    onVoiceFile(ev) { this.newVoiceFile = ev.target.files[0] || null; },
+
+    async uploadVoice() {
+      if (!this.ttsAdminKey) { this.setLog('voiceUpload', '需要 TTS Admin Key', true); return; }
+      if (!this.newVoice.spk_id) { this.setLog('voiceUpload', '需要填写 spk_id', true); return; }
+      if (!this.newVoice.prompt_text) { this.setLog('voiceUpload', '需要填写 prompt_text', true); return; }
+      if (!this.newVoiceFile) { this.setLog('voiceUpload', '需要选择音频文件', true); return; }
+      this.setLog('voiceUpload', '上传中...');
+      try {
+        const fd = new FormData();
+        fd.append('spk_id', this.newVoice.spk_id);
+        fd.append('prompt_text', this.newVoice.prompt_text);
+        fd.append('file', this.newVoiceFile);
+        const r = await fetch(this.cfg.base + '/v1/voices', {
+          method: 'POST',
+          headers: this.ttsAdminAuth(),
+          body: fd,
+        });
+        if (!r.ok) {
+          const text = await r.text();
+          this.setLog('voiceUpload', 'HTTP ' + r.status + ': ' + text, true);
+          return;
+        }
+        this.setLog('voiceUpload', '✅ 音色 "' + this.newVoice.spk_id + '" 上传成功');
+        this.newVoice = { spk_id: '', prompt_text: '' };
+        this.newVoiceFile = null;
+        await this.loadVoices();
+      } catch (e) { this.setLog('voiceUpload', String(e), true); }
+    },
+
+    async deleteVoice(spk_id) {
+      if (!confirm('删除音色 "' + spk_id + '"？此操作不可恢复。')) return;
+      try {
+        const r = await fetch(this.cfg.base + '/v1/voices/' + encodeURIComponent(spk_id), {
+          method: 'DELETE',
+          headers: this.ttsAdminAuth(),
+        });
+        if (!r.ok) {
+          const text = await r.text();
+          alert('删除失败: HTTP ' + r.status + ': ' + text);
+          return;
+        }
+        this.setLog('voices', '✅ 音色 "' + spk_id + '" 已删除');
+        await this.loadVoices();
+      } catch (e) { alert('删除失败: ' + String(e)); }
     },
 
     onSttFile(ev) { this.sttFileBlob = ev.target.files[0] || null; },
