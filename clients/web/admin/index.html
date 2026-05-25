@@ -100,7 +100,7 @@
 
     <div class="card" style="margin-top:16px">
       <h3>Quick links</h3>
-      <p><a :href="cfg.base + ':3000'" target="_blank">Grafana — per-key dashboard</a></p>
+      <p><a :href="cfg.base + ':13000'" target="_blank">Grafana — per-key dashboard</a></p>
       <p><a :href="cfg.base + ':9091'" target="_blank">Prometheus UI</a> (alerts / rules / targets)</p>
       <p><a :href="cfg.base + '/openapi/realtime.json'" target="_blank">OpenAPI realtime</a> · <a :href="cfg.base + '/openapi/stt.json'" target="_blank">stt</a> · <a :href="cfg.base + '/openapi/tts.json'" target="_blank">tts</a> · <a :href="cfg.base + '/openapi/token.json'" target="_blank">token</a></p>
     </div>
@@ -198,6 +198,7 @@
           </template>
         </tbody>
       </table>
+      <pre class="log" role="log" aria-live="polite" x-show="logs.keyOps" x-text="logs.keyOps"></pre>
     </div>
     </div>
     </template>
@@ -264,9 +265,21 @@
             <tr>
               <td><code x-text="v"></code></td>
               <td>
-                <button class="btn danger" style="font-size:11px;padding:3px 8px"
-                        x-show="ttsAdminKey"
-                        @click="deleteVoice(v)">删除</button>
+                <template x-if="ttsAdminKey">
+                  <span>
+                    <span x-show="confirmDeleteVoice !== v" style="display:inline-flex;gap:4px">
+                      <button class="btn danger" style="font-size:11px;padding:3px 8px"
+                              @click="confirmDeleteVoice = v">删除</button>
+                    </span>
+                    <span x-show="confirmDeleteVoice === v" style="display:inline-flex;gap:4px;align-items:center">
+                      <span style="font-size:11px;color:var(--err)">确认删除？不可恢复。</span>
+                      <button class="btn danger" style="font-size:11px;padding:3px 8px"
+                              @click="deleteVoice(v)">确认</button>
+                      <button class="btn ghost" style="font-size:11px;padding:3px 8px"
+                              @click="confirmDeleteVoice = null">取消</button>
+                    </span>
+                  </span>
+                </template>
                 <span x-show="!ttsAdminKey" style="font-size:11px;color:#aaa">设置 TTS Admin Key 后可删除</span>
               </td>
             </tr>
@@ -369,6 +382,7 @@ function admin() {
     hasKey: false,
     ttsAdminKey: '',
     confirmRevoke: null,
+    confirmDeleteVoice: null,
     rotatedSecret: null,
     showRevoked: false,
     services: [
@@ -385,7 +399,7 @@ function admin() {
     ttsForm: { text: '你好，这是 RTVoice TTS 测试。', voice: 'default_zh_female', speed: 1.0 },
     tokForm: { room: 'admin-test', identity: 'admin' },
     sttFileBlob: null,
-    logs: { login: '', monitor: '', createKey: '', voices: '', voiceUpload: '', stt: '', tts: '', realtime: '', tokens: '' },
+    logs: { login: '', monitor: '', createKey: '', keyOps: '', voices: '', voiceUpload: '', stt: '', tts: '', realtime: '', tokens: '' },
 
     init() {
       try {
@@ -398,7 +412,8 @@ function admin() {
       if (this.hasKey) this.tab = 'monitor';
       // N4: clear createKey secret log when navigating away from keys tab
       this.$watch('tab', (newTab) => {
-        if (newTab !== 'keys') { this.logs.createKey = ''; this.confirmRevoke = null; }
+        if (newTab !== 'keys') { this.logs.createKey = ''; this.logs.keyOps = ''; this.confirmRevoke = null; }
+        if (newTab !== 'voices') { this.confirmDeleteVoice = null; }
       });
     },
 
@@ -468,8 +483,11 @@ function admin() {
     },
 
     async loadKeys() {
-      const r = await fetch(this.cfg.base + '/v1/admin/keys', { headers: this.auth() });
-      if (r.ok) this.keys = await r.json();
+      try {
+        const r = await fetch(this.cfg.base + '/v1/admin/keys', { headers: this.auth() });
+        if (r.ok) this.keys = await r.json();
+        else this.setLog('keyOps', await this.fmtError(r.status, r), true);
+      } catch (e) { this.setLog('keyOps', String(e), true); }
     },
 
     async createKey() {
@@ -493,8 +511,8 @@ function admin() {
       const r = await fetch(this.cfg.base + '/v1/admin/keys/' + id + '/revoke',
         { method: 'POST', headers: this.auth() });
       this.confirmRevoke = null;
-      if (r.ok) await this.loadKeys();
-      else this.setLog('createKey', '撤销失败: HTTP ' + r.status, true);
+      if (r.ok) { await this.loadKeys(); this.setLog('keyOps', '✅ key ' + id.slice(0,8) + '… 已撤销'); }
+      else this.setLog('keyOps', await this.fmtError(r.status, r), true);
     },
 
     async rotateKey(id) {
@@ -506,7 +524,7 @@ function admin() {
         // Auto-clear after 60s for security
         setTimeout(() => { if (this.rotatedSecret?.id === id) this.rotatedSecret = null; }, 60000);
       } else {
-        this.setLog('createKey', '旋转 secret 失败: HTTP ' + r.status, true);
+        this.setLog('keyOps', await this.fmtError(r.status, r), true);
       }
     },
 
@@ -565,20 +583,16 @@ function admin() {
     },
 
     async deleteVoice(spk_id) {
-      if (!confirm('删除音色 "' + spk_id + '"？此操作不可恢复。')) return;
+      this.confirmDeleteVoice = null;
       try {
         const r = await fetch(this.cfg.base + '/v1/voices/' + encodeURIComponent(spk_id), {
           method: 'DELETE',
           headers: this.ttsAdminAuth(),
         });
-        if (!r.ok) {
-          const text = await r.text();
-          alert('删除失败: HTTP ' + r.status + ': ' + text);
-          return;
-        }
+        if (!r.ok) { this.setLog('voices', await this.fmtError(r.status, r), true); return; }
         this.setLog('voices', '✅ 音色 "' + spk_id + '" 已删除');
         await this.loadVoices();
-      } catch (e) { alert('删除失败: ' + String(e)); }
+      } catch (e) { this.setLog('voices', String(e), true); }
     },
 
     onSttFile(ev) { this.sttFileBlob = ev.target.files[0] || null; },
