@@ -176,15 +176,19 @@
                     <!-- 内联 Revoke 确认 -->
                     <span x-show="confirmRevoke !== k.id" style="display:inline-flex;gap:4px">
                       <button class="btn danger" style="font-size:11px;padding:3px 8px"
+                              :data-testid="'btn-revoke-' + k.id"
                               @click="confirmRevoke = k.id">Revoke</button>
                       <button class="btn ghost" style="font-size:11px;padding:3px 8px"
+                              :data-testid="'btn-rotate-' + k.id"
                               @click="rotateKey(k.id)">Rotate secret</button>
                     </span>
                     <span x-show="confirmRevoke === k.id" style="display:inline-flex;gap:4px;align-items:center">
                       <span style="font-size:11px;color:var(--err)">确认撤销？</span>
                       <button class="btn danger" style="font-size:11px;padding:3px 8px"
+                              :data-testid="'btn-confirm-revoke-' + k.id"
                               @click="revokeKey(k.id)">确认</button>
                       <button class="btn ghost" style="font-size:11px;padding:3px 8px"
+                              :data-testid="'btn-cancel-revoke-' + k.id"
                               @click="confirmRevoke = null">取消</button>
                     </span>
                   </span>
