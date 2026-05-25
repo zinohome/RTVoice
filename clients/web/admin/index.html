@@ -615,7 +615,7 @@ function admin() {
           headers: Object.assign({ 'Content-Type': 'application/json' }, this.auth()),
           body: JSON.stringify(this.ttsForm),
         });
-        if (!r.ok) { this.setLog('tts', 'HTTP ' + r.status + ': ' + await r.text(), true); return; }
+        if (!r.ok) { this.setLog('tts', await this.fmtError(r.status, r), true); return; }
         const buf = await r.arrayBuffer();
         const wav = wrapWav(new Int16Array(buf), 24000);
         const blob = new Blob([wav], { type: 'audio/wav' });
@@ -632,7 +632,7 @@ function admin() {
           headers: Object.assign({ 'Content-Type': 'application/json' }, this.auth()),
           body: JSON.stringify({ voice: 'default_zh_female' }),
         });
-        if (!r.ok) { this.setLog('realtime', 'HTTP ' + r.status + ': ' + await r.text(), true); return; }
+        if (!r.ok) { this.setLog('realtime', await this.fmtError(r.status, r), true); return; }
         const sess = await r.json();
         let log = '✓ session ' + sess.session_id + '\nws_url = ' + sess.ws_url + '\nconnecting WS...\n';
         this.setLog('realtime', log);
@@ -654,7 +654,7 @@ function admin() {
           headers: Object.assign({ 'Content-Type': 'application/json' }, this.auth()),
           body: JSON.stringify(this.tokForm),
         });
-        if (!r.ok) { this.setLog('tokens', 'HTTP ' + r.status + ': ' + await r.text(), true); return; }
+        if (!r.ok) { this.setLog('tokens', await this.fmtError(r.status, r), true); return; }
         const body = await r.json();
         // Decode JWT payload
         let claims = '';
