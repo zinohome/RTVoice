@@ -15,6 +15,9 @@
   .auth-status { font-size: 13px; opacity: .85; }
   .auth-status.ok { color: #9ce8a4; }
   .auth-status.err { color: #ffb4b4; }
+  .nav-wrap { position: relative; }
+  .nav-wrap::after { content: ''; position: absolute; right: 0; top: 0; bottom: 0; width: 36px;
+    background: linear-gradient(to right, transparent, white); pointer-events: none; }
   nav { background: white; border-bottom: 1px solid #e0e0e0; padding: 0 16px; overflow-x: auto; white-space: nowrap; }
   nav button { background: none; border: none; padding: 10px 14px; cursor: pointer; font-size: 14px; color: #555; border-bottom: 2px solid transparent; }
   nav button.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
@@ -34,7 +37,9 @@
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { padding: 8px; text-align: left; border-bottom: 1px solid #eee; }
   th { background: #fafafa; font-weight: 600; }
-  pre.log { background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 280px; overflow: auto; white-space: pre-wrap; }
+  pre.log { background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 280px; overflow: auto; white-space: pre-wrap; margin-top: 8px; }
+  .secret-banner { background: #fff9e6; border: 1px solid #f0c040; border-radius: 6px; padding: 14px; margin-bottom: 14px; }
+  .secret-banner code { display: block; word-break: break-all; font-size: 13px; background: #f5f5f5; padding: 8px; border-radius: 4px; margin: 8px 0; }
   .pill { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 11px; }
   .pill.ok { background: #d4edda; color: #155724; }
   .pill.err { background: #f8d7da; color: #721c24; }
@@ -55,11 +60,13 @@
     <span class="auth-status" :class="{ ok: hasKey, err: !hasKey }" x-text="hasKey ? '✓ admin key set' : '✗ login required'"></span>
   </header>
 
-  <nav>
-    <template x-for="t in tabs" :key="t.id">
-      <button :class="{ active: tab === t.id }" @click="tab = t.id" x-text="t.label"></button>
-    </template>
-  </nav>
+  <div class="nav-wrap">
+    <nav>
+      <template x-for="t in tabs" :key="t.id">
+        <button :class="{ active: tab === t.id }" @click="tab = t.id" x-text="t.label"></button>
+      </template>
+    </nav>
+  </div>
 
   <main>
 
@@ -75,7 +82,7 @@
     <label>Admin key secret <input type="password" x-model="cfg.key" placeholder="paste from rtvoice-admin create"></label>
     <button class="btn" @click="login()">Save + verify</button>
     <button class="btn ghost" @click="logout()" x-show="hasKey">Logout</button>
-    <pre class="log" x-show="logs.login" x-text="logs.login"></pre>
+    <pre class="log" role="log" aria-live="polite" x-show="logs.login" x-text="logs.login"></pre>
   </div>
 
   <!-- ============ Monitor tab ============ -->
@@ -101,7 +108,7 @@
     <div class="card">
       <h3>Refresh</h3>
       <button class="btn" @click="refreshServices()">Refresh services status</button>
-      <pre class="log" x-show="logs.monitor" x-text="logs.monitor"></pre>
+      <pre class="log" role="log" aria-live="polite" x-show="logs.monitor" x-text="logs.monitor"></pre>
     </div>
   </div>
 
@@ -127,32 +134,61 @@
       </template>
       <label style="margin-top:8px">Notes <textarea x-model="newKey.notes" placeholder="optional"></textarea></label>
       <button class="btn" @click="createKey()">Create</button>
-      <pre class="log" x-show="logs.createKey" x-text="logs.createKey"></pre>
+      <pre class="log" role="log" aria-live="polite" x-show="logs.createKey" x-text="logs.createKey"></pre>
+    </div>
+
+    <!-- Rotate secret 结果横幅 -->
+    <div x-show="rotatedSecret" class="secret-banner">
+      <strong>🔑 New secret for key <code x-text="rotatedSecret?.id"></code></strong>
+      <code x-text="rotatedSecret?.secret"></code>
+      <p style="color:var(--err);font-size:12px;margin:4px 0">⚠️ 请立即保存！此密钥仅显示一次，60 秒后自动清除。</p>
+      <button class="btn ghost" style="font-size:12px" @click="rotatedSecret = null">已保存，关闭</button>
     </div>
 
     <div class="card">
-      <h3>All keys <button class="btn ghost" @click="loadKeys()" style="float:right;font-size:12px">Refresh</button></h3>
+      <h3>All keys
+        <span style="float:right;display:flex;gap:8px;align-items:center">
+          <label style="font-size:12px;margin:0;display:flex;align-items:center;gap:4px;cursor:pointer">
+            <input type="checkbox" x-model="showRevoked"> 显示已撤销
+          </label>
+          <button class="btn ghost" @click="loadKeys()" style="font-size:12px">Refresh</button>
+        </span>
+      </h3>
       <table>
-        <thead><tr><th>id</th><th>name</th><th>scopes</th><th>concurrent</th><th>created</th><th>revoked</th><th>ops</th></tr></thead>
+        <thead><tr><th>id</th><th>name</th><th>scopes</th><th>concurrent</th><th>created</th><th>状态</th><th>ops</th></tr></thead>
         <tbody>
-          <template x-for="k in keys" :key="k.id">
+          <template x-for="k in keys.filter(k => showRevoked || !k.revoked_at)" :key="k.id">
             <tr>
               <td><code x-text="k.id"></code></td>
               <td x-text="k.name"></td>
               <td>
-                <template x-for="s in k.scopes" :key="s"><span class="badge" x-text="s"></span></template>
+                <template x-for="s in k.scopes" :key="s"><span class="badge" x-text="s" style="margin-right:4px"></span></template>
               </td>
               <td x-text="k.sessions_concurrent_max"></td>
               <td x-text="k.created_at?.slice(0,10) || ''"></td>
               <td>
-                <span x-show="k.revoked_at" class="pill err">revoked</span>
-                <span x-show="!k.revoked_at" class="pill ok">active</span>
+                <span x-show="k.revoked_at" class="pill err">已撤销</span>
+                <span x-show="!k.revoked_at" class="pill ok">活跃</span>
               </td>
               <td>
-                <button class="btn danger" style="font-size:11px;padding:3px 8px" x-show="!k.revoked_at"
-                        @click="revokeKey(k.id)">Revoke</button>
-                <button class="btn ghost" style="font-size:11px;padding:3px 8px" x-show="!k.revoked_at"
-                        @click="rotateKey(k.id)">Rotate secret</button>
+                <template x-if="!k.revoked_at">
+                  <span>
+                    <!-- 内联 Revoke 确认 -->
+                    <span x-show="confirmRevoke !== k.id" style="display:inline-flex;gap:4px">
+                      <button class="btn danger" style="font-size:11px;padding:3px 8px"
+                              @click="confirmRevoke = k.id">Revoke</button>
+                      <button class="btn ghost" style="font-size:11px;padding:3px 8px"
+                              @click="rotateKey(k.id)">Rotate secret</button>
+                    </span>
+                    <span x-show="confirmRevoke === k.id" style="display:inline-flex;gap:4px;align-items:center">
+                      <span style="font-size:11px;color:var(--err)">确认撤销？</span>
+                      <button class="btn danger" style="font-size:11px;padding:3px 8px"
+                              @click="revokeKey(k.id)">确认</button>
+                      <button class="btn ghost" style="font-size:11px;padding:3px 8px"
+                              @click="confirmRevoke = null">取消</button>
+                    </span>
+                  </span>
+                </template>
               </td>
             </tr>
           </template>
@@ -211,7 +247,7 @@
         </button>
         <span x-show="!ttsAdminKey" style="font-size:12px;color:var(--err);margin-left:10px">需先设置 TTS Admin Key</span>
       </div>
-      <pre class="log" x-show="logs.voiceUpload" x-text="logs.voiceUpload"></pre>
+      <pre class="log" role="log" aria-live="polite" x-show="logs.voiceUpload" x-text="logs.voiceUpload"></pre>
     </div>
 
     <!-- Voice list -->
@@ -236,7 +272,7 @@
           </tr>
         </tbody>
       </table>
-      <pre class="log" x-show="logs.voices" x-text="logs.voices"></pre>
+      <pre class="log" role="log" aria-live="polite" x-show="logs.voices" x-text="logs.voices"></pre>
     </div>
 
     </div>
@@ -253,7 +289,7 @@
       或换一把 stt-scoped key 在 Login tab。</p>
     <label>Upload WAV / PCM file <input type="file" @change="onSttFile($event)" accept="audio/*,application/octet-stream"></label>
     <button class="btn" @click="testSTT()">Send via WS</button>
-    <pre class="log" x-show="logs.stt" x-text="logs.stt"></pre>
+    <pre class="log" role="log" aria-live="polite" x-show="logs.stt" x-text="logs.stt"></pre>
     </div>
     </template>
   </div>
@@ -272,7 +308,7 @@
     </div>
     <button class="btn" @click="testTTS()">Synthesize + play</button>
     <audio id="tts-audio" controls style="margin-top:8px;width:100%"></audio>
-    <pre class="log" x-show="logs.tts" x-text="logs.tts"></pre>
+    <pre class="log" role="log" aria-live="polite" x-show="logs.tts" x-text="logs.tts"></pre>
     </div>
     </template>
   </div>
@@ -286,7 +322,7 @@
     <p style="font-size:13px;color:#666">本测试创 session + 连 WS（subprotocol bearer），验证协议层通畅。
       完整对话流（mic 录音 + 实时识别）见 <a href="../" target="_blank">/static/</a> 完整 demo。</p>
     <button class="btn" @click="testRealtime()">Create session + connect WS</button>
-    <pre class="log" x-show="logs.realtime" x-text="logs.realtime"></pre>
+    <pre class="log" role="log" aria-live="polite" x-show="logs.realtime" x-text="logs.realtime"></pre>
     </div>
     </template>
   </div>
@@ -303,7 +339,7 @@
       <label>Identity <input type="text" x-model="tokForm.identity"></label>
     </div>
     <button class="btn" @click="testTokens()">POST /v1/tokens</button>
-    <pre class="log" x-show="logs.tokens" x-text="logs.tokens"></pre>
+    <pre class="log" role="log" aria-live="polite" x-show="logs.tokens" x-text="logs.tokens"></pre>
     </div>
     </template>
   </div>
@@ -328,6 +364,9 @@ function admin() {
     cfg: { base: '', key: '' },
     hasKey: false,
     ttsAdminKey: '',
+    confirmRevoke: null,
+    rotatedSecret: null,
+    showRevoked: false,
     services: [
       { id: 'realtime', label: 'realtime-server', status: '?', detail: '' },
       { id: 'token', label: 'token-server', status: '?', detail: '' },
@@ -353,6 +392,10 @@ function admin() {
       this.ttsAdminKey = localStorage.getItem('rtvoice_tts_admin_key') || '';
       this.hasKey = !!this.cfg.key;
       if (this.hasKey) this.tab = 'monitor';
+      // N4: clear createKey secret log when navigating away from keys tab
+      this.$watch('tab', (newTab) => {
+        if (newTab !== 'keys') { this.logs.createKey = ''; this.confirmRevoke = null; }
+      });
     },
 
     auth() { return this.cfg.key ? { 'Authorization': 'Bearer ' + this.cfg.key } : {}; },
@@ -443,21 +486,24 @@ function admin() {
     },
 
     async revokeKey(id) {
-      if (!confirm('Revoke key ' + id + '? key 撤销后无法恢复。')) return;
       const r = await fetch(this.cfg.base + '/v1/admin/keys/' + id + '/revoke',
         { method: 'POST', headers: this.auth() });
+      this.confirmRevoke = null;
       if (r.ok) await this.loadKeys();
-      else alert('Revoke failed: HTTP ' + r.status);
+      else this.setLog('createKey', '撤销失败: HTTP ' + r.status, true);
     },
 
     async rotateKey(id) {
-      if (!confirm('Rotate secret for ' + id + '? 旧 secret 立即失效。')) return;
       const r = await fetch(this.cfg.base + '/v1/admin/keys/' + id + '/rotate',
         { method: 'POST', headers: this.auth() });
       if (r.ok) {
         const body = await r.json();
-        alert('New secret (save NOW):\n\n' + body.secret);
-      } else alert('Rotate failed: HTTP ' + r.status);
+        this.rotatedSecret = { id, secret: body.secret };
+        // Auto-clear after 60s for security
+        setTimeout(() => { if (this.rotatedSecret?.id === id) this.rotatedSecret = null; }, 60000);
+      } else {
+        this.setLog('createKey', '旋转 secret 失败: HTTP ' + r.status, true);
+      }
     },
 
     saveTtsAdminKey() {
