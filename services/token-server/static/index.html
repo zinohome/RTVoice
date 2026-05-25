@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <title>RTVoice — Voice Agent 测试</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>🎙️</text></svg>">
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <!--RTVOICE_DEV_INJECT-->
 <style>
@@ -34,7 +35,7 @@
 
 <label>API Key（来自 .env 的 APP_API_KEY）</label>
 <input id="apikey" type="password" placeholder="paste your APP_API_KEY here" autocomplete="off" />
-<div class="hint">DEV_AUTO_INJECT_KEY=true 时已自动填充。</div>
+<div class="hint" id="apikey-hint"></div>
 
 <label>Room</label>
 <input id="room" value="rtvoice-test" />
@@ -72,9 +73,11 @@
 
   // --- API key 注入 ---
   const devKeyMeta = document.querySelector('meta[name="rtvoice-dev-api-key"]');
+  const apikeyHint = $("apikey-hint");
   if (devKeyMeta && devKeyMeta.content) {
     apikeyInput.value = devKeyMeta.content;
     apikeyInput.placeholder = "(dev 模式已自动注入)";
+    apikeyHint.textContent = "DEV_AUTO_INJECT_KEY=true 时已自动填充。";
   } else {
     apikeyInput.value = localStorage.getItem("rtvoice-api-key") || "";
   }

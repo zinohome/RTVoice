@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RTVoice Admin</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>🎙️</text></svg>">
 <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
 <style>
   :root { --primary: #0d4f7c; --ok: #1a7f1a; --err: #d33; --warn: #c77; --bg: #f4f6f8; }
@@ -92,7 +93,7 @@
 
     <div class="card" style="margin-top:16px">
       <h3>Quick links</h3>
-      <p><a :href="cfg.base + ':3000'" target="_blank">Grafana — per-key dashboard</a> (admin/admin)</p>
+      <p><a :href="cfg.base + ':3000'" target="_blank">Grafana — per-key dashboard</a></p>
       <p><a :href="cfg.base + ':9091'" target="_blank">Prometheus UI</a> (alerts / rules / targets)</p>
       <p><a :href="cfg.base + '/openapi/realtime.json'" target="_blank">OpenAPI realtime</a> · <a :href="cfg.base + '/openapi/stt.json'" target="_blank">stt</a> · <a :href="cfg.base + '/openapi/tts.json'" target="_blank">tts</a> · <a :href="cfg.base + '/openapi/token.json'" target="_blank">token</a></p>
     </div>
@@ -106,6 +107,11 @@
 
   <!-- ============ Keys tab ============ -->
   <div x-show="tab === 'keys'">
+    <div class="card" x-show="!hasKey">
+      <p style="color:var(--err)">⚠️ 请先在 <strong>Login</strong> 标签页登录后使用此功能。</p>
+    </div>
+    <template x-if="hasKey">
+    <div>
     <div class="card">
       <h3>Create new key</h3>
       <div class="row">
@@ -153,10 +159,17 @@
         </tbody>
       </table>
     </div>
+    </div>
+    </template>
   </div>
 
   <!-- ============ Voices tab ============ -->
   <div x-show="tab === 'voices'">
+    <div class="card" x-show="!hasKey">
+      <p style="color:var(--err)">⚠️ 请先在 <strong>Login</strong> 标签页登录后使用此功能。</p>
+    </div>
+    <template x-if="hasKey">
+    <div>
 
     <!-- TTS Admin Key -->
     <div class="card">
@@ -226,20 +239,30 @@
       <pre class="log" x-show="logs.voices" x-text="logs.voices"></pre>
     </div>
 
+    </div>
+    </template>
   </div>
 
   <!-- ============ STT test ============ -->
   <div x-show="tab === 'test-stt'" class="card">
+    <div x-show="!hasKey"><p style="color:var(--err)">⚠️ 请先在 <strong>Login</strong> 标签页登录后使用此功能。</p></div>
+    <template x-if="hasKey">
+    <div>
     <h3>STT — upload PCM 16kHz mono</h3>
     <p style="font-size:13px;color:#666">本测试用 WS /v1/asr。需要 admin key 的 scope 含 <code>stt</code>，
       或换一把 stt-scoped key 在 Login tab。</p>
     <label>Upload WAV / PCM file <input type="file" @change="onSttFile($event)" accept="audio/*,application/octet-stream"></label>
     <button class="btn" @click="testSTT()">Send via WS</button>
     <pre class="log" x-show="logs.stt" x-text="logs.stt"></pre>
+    </div>
+    </template>
   </div>
 
   <!-- ============ TTS test ============ -->
   <div x-show="tab === 'test-tts'" class="card">
+    <div x-show="!hasKey"><p style="color:var(--err)">⚠️ 请先在 <strong>Login</strong> 标签页登录后使用此功能。</p></div>
+    <template x-if="hasKey">
+    <div>
     <h3>TTS — synthesize</h3>
     <p style="font-size:13px;color:#666">需要 admin key scope 含 <code>tts</code>。</p>
     <label>Text <textarea x-model="ttsForm.text">你好，这是 RTVoice TTS 测试。</textarea></label>
@@ -250,19 +273,29 @@
     <button class="btn" @click="testTTS()">Synthesize + play</button>
     <audio id="tts-audio" controls style="margin-top:8px;width:100%"></audio>
     <pre class="log" x-show="logs.tts" x-text="logs.tts"></pre>
+    </div>
+    </template>
   </div>
 
   <!-- ============ Realtime test ============ -->
   <div x-show="tab === 'test-realtime'" class="card">
+    <div x-show="!hasKey"><p style="color:var(--err)">⚠️ 请先在 <strong>Login</strong> 标签页登录后使用此功能。</p></div>
+    <template x-if="hasKey">
+    <div>
     <h3>Realtime — session + WS handshake</h3>
     <p style="font-size:13px;color:#666">本测试创 session + 连 WS（subprotocol bearer），验证协议层通畅。
       完整对话流（mic 录音 + 实时识别）见 <a href="../" target="_blank">/static/</a> 完整 demo。</p>
     <button class="btn" @click="testRealtime()">Create session + connect WS</button>
     <pre class="log" x-show="logs.realtime" x-text="logs.realtime"></pre>
+    </div>
+    </template>
   </div>
 
   <!-- ============ Tokens test ============ -->
   <div x-show="tab === 'test-tokens'" class="card">
+    <div x-show="!hasKey"><p style="color:var(--err)">⚠️ 请先在 <strong>Login</strong> 标签页登录后使用此功能。</p></div>
+    <template x-if="hasKey">
+    <div>
     <h3>Tokens — LiveKit JWT 颁发 + decode</h3>
     <p style="font-size:13px;color:#666">需要 admin key scope 含 <code>tokens</code>。</p>
     <div class="row">
@@ -271,6 +304,8 @@
     </div>
     <button class="btn" @click="testTokens()">POST /v1/tokens</button>
     <pre class="log" x-show="logs.tokens" x-text="logs.tokens"></pre>
+    </div>
+    </template>
   </div>
 
   </main>
@@ -326,13 +361,24 @@ function admin() {
       this.logs[name] = (isErr ? '❌ ' : '') + text;
     },
 
+    async fmtError(status, resp) {
+      try {
+        const body = await resp.text();
+        let msg = '';
+        try { msg = JSON.parse(body)?.message || body; } catch { msg = body; }
+        return 'HTTP ' + status + ': ' + msg;
+      } catch { return 'HTTP ' + status; }
+    },
+
     async login() {
       this.cfg.base = this.cfg.base.replace(/\/$/, '');
+      if (!this.cfg.key.trim()) { this.setLog('login', '请填写 Admin key secret', true); return; }
+      if (!this.cfg.base) { this.setLog('login', '请填写 RTVoice base URL', true); return; }
       try {
         const r = await fetch(this.cfg.base + '/v1/admin/keys', { headers: this.auth() });
-        if (r.status === 401) { this.setLog('login', '401 unauthorized — secret 不对', true); return; }
+        if (r.status === 401) { this.setLog('login', '认证失败 — secret 不正确', true); return; }
         if (r.status === 403) { this.setLog('login', '403 — secret 有效但缺 scope=admin', true); return; }
-        if (!r.ok) { this.setLog('login', 'HTTP ' + r.status + ': ' + await r.text(), true); return; }
+        if (!r.ok) { this.setLog('login', await this.fmtError(r.status, r), true); return; }
         const list = await r.json();
         localStorage.setItem('rtvoice_admin', JSON.stringify(this.cfg));
         this.hasKey = true;
@@ -386,11 +432,12 @@ function admin() {
           headers: Object.assign({ 'Content-Type': 'application/json' }, this.auth()),
           body: JSON.stringify(this.newKey),
         });
-        if (!r.ok) { this.setLog('createKey', 'HTTP ' + r.status + ': ' + await r.text(), true); return; }
+        if (!r.ok) { this.setLog('createKey', await this.fmtError(r.status, r), true); return; }
         const created = await r.json();
         this.setLog('createKey',
           '✅ key created\n  id: ' + created.id + '\n  secret: ' + created.secret +
-          '\n  ⚠️ Save secret NOW — only displayed once.');
+          '\n  ⚠️ 请立即保存 secret — 仅此一次显示。');
+        this.newKey = { name: '', scopes: ['stt','tts','tokens','realtime'], sessions_concurrent: 5, sessions_per_hour: 100, notes: '' };
         await this.loadKeys();
       } catch (e) { this.setLog('createKey', String(e), true); }
     },
@@ -429,7 +476,8 @@ function admin() {
     async loadVoices() {
       try {
         const r = await fetch(this.cfg.base + '/v1/voices', { headers: this.auth() });
-        if (!r.ok) { this.setLog('voices', 'HTTP ' + r.status, true); return; }
+        if (r.status === 403) { this.setLog('voices', '403 权限不足 — 需要含 tts scope 的 key（当前 key 仅有 admin scope）', true); return; }
+        if (!r.ok) { this.setLog('voices', await this.fmtError(r.status, r), true); return; }
         const body = await r.json();
         this.voices = body.voices || [];
         this.setLog('voices', this.voices.length + ' voice(s) available');
