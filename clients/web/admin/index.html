@@ -521,8 +521,11 @@ function admin() {
       if (r.ok) {
         const body = await r.json();
         this.rotatedSecret = { id, secret: body.secret };
-        // Auto-clear after 60s for security
-        setTimeout(() => { if (this.rotatedSecret?.id === id) this.rotatedSecret = null; }, 60000);
+        this.setLog('keyOps', '✅ ' + id.slice(0,12) + '… secret 已 rotate\n🔑 新 secret: ' + body.secret + '\n⚠️ 仅此一次显示，60 秒后自动清除');
+        setTimeout(() => {
+          if (this.rotatedSecret?.id === id) this.rotatedSecret = null;
+          if (this.logs.keyOps?.startsWith('✅')) this.logs.keyOps = '';
+        }, 60000);
       } else {
         this.setLog('keyOps', await this.fmtError(r.status, r), true);
       }
