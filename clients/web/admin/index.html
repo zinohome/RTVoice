@@ -63,7 +63,7 @@
   <div class="nav-wrap">
     <nav>
       <template x-for="t in tabs" :key="t.id">
-        <button :class="{ active: tab === t.id }" @click="tab = t.id" x-text="t.label"></button>
+        <button :class="{ active: tab === t.id }" @click="tab = t.id" x-text="t.id === 'login' && hasKey ? '账户 ✓' : t.label"></button>
       </template>
     </nav>
   </div>
@@ -337,7 +337,7 @@
     <div>
     <h3>Realtime — session + WS handshake</h3>
     <p style="font-size:13px;color:#666">本测试创 session + 连 WS（subprotocol bearer），验证协议层通畅。
-      完整对话流（mic 录音 + 实时识别）见 <a href="../" target="_blank">/static/</a> 完整 demo。</p>
+      完整对话流（mic 录音 + 实时识别）见 <a href="../" target="_blank">Web Demo</a> 完整 demo。</p>
     <button class="btn" @click="testRealtime()">Create session + connect WS</button>
     <pre class="log" role="log" aria-live="polite" x-show="logs.realtime" x-text="logs.realtime"></pre>
     </div>
@@ -655,7 +655,13 @@ function admin() {
         let log = '✓ session ' + sess.session_id + '\nws_url = ' + sess.ws_url + '\nconnecting WS...\n';
         this.setLog('realtime', log);
         const ws = new WebSocket(sess.ws_url, ['bearer.' + this.cfg.key]);
-        ws.onopen = () => { log += '✓ WS onopen, protocol=' + ws.protocol + '\n'; this.setLog('realtime', log); };
+        ws.onopen = () => {
+          const proto = ws.protocol.startsWith('bearer.')
+            ? 'bearer.' + ws.protocol.slice(7, 15) + '…'
+            : ws.protocol;
+          log += '✓ WS onopen, protocol=' + proto + '\n';
+          this.setLog('realtime', log);
+        };
         ws.onclose = (e) => { log += 'closed code=' + e.code + ' reason=' + (e.reason || '-') + '\n'; this.setLog('realtime', log); };
         ws.onmessage = (e) => { log += '← ' + (typeof e.data === 'string' ? e.data.slice(0,200) : '<bin>') + '\n'; this.setLog('realtime', log); };
         setTimeout(() => {
