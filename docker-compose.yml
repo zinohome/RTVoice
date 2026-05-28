@@ -278,7 +278,7 @@ services:
     build:
       context: .
       dockerfile: services/stt-server/Dockerfile
-    image: rtvoice/stt-server:v0.19.0
+    image: rtvoice/stt-server:v0.20.0
     container_name: rtvoice-stt
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -286,6 +286,9 @@ services:
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STT_NUM_THREADS: ${STT_NUM_THREADS:-2}
+      # SenseVoice 识别语言（auto|zh|en|ja|ko|yue）与反向文本归一化
+      STT_LANGUAGE: ${STT_LANGUAGE:-auto}
+      STT_USE_ITN: ${STT_USE_ITN:-true}
       # Bearer 鉴权（留空 = 关闭，dev 默认；prod 暴露公网时必填）
       RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
       RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
@@ -300,7 +303,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 2G
           cpus: "2.0"
     logging:
       driver: json-file
