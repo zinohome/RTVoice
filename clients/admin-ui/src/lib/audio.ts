@@ -49,7 +49,12 @@ export async function startMicCapture(
   onFrame: (pcm: ArrayBuffer) => void,
 ): Promise<MicRecorder> {
   const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
   });
   const AudioCtx =
     window.AudioContext ||
