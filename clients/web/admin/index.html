@@ -640,7 +640,10 @@ function admin() {
         const buf = await r.arrayBuffer();
         const wav = wrapWav(new Int16Array(buf), 24000);
         const blob = new Blob([wav], { type: 'audio/wav' });
-        document.getElementById('tts-audio').src = URL.createObjectURL(blob);
+        const audio = document.getElementById('tts-audio');
+        audio.src = URL.createObjectURL(blob);
+        audio.load();
+        audio.play().catch(() => {});
         this.setLog('tts', '✓ ' + buf.byteLength + ' bytes PCM → playing');
       } catch (e) { this.setLog('tts', String(e), true); }
     },
