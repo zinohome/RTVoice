@@ -37,22 +37,22 @@ const GROUPS: NavGroup[] = [
     label: "系统管理",
     items: [
       { href: "/home", label: "概览", icon: LayoutDashboard },
-      { href: "/home", label: "服务监控", icon: Waves, soon: true },
-      { href: "/home", label: "Key 发放", icon: KeyRound, soon: true },
+      { href: "/monitor", label: "服务监控", icon: Waves },
+      { href: "/keys", label: "Key 发放", icon: KeyRound },
     ],
   },
   {
     label: "系统测试",
     items: [
-      { href: "/home", label: "STT 转写", icon: Mic, soon: true },
-      { href: "/home", label: "TTS 合成", icon: Speech, soon: true },
-      { href: "/home", label: "Realtime", icon: Radio, soon: true },
-      { href: "/home", label: "LiveKit Token 签发", icon: Ticket, soon: true },
+      { href: "/test/stt", label: "STT 转写", icon: Mic },
+      { href: "/test/tts", label: "TTS 合成", icon: Speech },
+      { href: "/test/realtime", label: "Realtime", icon: Radio },
+      { href: "/test/token", label: "LiveKit Token 签发", icon: Ticket },
     ],
   },
   {
     label: "资源管理",
-    items: [{ href: "/home", label: "Voice 音色", icon: AudioLines, soon: true }],
+    items: [{ href: "/voices", label: "Voice 音色", icon: AudioLines }],
   },
 ];
 

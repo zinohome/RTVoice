@@ -56,3 +56,32 @@ export async function apiFetch<T>(path: string, init?: ApiFetchInit): Promise<T>
   }
   return data as T;
 }
+
+async function errMessage(res: Response): Promise<string> {
+  const data = (await res.json().catch(() => ({}))) as ApiError;
+  return data?.message ?? data?.detail ?? data?.error ?? `HTTP ${res.status}`;
+}
+
+/** 取二进制响应（如 TTS 返回的 WAV）。失败抛 Error。 */
+export async function apiBlob(path: string, init?: RequestInit): Promise<Blob> {
+  const res = await fetch(path, { ...init, credentials: "include" });
+  if (!res.ok) throw new Error(await errMessage(res));
+  return res.blob();
+}
+
+/** multipart/form-data 上传（如音色注册）。返回解析后的 JSON。 */
+export async function apiUpload<T>(path: string, form: FormData, method = "POST"): Promise<T> {
+  const res = await fetch(path, { method, body: form, credentials: "include" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = data as ApiError;
+    throw new Error(err?.message ?? err?.detail ?? err?.error ?? `HTTP ${res.status}`);
+  }
+  return data as T;
+}
+
+/** 把相对路径转成同源 WebSocket URL（ws/wss 跟随当前协议）。 */
+export function wsUrl(path: string): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}${path}`;
+}
