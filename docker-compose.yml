@@ -151,9 +151,15 @@ services:
       RTVOICE_ADMIN_PASSWORD: ${RTVOICE_ADMIN_PASSWORD:-rtvoice-admin}
       RTVOICE_SESSION_SECRET: ${RTVOICE_SESSION_SECRET:-}
       RTVOICE_SESSION_COOKIE_SECURE: ${RTVOICE_SESSION_COOKIE_SECURE:-true}
+      # Admin Console 代理 /v1/console/voices 转发到 tts-server 时注入的高权限 key
+      TTS_ADMIN_API_KEY: ${TTS_ADMIN_API_KEY:-}
+      TOKEN_BASE_URL: ${TOKEN_BASE_URL:-http://token-server:8000}
     volumes:
       - ${RTVOICE_AUDIT_HOST_DIR:-./data/transcripts}:/data/transcripts:rw
       - ${RTVOICE_KEYS_HOST_DIR:-./data/keys}:/data/keys:rw
+    # Realtime 管线访问宿主 ollama（LLM_BASE_URL=http://host.docker.internal:11434/v1）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     expose:
       - "9000"
     healthcheck:

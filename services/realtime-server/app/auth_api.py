@@ -80,6 +80,48 @@ async def ensure_admin_key(store: Any) -> Key:
     return key
 
 
+# 跨服务调用 key（realtime 管线 + Admin Console 代理转发 STT/TTS/Token 时作 Bearer）。
+# 它的 secret 就是 env RTVOICE_API_KEY；下游各服务用 verify_key(secret) 校验，
+# 因此必须保证「与该 secret 同 hash 的 key」始终活跃且 scope 齐全——否则像 00:01
+# 那次 keys 清理一样，会再次把它误吊销，导致 admin / realtime 链路集体掉权限。
+INTERNAL_SERVICE_KEY_ID = "internal-service-auto"
+INTERNAL_SERVICE_SCOPES = ["stt", "tts", "tokens", "realtime"]
+
+
+async def ensure_internal_service_key(store: Any) -> Key | None:
+    """保证 env RTVOICE_API_KEY 对应的跨服务 key 始终活跃、scope 齐全（自愈）。
+
+    若该 hash 已有 key（如 internal-realtime）→ 复用其 id，仅在被吊销/缺 scope 时修复；
+    否则新建 internal-service-auto。RTVOICE_API_KEY 未设置（dev 无鉴权）则跳过。
+    """
+    secret = os.environ.get("RTVOICE_API_KEY", "").strip()
+    if not secret:
+        return None
+    h = hashlib.sha256(secret.encode()).hexdigest()
+    existing = store.find_by_hash(h)
+    if (
+        existing is not None
+        and existing.revoked_at is None
+        and all(s in existing.scopes for s in INTERNAL_SERVICE_SCOPES)
+    ):
+        return existing
+
+    key = Key(
+        id=existing.id if existing is not None else INTERNAL_SERVICE_KEY_ID,
+        secret_hash=h,
+        name=existing.name if existing is not None else "internal-service (auto)",
+        sessions_concurrent_max=10000,
+        sessions_per_hour_max=1000000,
+        scopes=list(INTERNAL_SERVICE_SCOPES),
+        created_at=existing.created_at if existing is not None else datetime.now(timezone.utc),
+        revoked_at=None,
+        notes="auto-provisioned cross-service key (RTVOICE_API_KEY); self-healing, do not revoke",
+    )
+    await store.put(key)
+    log.warning("internal-service key (%s) (re)provisioned (self-heal)", key.id)
+    return key
+
+
 async def admin_key_from_session(scope_holder: Any) -> Key | None:
     """若请求/WS 带有效会话 cookie，返回自愈后的全权限 admin key；否则 None。
 

@@ -51,7 +51,11 @@ from rtvoice_auth.instrumentation import RequestMetricsMiddleware
 from rtvoice_auth.openapi import add_bearer_security_scheme
 from rtvoice_auth.metrics import REALTIME_SESSION_DURATION_SECONDS
 from app.admin_api import router as admin_router
-from app.auth_api import router as auth_router, ensure_admin_key, admin_key_from_session
+from app.auth_api import (
+    router as auth_router, ensure_admin_key, ensure_internal_service_key,
+    admin_key_from_session,
+)
+from app.console_api import router as console_router
 
 logging.basicConfig(
     level=config.LOG_LEVEL,
@@ -86,6 +90,11 @@ async def lifespan(app: FastAPI):
         await ensure_admin_key(app.state.key_store)
     except Exception:
         log.exception("ensure_admin_key on startup failed")
+    # 跨服务调用 key（RTVOICE_API_KEY）自愈：保证 realtime 管线 + console 代理始终有权限
+    try:
+        await ensure_internal_service_key(app.state.key_store)
+    except Exception:
+        log.exception("ensure_internal_service_key on startup failed")
     app.state.quota = QuotaTracker()
     app.state.scope = "realtime"
     session_mgr = SessionManager(quota=app.state.quota)
@@ -160,6 +169,8 @@ add_bearer_security_scheme(app)
 app.include_router(admin_router)
 # Admin Console 鉴权：用户名/密码登录 + HttpOnly 会话 cookie
 app.include_router(auth_router)
+# Admin Console 服务端代理：cookie 鉴权 → 注入内部 key → 转发 STT/TTS/Token/Voices
+app.include_router(console_router)
 
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"

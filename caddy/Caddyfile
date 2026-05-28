@@ -93,6 +93,10 @@
     handle /v1/realtime/* {
         reverse_proxy realtime-server:9000
     }
+    # Admin Console 服务端代理（cookie 鉴权 → 内部 key 转发各服务；含 /v1/console/asr WS）
+    handle /v1/console/* {
+        reverse_proxy realtime-server:9000
+    }
 
     # --- Admin Console (新版 Next.js Admin UI，独立容器) ---
     # 会话登录端点（用户名/密码 + HttpOnly cookie），走 realtime-server

@@ -24,9 +24,12 @@ LLM_BASE_URL = _str("LLM_BASE_URL", "http://llm-server:11434/v1")
 LLM_MODEL = _str("LLM_MODEL", "qwen2.5:1.5b")
 LLM_API_KEY = _str("LLM_API_KEY", "ollama")
 TTS_BASE_URL = _str("TTS_BASE_URL", "http://tts-server:9880")
+TOKEN_BASE_URL = _str("TOKEN_BASE_URL", "http://token-server:8000")
 
 # Auth
 RTVOICE_API_KEY = _str("RTVOICE_API_KEY", "").strip()  # empty = dev mode no auth
+# tts-server 独有的高权限 key（音色注册/删除）；Admin Console 代理 /v1/console/voices 时注入
+TTS_ADMIN_API_KEY = _str("TTS_ADMIN_API_KEY", "").strip()
 
 # Public WS URL base (returned in POST /v1/sessions response)
 PUBLIC_WS_BASE = _str("PUBLIC_WS_BASE", "ws://realtime-server:9000")
