@@ -278,7 +278,7 @@ services:
     build:
       context: .
       dockerfile: services/stt-server/Dockerfile
-    image: rtvoice/stt-server:v0.20.0
+    image: rtvoice/stt-server:v0.21.0
     container_name: rtvoice-stt
     profiles: ["dev", "prod"]
     restart: unless-stopped
