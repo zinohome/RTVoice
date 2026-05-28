@@ -445,22 +445,25 @@ async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: st
     t_start = time.time()
     audio_samples_total = 0
 
-    # v0.7.3：HTTP path 用 single-element generator 喂 v3（不传 str）。
-    # str input 走 v3 内部 model.tts(stream=True) 的"满足 token_hop_len 才 yield"
-    # 路径，短文本会触发"yield 0.04s 残尾"+ 偶尔 hifigan F0 kernel/input mismatch
-    # 的 deep bug。走 generator 路径更稳（A 测 5/5 验过）。
-    def text_gen():
-        yield req.text
-
+    # v0.7.4：HTTP path 改回 str + stream=False。
+    # 上一版（v0.7.3）走 single-element generator 触发 v3 LLM 的 inference_bistream
+    # 路径；短文本（≈14 字）下 mix-mode 阶段 prompt_speech_token_emb 还没消耗完
+    # 就进入 final_decode，导致首批输出 token 沿用 prompt 风格→生成的 mel 听感
+    # 上携带参考音频"能够做到比我还好哟"前缀（用户 P0 反馈）。
+    # str 输入走 llm.inference()（非 bistream），prompt_speech_token 全段作为
+    # 上下文一次性喂入，LLM 直接从 task_id_emb 之后开始生成目标 token。
+    # stream=False 绕过 model.tts 内 token_hop_len 流式切片（即上一版顾虑的
+    # "yield 0.04s 残尾 / hifigan F0 mismatch"），单 sentence 一次性合成、整段
+    # 返回；外层 _synthesize_stream 仍以 chunk 形式 yield 给 client。
     def producer():
         nonlocal audio_samples_total
         try:
             for output in _cosyvoice.inference_zero_shot(
-                text_gen(),
+                req.text,
                 DEFAULT_PROMPT_TEXT,    # 占位；spk_id 非空时不使用
                 DEFAULT_PROMPT_WAV,     # 占位；spk_id 非空时不使用
                 zero_shot_spk_id=voice,
-                stream=True,
+                stream=False,
                 speed=req.speed,
             ):
                 samples = output["tts_speech"]
