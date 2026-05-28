@@ -28,7 +28,6 @@ import os
 import sys
 import time
 import json
-import queue as sync_queue
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -567,12 +566,24 @@ async def tts_stream(req: TTSRequest, request: Request,
 #     {"type":"error", "message":"..."}  text frame，异常即关
 #
 # barge-in：
-#   client 直接 close ws → server 检测 disconnect → text_q.put(None) → 生成器
-#   提前结束 → CosyVoice 内部停止后续 token 处理（依赖 v3 实现停损延迟）
+#   client 直接 close ws → server 检测 disconnect → 停止后续句子合成
 
-class _SendError:
-    def __init__(self, msg: str):
-        self.msg = msg
+# 句子切分：在强终止标点处断句，逐句送入干净的 str 合成路径。
+# 见 _ws_inference 注释——bistream（generator+stream=True）会泄漏参考音频前缀。
+_SENT_BOUNDARY = "。！？!?；;…\n"
+
+
+def _drain_sentences(buf: str) -> tuple[list[str], str]:
+    """从累积缓冲里切出完整句子，返回 (完整句子列表, 剩余未完成片段)。"""
+    sentences: list[str] = []
+    start = 0
+    for i, ch in enumerate(buf):
+        if ch in _SENT_BOUNDARY:
+            seg = buf[start:i + 1].strip()
+            if seg:
+                sentences.append(seg)
+            start = i + 1
+    return sentences, buf[start:]
 
 
 @app.websocket("/v1/tts/stream_ws")
@@ -616,99 +627,121 @@ async def tts_stream_ws(ws: WebSocket) -> None:
 
 
 async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
+    """按句缓冲 + str 单句合成。
+
+    旧实现把 text_gen() 直接喂给 inference_zero_shot(stream=True)，走 v3 的
+    inference_bistream 路径——开头若干 token 沿用参考音频风格，会把默认音色的
+    参考 transcript（“希望你以后…做的比我还好呦”）前缀泄漏进合成音频（用户 P0）。
+    HTTP path 早在 v0.7.4 改用 str + stream=False 绕过，但本 WS path 一直漏改。
+
+    现改为：累积流入文本，遇到句末标点就把完整句子用 str + stream=False（与
+    _synthesize_stream_locked 同款干净路径）逐句合成、立即推音频；EOS/断连时
+    flush 残余。既根治前缀泄漏，又保留逐句出声的流式体验。
+    """
     assert _cosyvoice is not None
-    # 同 _synthesize_stream_locked：reset token_hop_len 防累积污染（见上方注释）
-    _cosyvoice.model.token_hop_len = 25
     loop = asyncio.get_running_loop()
-    text_q: sync_queue.Queue = sync_queue.Queue()  # async ws → sync gen
-    pcm_q: asyncio.Queue = asyncio.Queue()         # sync prod → async send
-
-    def text_gen():
-        """喂给 inference_zero_shot 的同步 generator。"""
-        while True:
-            item = text_q.get()
-            if item is None:
-                return
-            yield item
-
-    def producer():
-        try:
-            for output in _cosyvoice.inference_zero_shot(
-                text_gen(),
-                DEFAULT_PROMPT_TEXT,
-                DEFAULT_PROMPT_WAV,
-                zero_shot_spk_id=voice,
-                stream=True,
-                speed=speed,
-            ):
-                pcm = _tensor_to_pcm_bytes(output["tts_speech"])
-                asyncio.run_coroutine_threadsafe(pcm_q.put(pcm), loop).result()
-        except Exception as e:
-            log.exception("[ws-tts] 推理异常")
-            asyncio.run_coroutine_threadsafe(
-                pcm_q.put(_SendError(str(e))), loop).result()
-        finally:
-            asyncio.run_coroutine_threadsafe(pcm_q.put(None), loop).result()
-
-    inference_fut = loop.run_in_executor(None, producer)
+    delta_q: asyncio.Queue[str | None] = asyncio.Queue()
+    disconnected = False
 
     async def reader():
-        """读 ws 文本帧 → text_q。EOS / disconnect → 关闭 generator。"""
+        """读 ws 文本帧 → delta_q。EOS / disconnect → 推 None 收尾。"""
+        nonlocal disconnected
         try:
             while True:
                 msg = await ws.receive()
-                t = msg.get("type")
-                if t == "websocket.disconnect":
+                if msg.get("type") == "websocket.disconnect":
+                    disconnected = True
                     break
                 text = msg.get("text")
                 if text is None:
                     continue
                 if text == "EOS":
                     break
-                text_q.put(text)
+                await delta_q.put(text)
         except Exception:
             log.exception("[ws-tts] reader 异常")
+            disconnected = True
         finally:
-            text_q.put(None)  # 关闭 sync generator
+            await delta_q.put(None)
 
     reader_task = asyncio.create_task(reader())
 
-    # 3) 主循环：pcm_q → ws.send_bytes
+    def synth(sentence: str) -> list[bytes]:
+        """单句 str 合成（stream=False，非 bistream）→ PCM 块列表。"""
+        # 每句 reset token_hop_len，防跨 inference 累积污染（见 _synthesize_stream_locked）
+        _cosyvoice.model.token_hop_len = 25
+        out: list[bytes] = []
+        for output in _cosyvoice.inference_zero_shot(
+            sentence,
+            DEFAULT_PROMPT_TEXT,    # 占位；spk_id 非空时不使用
+            DEFAULT_PROMPT_WAV,     # 占位；spk_id 非空时不使用
+            zero_shot_spk_id=voice,
+            stream=False,
+            speed=speed,
+        ):
+            out.append(_tensor_to_pcm_bytes(output["tts_speech"]))
+        return out
+
     sent_chunks = 0
     t_start = time.time()
     first = True
-    try:
-        while True:
-            item = await pcm_q.get()
-            if item is None:
-                break
-            if isinstance(item, _SendError):
-                try:
-                    await ws.send_json({"type": "error", "message": item.msg})
-                except Exception:
-                    pass
-                break
+    errored = False
+    pending = ""
+
+    async def emit(sentence: str) -> bool:
+        """合成并推送一句；返回 False 表示应停止（断连/错误）。"""
+        nonlocal sent_chunks, first, errored
+        if not sentence.strip() or disconnected:
+            return not disconnected
+        try:
+            chunks = await loop.run_in_executor(None, synth, sentence)
+        except Exception as e:
+            log.exception("[ws-tts] 推理异常")
+            try:
+                await ws.send_json({"type": "error", "message": str(e)[:200]})
+            except Exception:
+                pass
+            errored = True
+            return False
+        for pcm in chunks:
             if first:
                 TTFB.observe(time.time() - t_start)
                 first = False
             try:
-                await ws.send_bytes(item)
+                await ws.send_bytes(pcm)
                 sent_chunks += 1
             except (WebSocketDisconnect, RuntimeError) as e:
-                # starlette 在 client close 后再 send 抛 RuntimeError 而非
-                # WebSocketDisconnect — 都按"对端已断"处理
                 log.info("[ws-tts] client disconnected (%s)", type(e).__name__)
+                return False
+        return True
+
+    try:
+        while True:
+            item = await delta_q.get()
+            if item is None:
+                # EOS / 断连：flush 残余片段（断连则丢弃，无人接收）
+                if pending.strip() and not disconnected:
+                    await emit(pending)
                 break
-        try:
-            await ws.send_json({"type": "done", "chunks": sent_chunks})
-        except Exception:
-            pass
+            pending += item
+            sentences, pending = _drain_sentences(pending)
+            for s in sentences:
+                if not await emit(s):
+                    pending = ""
+                    break
+            else:
+                continue
+            break
+        if not errored and not disconnected:
+            try:
+                await ws.send_json({"type": "done", "chunks": sent_chunks})
+            except Exception:
+                pass
     finally:
-        text_q.put(None)
         reader_task.cancel()
         try:
-            await asyncio.wait_for(inference_fut, timeout=5)
-        except (asyncio.TimeoutError, Exception):
+            await reader_task
+        except (asyncio.CancelledError, Exception):
             pass
         try:
             await ws.close()

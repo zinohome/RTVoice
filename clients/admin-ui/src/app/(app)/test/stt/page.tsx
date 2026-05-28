@@ -52,6 +52,10 @@ export default function SttTestPage() {
           else if (m.type === "final") {
             setFinal((prev) => (prev ? prev + " " : "") + (m.text ?? ""));
             setPartial("");
+            // 服务端 EOS 后只发 final、不主动关连接（流式会话复用 stream），
+            // 单次转写收到 final 即结束：转 done 并收尾，避免按钮卡在 finalizing。
+            setPhase("done");
+            closeAll();
           } else if (m.type === "error") {
             setErr(m.message ?? "识别出错");
             setPhase("error");
