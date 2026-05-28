@@ -51,6 +51,7 @@ from rtvoice_auth.instrumentation import RequestMetricsMiddleware
 from rtvoice_auth.openapi import add_bearer_security_scheme
 from rtvoice_auth.metrics import REALTIME_SESSION_DURATION_SECONDS
 from app.admin_api import router as admin_router
+from app.auth_api import router as auth_router, ensure_admin_key, admin_key_from_session
 
 logging.basicConfig(
     level=config.LOG_LEVEL,
@@ -80,6 +81,11 @@ async def lifespan(app: FastAPI):
         app.state.key_store = YamlKeyStore(path)
     await app.state.key_store.load()
     await auto_migrate_legacy(app.state.key_store)
+    # Admin Console：启动即确保全权限内部 admin key 存在且未被吊销（自愈）
+    try:
+        await ensure_admin_key(app.state.key_store)
+    except Exception:
+        log.exception("ensure_admin_key on startup failed")
     app.state.quota = QuotaTracker()
     app.state.scope = "realtime"
     session_mgr = SessionManager(quota=app.state.quota)
@@ -152,6 +158,8 @@ add_bearer_security_scheme(app)
 
 # SP14 — Admin API（keys lifecycle over HTTP；scope='admin' required）
 app.include_router(admin_router)
+# Admin Console 鉴权：用户名/密码登录 + HttpOnly 会话 cookie
+app.include_router(auth_router)
 
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -195,6 +203,11 @@ async def require_key(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> Key:
+    # Admin Console 会话 cookie → 全权限内部 admin key（前端不带 Bearer）
+    session_key = await admin_key_from_session(request)
+    if session_key is not None:
+        request.state.key_id = session_key.id
+        return session_key
     if not authorization or not authorization.startswith("Bearer "):
         raise api_error(401, "auth.missing_token", "Authorization: Bearer required")
     secret = authorization[len("Bearer "):]
@@ -214,7 +227,10 @@ async def require_key(
 
 
 async def _extract_ws_bearer_key(ws: WebSocket) -> Key | None:
-    """三路 Bearer 验证；返 Key record。"""
+    """Admin Console 会话 cookie 优先；否则三路 Bearer 验证。返 Key record。"""
+    session_key = await admin_key_from_session(ws)
+    if session_key is not None:
+        return session_key
     secret = None
     auth = ws.headers.get("authorization", "")
     if auth.startswith("Bearer "):
