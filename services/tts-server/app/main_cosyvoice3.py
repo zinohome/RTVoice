@@ -260,7 +260,7 @@ async def lifespan(app: FastAPI):
             log.exception("key_watcher stop failed")
 
 
-app = FastAPI(title="RTVoice TTS Server (Fun-CosyVoice 3)", version="0.19.0", lifespan=lifespan)
+app = FastAPI(title="RTVoice TTS Server (Fun-CosyVoice 3)", version="0.20.0", lifespan=lifespan)
 
 _cors_raw = os.environ.get("RTVOICE_CORS_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -385,7 +385,7 @@ async def info() -> dict:
     # SP10 G4 — 4 service /info 统一返 service/version/capabilities/models
     return {
         "service": "tts-server",
-        "version": "0.19.0",
+        "version": "0.20.0",
         "capabilities": {
             "streaming": True,
             "text_streaming": True,        # agent-worker 探测此字段决定走 ws 流式
@@ -447,16 +447,13 @@ async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: st
     t_start = time.time()
     audio_samples_total = 0
 
-    # v0.7.4：HTTP path 改回 str + stream=False。
-    # 上一版（v0.7.3）走 single-element generator 触发 v3 LLM 的 inference_bistream
-    # 路径；短文本（≈14 字）下 mix-mode 阶段 prompt_speech_token_emb 还没消耗完
-    # 就进入 final_decode，导致首批输出 token 沿用 prompt 风格→生成的 mel 听感
-    # 上携带参考音频"能够做到比我还好哟"前缀（用户 P0 反馈）。
-    # str 输入走 llm.inference()（非 bistream），prompt_speech_token 全段作为
-    # 上下文一次性喂入，LLM 直接从 task_id_emb 之后开始生成目标 token。
-    # stream=False 绕过 model.tts 内 token_hop_len 流式切片（即上一版顾虑的
-    # "yield 0.04s 残尾 / hifigan F0 mismatch"），单 sentence 一次性合成、整段
-    # 返回；外层 _synthesize_stream 仍以 chunk 形式 yield 给 client。
+    # v0.20：str 输入 + stream=True（官方"文本进/音频流出"低延迟最佳实践）。
+    # 关键：是否走泄漏的 inference_bistream 只取决于输入是不是 Generator
+    # （cosyvoice/cli/model.py: isinstance(text, Generator)）。这里喂的是完整 str，
+    # 走 llm.inference()（非 bistream）→ 不泄漏参考音频前缀。stream 参数只决定
+    # model.tts 内部 token_hop_len 滑窗如何分块吐音频，与是否泄漏无关。
+    # stream=True 让长文本边合成边吐块（首块即目标文本），治"长文本转语音慢"；
+    # 每路已 reset token_hop_len=25，避免跨 inference 累积导致短文本吐残尾。
     def producer():
         nonlocal audio_samples_total
         try:
@@ -465,7 +462,7 @@ async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: st
                 DEFAULT_PROMPT_TEXT,    # 占位；spk_id 非空时不使用
                 DEFAULT_PROMPT_WAV,     # 占位；spk_id 非空时不使用
                 zero_shot_spk_id=voice,
-                stream=False,
+                stream=True,
                 speed=req.speed,
             ):
                 samples = output["tts_speech"]
@@ -568,17 +565,27 @@ async def tts_stream(req: TTSRequest, request: Request,
 # barge-in：
 #   client 直接 close ws → server 检测 disconnect → 停止后续句子合成
 
-# 句子切分：在强终止标点处断句，逐句送入干净的 str 合成路径。
-# 见 _ws_inference 注释——bistream（generator+stream=True）会泄漏参考音频前缀。
-_SENT_BOUNDARY = "。！？!?；;…\n"
+# 子句切分（v0.20）：在强终止标点处一律断句；在软边界（逗号/顿号/冒号）处，
+# 只有当前累积片段已够长才断，避免碎成 "好，" 这类微片段伤韵律。
+# 更细的切分 → 每个送 TTS 的单元更短 → 首字音频更快出（治"长文本转语音慢"）。
+# 仍逐"子句" str 合成（非 generator）→ 不走 bistream → 不泄漏参考音频前缀。
+_SENT_BOUNDARY = "。！？!?；;…\n"      # 强边界：一律切
+_CLAUSE_BOUNDARY = "，,、：:"            # 软边界：片段够长才切
+# 软边界最短子句长度（含标点），低于此长度的逗号不触发切分
+MIN_CLAUSE_CHARS = int(os.environ.get("TTS_MIN_CLAUSE_CHARS", "8"))
 
 
 def _drain_sentences(buf: str) -> tuple[list[str], str]:
-    """从累积缓冲里切出完整句子，返回 (完整句子列表, 剩余未完成片段)。"""
+    """从累积缓冲里切出完整子句，返回 (完整子句列表, 剩余未完成片段)。
+
+    强终止标点立即切；软边界（逗号等）仅当本子句已累积 >= MIN_CLAUSE_CHARS 才切。
+    """
     sentences: list[str] = []
     start = 0
     for i, ch in enumerate(buf):
-        if ch in _SENT_BOUNDARY:
+        is_strong = ch in _SENT_BOUNDARY
+        is_soft = ch in _CLAUSE_BOUNDARY and (i + 1 - start) >= MIN_CLAUSE_CHARS
+        if is_strong or is_soft:
             seg = buf[start:i + 1].strip()
             if seg:
                 sentences.append(seg)
@@ -634,9 +641,10 @@ async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
     参考 transcript（“希望你以后…做的比我还好呦”）前缀泄漏进合成音频（用户 P0）。
     HTTP path 早在 v0.7.4 改用 str + stream=False 绕过，但本 WS path 一直漏改。
 
-    现改为：累积流入文本，遇到句末标点就把完整句子用 str + stream=False（与
-    _synthesize_stream_locked 同款干净路径）逐句合成、立即推音频；EOS/断连时
-    flush 残余。既根治前缀泄漏，又保留逐句出声的流式体验。
+    现改为：累积流入文本，按子句切分（强标点立即切、软边界够长才切），把完整
+    子句用 str + stream=True（与 _synthesize_stream_locked 同款干净路径）逐子句
+    合成、边合成边推音频；EOS/断连时 flush 残余。既根治前缀泄漏（str 非 generator
+    → 不走 bistream），又靠"子句切分 + 句内流式"双重降低首字延迟。
     """
     assert _cosyvoice is not None
     loop = asyncio.get_running_loop()
@@ -667,7 +675,7 @@ async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
     reader_task = asyncio.create_task(reader())
 
     def synth(sentence: str) -> list[bytes]:
-        """单句 str 合成（stream=False，非 bistream）→ PCM 块列表。"""
+        """单子句 str 合成（stream=True，非 bistream）→ PCM 块列表。"""
         # 每句 reset token_hop_len，防跨 inference 累积污染（见 _synthesize_stream_locked）
         _cosyvoice.model.token_hop_len = 25
         out: list[bytes] = []
@@ -676,7 +684,7 @@ async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
             DEFAULT_PROMPT_TEXT,    # 占位；spk_id 非空时不使用
             DEFAULT_PROMPT_WAV,     # 占位；spk_id 非空时不使用
             zero_shot_spk_id=voice,
-            stream=False,
+            stream=True,
             speed=speed,
         ):
             out.append(_tensor_to_pcm_bytes(output["tts_speech"]))
