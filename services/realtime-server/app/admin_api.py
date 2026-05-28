@@ -29,7 +29,13 @@ async def require_admin_key(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> Key:
-    """Require Bearer key with scope='admin'."""
+    """Require Bearer key with scope='admin'，或 Admin Console 会话 cookie。"""
+    # 延迟导入避免循环依赖（auth_api 仅 import error_schema）
+    from app.auth_api import admin_key_from_session
+    session_key = await admin_key_from_session(request)
+    if session_key is not None:
+        request.state.key_id = session_key.id
+        return session_key
     if not authorization or not authorization.startswith("Bearer "):
         raise api_error(401, "auth.missing_token", "Authorization: Bearer required")
     secret = authorization[len("Bearer "):]

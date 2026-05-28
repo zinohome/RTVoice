@@ -146,6 +146,11 @@ services:
       RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
       RTVOICE_KEYS_FILE: ${RTVOICE_KEYS_FILE:-/data/keys/keys.yaml}
       RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
+      # Admin Console 登录（用户名/密码）+ 会话 cookie 签名密钥
+      RTVOICE_ADMIN_USERNAME: ${RTVOICE_ADMIN_USERNAME:-admin}
+      RTVOICE_ADMIN_PASSWORD: ${RTVOICE_ADMIN_PASSWORD:-rtvoice-admin}
+      RTVOICE_SESSION_SECRET: ${RTVOICE_SESSION_SECRET:-}
+      RTVOICE_SESSION_COOKIE_SECURE: ${RTVOICE_SESSION_COOKIE_SECURE:-true}
     volumes:
       - ${RTVOICE_AUDIT_HOST_DIR:-./data/transcripts}:/data/transcripts:rw
       - ${RTVOICE_KEYS_HOST_DIR:-./data/keys}:/data/keys:rw
@@ -166,6 +171,39 @@ services:
       driver: json-file
       options:
         max-size: "30m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------
+  # Admin Console — Next.js 16 standalone（新版 Admin UI，挂 /admin-v2/）
+  # ---------------------------------------------------------------
+  admin-ui:
+    build:
+      context: ./clients/admin-ui
+      dockerfile: Dockerfile
+    image: rtvoice/admin-ui:v0.19.0
+    container_name: rtvoice-admin-ui
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    networks: [rtvoice_net]
+    environment:
+      NODE_ENV: production
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/admin-v2/login',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
         max-file: "3"
 
   # ---------------------------------------------------------------
