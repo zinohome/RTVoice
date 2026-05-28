@@ -82,11 +82,14 @@ SAMPLE_RATE = 24000
 # CosyVoice 2-0.5B 不自带 SFT 音色，启动时用 repo 自带 reference 注册一个
 DEFAULT_SPK_ID = "default_zh_female"
 DEFAULT_PROMPT_WAV = os.path.join(COSYVOICE_DIR, "asset/zero_shot_prompt.wav")
-# 此参考音频对应的文本（CosyVoice repo runtime/python/fastapi/client.py 默认值）
-# v3 关键差异：LLM `inference()` 硬断言输入序列中含 <|endofprompt|>（token 151646）；
-# v3 frontend.text_normalize / _extract_text_token 都不自动添加；caller 必须在
-# prompt_text 末尾显式拼上。v2 不要求。
-DEFAULT_PROMPT_TEXT = "希望你以后能够做的比我还好呦。<|endofprompt|>"
+# 此参考音频对应的文本。v3 LLM 训练时的格式约定（example.py:76 / triton runtime
+# model.py:260-261 自动前置）：
+#   "<system 指令><|endofprompt|><参考音频 transcript>"
+# bistream 路径在 llm.py:588-590 按 <|endofprompt|>（token 151646）切：
+# 之前作为 system prompt，之后才是真正的参考 transcript（与 prompt_speech_token
+# 对齐用）。如果分隔符放在末尾，LLM 看到的"参考 transcript"为空，与 prompt
+# speech token 完全失配 → 退化为照抄参考音频前缀，导致用户听到的 prompt 残留。
+DEFAULT_PROMPT_TEXT = "You are a helpful assistant.<|endofprompt|>希望你以后能够做的比我还好呦。"
 
 DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", DEFAULT_SPK_ID)
 
@@ -773,6 +776,12 @@ async def add_voice(
             raise api_error(400, "tts.wav_decode_failed", f"wav 解码失败：{e}")
         log.info("[admin] add voice spk_id=%s sr=%d duration=%.2fs",
                  spk_id, sr, waveform.shape[-1] / sr)
+
+        # v3 约定：prompt_text 必须形如 "<system><|endofprompt|><transcript>"
+        # （见 DEFAULT_PROMPT_TEXT 上方说明）。client 一般只传 transcript，
+        # 这里和 triton runtime model.py:260-261 一致，自动前置 system 指令。
+        if "<|endofprompt|>" not in prompt_text:
+            prompt_text = f"You are a helpful assistant.<|endofprompt|>{prompt_text}"
 
         # 调 CosyVoice 注册（同步 → 跑线程，避免阻塞 event loop）
         await asyncio.to_thread(
