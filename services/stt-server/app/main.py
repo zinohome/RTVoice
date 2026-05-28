@@ -39,6 +39,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from fastapi.exceptions import RequestValidationError
 from app.error_schema import ErrorResponse, api_error, http_exception_handler, validation_exception_handler
+from app.segmentation import join_segments, should_soft_segment
 
 from rtvoice_auth.models import Key
 from rtvoice_auth.verify import verify_key
@@ -78,6 +79,12 @@ STT_LANGUAGE = os.environ.get("STT_LANGUAGE", "auto")
 STT_USE_ITN = os.environ.get("STT_USE_ITN", "true").lower() in ("1", "true", "yes")
 # partial 重解码节流：累积音频每增长这么多秒才重新解码一次，避免短句内 O(N²) 抖动
 PARTIAL_MIN_GROWTH_S = float(os.environ.get("STT_PARTIAL_MIN_GROWTH_S", "0.6"))
+# 软切分（默认关）：长独白无 VAD 静音端点时，缓冲超过 SOFT_SEGMENT_MAX_S 秒就强制提交一段、
+# 清空音频缓冲，把单次解码窗口限制在 N 秒内（SenseVoice 解码延迟≈0.33×窗口秒数，超长还掉字）。
+# 服务端内部累积「已提交前缀」，对外仍每个 EOS 只发一次 final，协议/下游零改动。
+# tradeoff：N 越小延迟越低但越易切断完整句子；N 越大语义越完整但延迟越高。
+STT_SOFT_SEGMENT = os.environ.get("STT_SOFT_SEGMENT", "false").lower() in ("1", "true", "yes")
+STT_SOFT_SEGMENT_MAX_S = float(os.environ.get("STT_SOFT_SEGMENT_MAX_S", "8.0"))
 
 
 def _build_recognizer() -> sherpa_onnx.OfflineRecognizer:
@@ -187,7 +194,7 @@ async def lifespan(app: FastAPI):
             log.exception("key_watcher stop failed")
 
 
-app = FastAPI(title="RTVoice STT Server", version="0.20.0", lifespan=lifespan)
+app = FastAPI(title="RTVoice STT Server", version="0.21.0", lifespan=lifespan)
 
 _cors_raw = os.environ.get("RTVOICE_CORS_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -230,7 +237,7 @@ async def info() -> dict:
     # SP10 G4 — 4 service /info 统一返 service/version/capabilities/models
     return {
         "service": "stt-server",
-        "version": "0.20.0",
+        "version": "0.21.0",
         "capabilities": {
             "streaming": False,
             "architecture": "offline-non-autoregressive",
@@ -246,6 +253,8 @@ async def info() -> dict:
             "language": STT_LANGUAGE,
             "use_itn": STT_USE_ITN,
             "partial_min_growth_s": PARTIAL_MIN_GROWTH_S,
+            "soft_segment": STT_SOFT_SEGMENT,
+            "soft_segment_max_s": STT_SOFT_SEGMENT_MAX_S,
         },
     }
 
@@ -302,11 +311,13 @@ async def asr_ws(ws: WebSocket) -> None:
     buffered_samples = 0
     decoded_at_samples = 0
     last_partial: str = ""
+    committed_text: str = ""  # 软切分已提交前缀（软切分关时恒为空，行为不变）
     log.info("WS connected: %s", ws.client)
     WS_TOTAL.inc()
     WS_ACTIVE.inc()
 
     partial_growth_samples = int(PARTIAL_MIN_GROWTH_S * SAMPLE_RATE)
+    soft_segment_samples = int(STT_SOFT_SEGMENT_MAX_S * SAMPLE_RATE)
     # 收 WS 消息的超时——超时则有机会跑一次 partial 解码
     RECV_TIMEOUT_S = 0.1
 
@@ -341,11 +352,12 @@ async def asr_ws(ws: WebSocket) -> None:
                     cmd = data_text.strip().upper()
                     if cmd == "EOS":
                         log.info("EOS received, decoding %d samples", buffered_samples)
-                        text = ""
+                        text = committed_text
                         if buffered_samples > 0:
                             audio = np.concatenate(buffer)
                             with DECODE_LATENCY.time():
-                                text = await asyncio.to_thread(_decode_buffer, audio)
+                                tail = await asyncio.to_thread(_decode_buffer, audio)
+                            text = join_segments(committed_text, tail)
                         log.info("final after EOS: %r", text)
                         await ws.send_json({"type": "final", "text": text})
                         EVENTS_TOTAL.labels(type="final_eos").inc()
@@ -353,6 +365,7 @@ async def asr_ws(ws: WebSocket) -> None:
                         buffered_samples = 0
                         decoded_at_samples = 0
                         last_partial = ""
+                        committed_text = ""
                         continue
                     elif cmd == "RESET":
                         log.info("RESET received")
@@ -360,16 +373,42 @@ async def asr_ws(ws: WebSocket) -> None:
                         buffered_samples = 0
                         decoded_at_samples = 0
                         last_partial = ""
+                        committed_text = ""
                         continue
                     else:
                         log.warning("未知文本指令: %r", cmd)
+
+            # 软切分：缓冲超过阈值且无 VAD 端点时，强制提交当前窗口、清空音频缓冲，
+            # 把单次解码窗口限制在 N 秒内。已提交文本累积进 committed_text，等 EOS 一并发 final。
+            if buffered_samples > 0 and should_soft_segment(
+                buffered_samples, STT_SOFT_SEGMENT, soft_segment_samples
+            ):
+                audio = np.concatenate(buffer)
+                with DECODE_LATENCY.time():
+                    seg = await asyncio.to_thread(_decode_buffer, audio)
+                committed_text = join_segments(committed_text, seg)
+                log.info("soft-segment commit (%d samples): %r", buffered_samples, committed_text)
+                buffer = []
+                buffered_samples = 0
+                decoded_at_samples = 0
+                EVENTS_TOTAL.labels(type="soft_segment").inc()
+                # 推一条带已提交前缀的 partial，避免界面文本回缩
+                if committed_text and committed_text != last_partial:
+                    last_partial = committed_text
+                    try:
+                        await ws.send_json({"type": "partial", "text": committed_text})
+                        EVENTS_TOTAL.labels(type="partial").inc()
+                    except Exception:
+                        break
+                continue
 
             # 节流 partial：缓冲较上次解码增长到阈值才重解码（同协程串行）
             if buffered_samples - decoded_at_samples >= partial_growth_samples:
                 audio = np.concatenate(buffer)
                 with DECODE_LATENCY.time():
-                    text = await asyncio.to_thread(_decode_buffer, audio)
+                    seg = await asyncio.to_thread(_decode_buffer, audio)
                 decoded_at_samples = buffered_samples
+                text = join_segments(committed_text, seg)
                 if text and text != last_partial:
                     last_partial = text
                     try:

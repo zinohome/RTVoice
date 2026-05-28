@@ -68,6 +68,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STT_NUM_THREADS: 1                  # GPU 时 CPU 线程减少
       STT_PROVIDER: cuda
+      # 软切分：长独白限制解码窗口（默认关；与 base compose 一致透传）
+      STT_SOFT_SEGMENT: ${STT_SOFT_SEGMENT:-false}
+      STT_SOFT_SEGMENT_MAX_S: ${STT_SOFT_SEGMENT_MAX_S:-8.0}
     deploy:
       resources:
         reservations:

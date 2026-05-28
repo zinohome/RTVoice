@@ -65,6 +65,8 @@ ws://stt-server:9090/asr
 | `STT_RULE1_SILENCE` | 1.2 | 端点检测：有结果后多少秒静音判端点 |
 | `STT_RULE2_SILENCE` | 0.8 | 端点检测：无结果时多少秒静音判端点 |
 | `STT_RULE3_MIN_UTT` | 20.0 | 端点检测：utterance 最小长度（秒） |
+| `STT_SOFT_SEGMENT` | false | 软切分开关。长独白无 VAD 端点时，缓冲超过 `MAX_S` 秒强制提交一段、限制单次解码窗口长度。服务端内部累积已提交前缀，对外仍每个 EOS 一次 final（协议/下游零改动） |
+| `STT_SOFT_SEGMENT_MAX_S` | 8.0 | 软切分阈值（秒）。SenseVoice offline 解码延迟≈0.33×窗口秒数：N 越小延迟越低但越易切断完整句子，N 越大语义越完整但延迟越高。8s≈2~2.5s 延迟 |
 | `LOG_LEVEL` | INFO | DEBUG/INFO/WARNING/ERROR |
 
 ## 自动验证（v0.3 实测）
