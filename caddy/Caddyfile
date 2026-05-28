@@ -41,21 +41,12 @@
 192.168.66.163, 127.0.0.1, localhost {
     tls internal
 
-    # --- realtime-server (web demo + session + WS) ---
-    # SP14: /admin/* 路径 → realtime-server /static/admin/*
-    handle /admin {
-        redir /admin/ permanent
-    }
-    # /admin/ 单独处理 → 显式映射到 /static/admin/index.html
-    # (FastAPI StaticFiles 默认 html=False，不会自动 serve index.html)
-    handle /admin/ {
-        rewrite * /static/admin/index.html
-        reverse_proxy realtime-server:9000
-    }
-    handle_path /admin/* {
-        reverse_proxy realtime-server:9000 {
-            rewrite /static/admin{uri}
-        }
+    # --- 旧 Admin 与 WebDemo 已归档（阶段④）：统一跳转到新版 Admin Console ---
+    # 旧 Alpine.js admin（/admin*）与旧 web demo（根路径）不再对外提供，
+    # 全部 301 到 /admin-v2/。静态资源仍在镜像内，仅入口被收起。
+    @old_admin path /admin /admin/*
+    handle @old_admin {
+        redir * /admin-v2/ permanent
     }
     handle /v1/admin/* {
         reverse_proxy realtime-server:9000
@@ -91,6 +82,10 @@
         reverse_proxy realtime-server:9000
     }
     handle /v1/realtime/* {
+        reverse_proxy realtime-server:9000
+    }
+    # Admin Console 服务端代理（cookie 鉴权 → 内部 key 转发各服务；含 /v1/console/asr WS）
+    handle /v1/console/* {
         reverse_proxy realtime-server:9000
     }
 
@@ -148,9 +143,9 @@
         reverse_proxy tts-server:9880
     }
 
-    # 默认入口：realtime web demo
+    # 默认入口：旧 web demo 已归档（阶段④），根路径跳转到新版 Admin Console
     handle / {
-        reverse_proxy realtime-server:9000
+        redir * /admin-v2/ permanent
     }
 
     # 其他都 404

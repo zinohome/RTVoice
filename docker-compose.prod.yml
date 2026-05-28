@@ -181,6 +181,14 @@ services:
   realtime-server:
     ports:
       - "${BIND_HOST}:${REALTIME_SERVER_PORT:-9000}:9000"
+    # 解析 host.docker.internal → 宿主 ollama（与 agent-worker 一致）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Realtime 管线的 LLM 也走宿主 ollama；此前缺这两行 → 连 llm-server:11434(未启动)
+      # → LLM 0 token → 每轮兜底回复「抱歉，我现在没听清楚」。根治该 bug。
+      LLM_BASE_URL: ${LLM_BASE_URL_PROD:-http://host.docker.internal:11434/v1}
+      LLM_MODEL: ${LLM_MODEL_PROD:-qwen2.5:7b}
 
   # ---------------------------------------------------------------
   # Agent Worker — 协议层不变，跑 CPU 即可（不分 GPU）
