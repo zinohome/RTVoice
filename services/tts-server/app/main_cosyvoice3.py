@@ -168,6 +168,33 @@ async def lifespan(app: FastAPI):
     )
     log.info("默认音色注册完成 (%.1fs)", time.time() - t0)
 
+    # 启动 warmup：跑一次完整 inference_zero_shot，丢弃输出。
+    # 首次推理 LLM/flow/hifigan 内部 cache 还没进入稳态，短文本会让 prompt
+    # 参考音频 token 透出（用户实测 default text="你好，这是 RTVoice TTS 测试。"
+    # 首次返回 prompt 音频"希望你以后能够做的比我还好呦"）。
+    # warmup 用一段长且与 prompt 无关的文本拉热 path，让后续真实请求走稳态。
+    log.info("启动 warmup 推理（丢弃输出）...")
+    t0 = time.time()
+
+    def _warmup() -> None:
+        warmup_text = "系统启动预热中，本句仅用于初始化推理路径，输出会被丢弃。"
+        _cosyvoice.model.token_hop_len = 25
+        for _ in _cosyvoice.inference_zero_shot(
+            warmup_text,
+            DEFAULT_PROMPT_TEXT,
+            DEFAULT_PROMPT_WAV,
+            zero_shot_spk_id=DEFAULT_SPK_ID,
+            stream=True,
+            speed=1.0,
+        ):
+            pass
+
+    try:
+        await asyncio.to_thread(_warmup)
+        log.info("warmup 推理完成 (%.1fs)", time.time() - t0)
+    except Exception:
+        log.exception("warmup 推理失败（不影响启动，首次请求可能仍受影响）")
+
     # 用户上传的 reference 持久化目录（admin 注册的音色由 spk2info.pt 自动恢复，
     # 这里只放原始 wav 文件用于审计/重建）
     VOICES_WAV_DIR.mkdir(parents=True, exist_ok=True)
