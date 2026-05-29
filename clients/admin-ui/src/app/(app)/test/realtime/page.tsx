@@ -56,8 +56,15 @@ export default function RealtimeTestPage() {
   const [streamingReply, setStreamingReply] = useState("");
   const [err, setErr] = useState("");
   const [prompt, setPrompt] = useState("你是语音助手。用中文简短回答（≤2 句）。");
-  const [voice, setVoice] = useState("default_zh_female");
+  const [voice, setVoice] = useState("");
   const [speed, setSpeed] = useState(1.0);
+
+  // 音色列表加载后自动选中第一个有效音色
+  useEffect(() => {
+    if (voices.length > 0 && !voices.includes(voice)) {
+      setVoice(voices[0]);
+    }
+  }, [voices]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const micRef = useRef<MicRecorder | null>(null);
@@ -202,7 +209,7 @@ export default function RealtimeTestPage() {
     try {
       const sess = await apiFetch<SessionResp>("/v1/sessions", {
         method: "POST",
-        body: JSON.stringify({ prompt, voice, speed }),
+        body: JSON.stringify({ prompt, ...(voice ? { voice } : {}), speed }),
       });
       const ws = new WebSocket(sess.ws_url);
       ws.binaryType = "arraybuffer";
