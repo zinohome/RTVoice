@@ -967,6 +967,31 @@ async def add_voice(
     # 刷新 voices 列表
     global _cosyvoice_voices
     _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
+
+    # 预热新音色：首次对新 speaker embedding 推理时 LLM KV-cache 处于冷态，
+    # 可能导致 reference audio token 泄漏到输出开头（前缀音频 bug）。
+    # 与启动 warmup 逻辑一致，通过一次丢弃推理拉热该音色路径。
+    if _inference_lock is not None:
+        def _warmup_new_voice() -> None:
+            warmup_text = "预热新音色，本句仅用于初始化推理路径，输出会被丢弃。"
+            _cosyvoice.model.token_hop_len = 25  # type: ignore[union-attr]
+            for _ in _cosyvoice.inference_zero_shot(  # type: ignore[union-attr]
+                warmup_text,
+                DEFAULT_PROMPT_TEXT,
+                DEFAULT_PROMPT_WAV,
+                zero_shot_spk_id=spk_id,
+                stream=True,
+                speed=1.0,
+            ):
+                pass
+
+        try:
+            async with _inference_lock:
+                await asyncio.to_thread(_warmup_new_voice)
+            log.info("[admin] warmup 新音色 %s 完成", spk_id)
+        except Exception:
+            log.exception("[admin] warmup 新音色失败（首次请求可能仍受影响）")
+
     return AddVoiceResponse(
         spk_id=spk_id,
         voice_count=len(_cosyvoice_voices),

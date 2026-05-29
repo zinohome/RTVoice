@@ -219,6 +219,48 @@ async def voices_add(
     return JSONResponse(status_code=r.status_code, content=r.json())
 
 
+# ──────────────────────────────────────────────────────────────────
+# 系统配置（运行时动态修改，无需重启；重启后恢复环境变量值）
+# ──────────────────────────────────────────────────────────────────
+class VoiceConfigResponse(BaseModel):
+    default_voice: str
+
+
+class PatchVoiceRequest(BaseModel):
+    voice: str = Field(..., min_length=1, max_length=64)
+
+
+@router.get("/config", response_model=VoiceConfigResponse,
+            summary="查询系统配置（default_voice 等）",
+            responses={401: {"model": ErrorResponse}})
+async def get_config(_sess: str = Depends(require_console_session)) -> VoiceConfigResponse:
+    return VoiceConfigResponse(default_voice=config.DEFAULT_VOICE)
+
+
+@router.patch("/config/voice", response_model=VoiceConfigResponse,
+              summary="动态设置默认音色（立即生效，重启后恢复环境变量值）",
+              responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse},
+                         502: {"model": ErrorResponse}})
+async def patch_default_voice(
+    req: PatchVoiceRequest,
+    _sess: str = Depends(require_console_session),
+) -> VoiceConfigResponse:
+    url = f"{TTS_BASE_URL}/v1/voices"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url, headers=_bearer(RTVOICE_API_KEY))
+        voices_data = r.json().get("voices", [])
+        if req.voice not in voices_data:
+            raise api_error(404, "console.voice_not_found", f"音色 {req.voice!r} 不存在")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise api_error(502, "console.voices_upstream", f"验证音色失败：{e}")
+    config.DEFAULT_VOICE = req.voice
+    log.info("[config] default_voice → %s", req.voice)
+    return VoiceConfigResponse(default_voice=config.DEFAULT_VOICE)
+
+
 @router.delete("/voices/{spk_id}", summary="删除音色",
                responses={401: {"model": ErrorResponse}, 502: {"model": ErrorResponse}})
 async def voices_delete(spk_id: str, _sess: str = Depends(require_console_session)) -> JSONResponse:

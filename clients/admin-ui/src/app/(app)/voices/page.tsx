@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AudioLines, Plus, Play, Trash2, Loader2, FileAudio, ShieldCheck } from "lucide-react";
+import { AudioLines, Plus, Play, Trash2, Loader2, FileAudio, ShieldCheck, Star } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { apiBlob, apiFetch, apiUpload } from "@/lib/api";
@@ -16,8 +16,6 @@ import {
 } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/console-ui";
 
-const DEFAULT_VOICE = "default_zh_female";
-
 export default function VoicesPage() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery<{ voices: string[] }>({
@@ -26,13 +24,36 @@ export default function VoicesPage() {
   });
   const voices = data?.voices ?? [];
 
+  const { data: cfgData, isLoading: cfgLoading } = useQuery<{ default_voice: string }>({
+    queryKey: ["console", "config"],
+    queryFn: () => apiFetch<{ default_voice: string }>("/v1/console/config"),
+  });
+  const defaultVoice = cfgData?.default_voice ?? "";
+
   const [addOpen, setAddOpen] = useState(false);
   const [spkId, setSpkId] = useState("");
   const [promptText, setPromptText] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [previewing, setPreviewing] = useState<string | null>(null);
 
-  const refresh = () => qc.invalidateQueries({ queryKey: ["console", "voices"] });
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["console", "voices"] });
+    qc.invalidateQueries({ queryKey: ["console", "config"] });
+  };
+
+  const setDefaultMut = useMutation({
+    mutationFn: (voice: string) =>
+      apiFetch<{ default_voice: string }>("/v1/console/config/voice", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ voice }),
+      }),
+    onSuccess: (r) => {
+      toast.success(`默认音色已设为「${r.default_voice}」`);
+      qc.invalidateQueries({ queryKey: ["console", "config"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
 
   const addMut = useMutation({
     mutationFn: () => {
@@ -85,14 +106,14 @@ export default function VoicesPage() {
         </Button>
       </div>
 
-      {isLoading ? (
+      {isLoading || cfgLoading ? (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-lg" />)}
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {voices.map((v) => {
-            const isDefault = v === DEFAULT_VOICE;
+            const isDefault = v === defaultVoice;
             return (
               <Card key={v} className="flex flex-col gap-3 p-4">
                 <div className="flex items-center gap-2">
@@ -104,11 +125,21 @@ export default function VoicesPage() {
                     </Badge>
                   )}
                 </div>
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                   <Button variant="outline" size="sm" onClick={() => preview(v)} disabled={previewing === v}>
                     {previewing === v ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
                     试听
                   </Button>
+                  {!isDefault && (
+                    <Button variant="outline" size="sm"
+                      onClick={() => setDefaultMut.mutate(v)}
+                      disabled={setDefaultMut.isPending}>
+                      {setDefaultMut.isPending && setDefaultMut.variables === v
+                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        : <Star className="h-3.5 w-3.5" />}
+                      设为默认
+                    </Button>
+                  )}
                   {!isDefault && (
                     <Button variant="outline" size="sm"
                       onClick={() => { if (confirm(`确认删除音色「${v}」？`)) delMut.mutate(v); }}
