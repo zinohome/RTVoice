@@ -87,7 +87,9 @@ for dir in \
   "${DATA_BASE}/grafana"
 do
   mkdir -p "${dir}"
-  log "  mkdir -p ${dir}"
+  # 容器以非 root 用户运行，需要写权限
+  chmod 777 "${dir}"
+  log "  mkdir -p ${dir} (chmod 777)"
 done
 ok "数据目录创建完成"
 
@@ -96,17 +98,10 @@ log "--- [4/7] 初始化 API Keys ---"
 
 KEYS_FILE="${DATA_BASE}/keys/keys.yaml"
 if [[ ! -f "${KEYS_FILE}" ]]; then
-  RTVOICE_API_KEY="$(get_env RTVOICE_API_KEY)"
-  cat > "${KEYS_FILE}" << KEYS_EOF
-# RTVoice API Keys — 由 agent-deploy.sh 初始化
-# 通过 Admin Console 管理：https://${SERVER_IP}/admin-v2/
-keys:
-  - key: "${RTVOICE_API_KEY}"
-    name: "default"
-    scopes: ["stt", "tts", "tokens", "realtime"]
-    created_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-KEYS_EOF
-  ok "keys.yaml 已初始化"
+  # 创建空 keys 列表；容器启动时会自动将 RTVOICE_API_KEY env var 迁移为正确格式
+  printf 'keys: []\n' > "${KEYS_FILE}"
+  chmod 666 "${KEYS_FILE}"
+  ok "keys.yaml 已初始化（空列表，容器启动时自动迁移 RTVOICE_API_KEY）"
 else
   ok "keys.yaml 已存在（跳过）"
 fi
