@@ -39,6 +39,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from fastapi.exceptions import RequestValidationError
 from app.error_schema import ErrorResponse, api_error, http_exception_handler, validation_exception_handler
+from app.segmentation import join_segments, should_soft_segment
 
 from rtvoice_auth.models import Key
 from rtvoice_auth.verify import verify_key
@@ -65,70 +66,75 @@ log = logging.getLogger("rtvoice.stt")
 
 MODELS_DIR = Path(os.environ.get("STT_MODELS_DIR", "/app/models"))
 MODEL_NAME = os.environ.get(
-    "STT_MODEL", "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
+    "STT_MODEL", "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
 )
 MODEL_DIR = MODELS_DIR / MODEL_NAME
 NUM_THREADS = int(os.environ.get("STT_NUM_THREADS", "2"))
 PROVIDER = os.environ.get("STT_PROVIDER", "cpu")  # "cpu" | "cuda"
 SAMPLE_RATE = 16000
 
-# 端点检测参数（agent-worker 已有 VAD，这里参数偏宽松，兜底用）
-RULE1_TRAILING_SILENCE_S = float(os.environ.get("STT_RULE1_SILENCE", "1.2"))
-RULE2_TRAILING_SILENCE_S = float(os.environ.get("STT_RULE2_SILENCE", "0.8"))
-RULE3_MIN_UTT_LEN_S = float(os.environ.get("STT_RULE3_MIN_UTT", "20.0"))
+# SenseVoice 识别语言："auto"|"zh"|"en"|"ja"|"ko"|"yue"（空串=auto）
+STT_LANGUAGE = os.environ.get("STT_LANGUAGE", "auto")
+# 反向文本归一化（数字/日期等转标准书写形式）
+STT_USE_ITN = os.environ.get("STT_USE_ITN", "true").lower() in ("1", "true", "yes")
+# partial 重解码节流：累积音频每增长这么多秒才重新解码一次，避免短句内 O(N²) 抖动
+PARTIAL_MIN_GROWTH_S = float(os.environ.get("STT_PARTIAL_MIN_GROWTH_S", "0.6"))
+# 软切分（默认关）：长独白无 VAD 静音端点时，缓冲超过 SOFT_SEGMENT_MAX_S 秒就强制提交一段、
+# 清空音频缓冲，把单次解码窗口限制在 N 秒内（SenseVoice 解码延迟≈0.33×窗口秒数，超长还掉字）。
+# 服务端内部累积「已提交前缀」，对外仍每个 EOS 只发一次 final，协议/下游零改动。
+# tradeoff：N 越小延迟越低但越易切断完整句子；N 越大语义越完整但延迟越高。
+STT_SOFT_SEGMENT = os.environ.get("STT_SOFT_SEGMENT", "false").lower() in ("1", "true", "yes")
+STT_SOFT_SEGMENT_MAX_S = float(os.environ.get("STT_SOFT_SEGMENT_MAX_S", "8.0"))
 
 
-def _build_recognizer() -> sherpa_onnx.OnlineRecognizer:
-    """加载 streaming Zipformer (transducer) 模型。
+def _build_recognizer() -> sherpa_onnx.OfflineRecognizer:
+    """加载 SenseVoice-Small（非自回归离线模型）。
 
-    与 Paraformer 不同，Zipformer 是 transducer 架构，需要 encoder/decoder/joiner 三件套。
-    协议层（WS 输入输出）与 recognizer 内部架构无关——切换 ASR 模型不影响 stt 客户端。
+    决策（v0.20）：从 2023 streaming Zipformer (transducer + greedy) 切到 SenseVoice。
+    Zipformer 自回归 + greedy 解码会掉进 token 重复循环（啦啦啦/妈妈妈幻觉）；
+    SenseVoice 是非自回归、一次性输出整段，从架构上免疫重复幻觉，中文 CER 也更低，
+    且 int8 权重 <300MB、CPU 即可、显存零占用。
+
+    SenseVoice 是 offline 模型（不逐帧流式），但 RTVoice 的断句权威是客户端 silero VAD：
+    客户端 feed PCM、发 EOS 标记一句结束。服务端在缓冲上做整段解码即可，WS 协议不变。
     """
-    encoder = MODEL_DIR / "encoder-epoch-99-avg-1.int8.onnx"
-    decoder = MODEL_DIR / "decoder-epoch-99-avg-1.int8.onnx"
-    joiner = MODEL_DIR / "joiner-epoch-99-avg-1.int8.onnx"
+    model = MODEL_DIR / "model.int8.onnx"
     tokens = MODEL_DIR / "tokens.txt"
 
-    log.info("加载 sherpa-onnx Streaming Zipformer:")
-    log.info("  encoder=%s (%.1fMB)", encoder, encoder.stat().st_size / 1e6)
-    log.info("  decoder=%s (%.1fMB)", decoder, decoder.stat().st_size / 1e6)
-    log.info("  joiner=%s  (%.1fMB)", joiner, joiner.stat().st_size / 1e6)
+    log.info("加载 sherpa-onnx SenseVoice (offline, non-autoregressive):")
+    log.info("  model=%s (%.1fMB)", model, model.stat().st_size / 1e6)
     log.info("  tokens=%s", tokens)
-    log.info("  threads=%d provider=%s", NUM_THREADS, PROVIDER)
+    log.info("  threads=%d provider=%s language=%s itn=%s",
+             NUM_THREADS, PROVIDER, STT_LANGUAGE, STT_USE_ITN)
 
-    # 关键决策（v0.5.3）：禁用 sherpa 的端点检测（is_endpoint）。
-    # 客户端 agent 的 silero VAD 是唯一权威——它告诉我们一句话什么时候结束。
-    # 如果 sherpa 自己也检测端点，会和 agent VAD 冲突 + 在 decode_loop 里
-    # 触发 stream.reset() 引起 race condition。RULE1/2/3 参数保留为
-    # 兼容字段，但 enable_endpoint_detection=False 时 sherpa 完全不用它们。
-    return sherpa_onnx.OnlineRecognizer.from_transducer(
-        encoder=str(encoder),
-        decoder=str(decoder),
-        joiner=str(joiner),
+    return sherpa_onnx.OfflineRecognizer.from_sense_voice(
+        model=str(model),
         tokens=str(tokens),
         num_threads=NUM_THREADS,
         sample_rate=SAMPLE_RATE,
         feature_dim=80,
         decoding_method="greedy_search",
         provider=PROVIDER,
-        enable_endpoint_detection=False,
-        rule1_min_trailing_silence=RULE1_TRAILING_SILENCE_S,
-        rule2_min_trailing_silence=RULE2_TRAILING_SILENCE_S,
-        rule3_min_utterance_length=RULE3_MIN_UTT_LEN_S,
+        language="" if STT_LANGUAGE == "auto" else STT_LANGUAGE,
+        use_itn=STT_USE_ITN,
     )
 
 
 # 全局单例（loadtime 即创建）
-_recognizer: sherpa_onnx.OnlineRecognizer | None = None
+_recognizer: sherpa_onnx.OfflineRecognizer | None = None
 
 
-def _get_text(stream) -> str:
-    """sherpa-onnx 1.13+ 的 get_result 直接返回 str；旧版返回带 .text 的对象。
+def _decode_buffer(samples: np.ndarray) -> str:
+    """在累积音频缓冲上做一次整段离线解码，返回识别文本。
 
-    兼容两种 API。
+    SenseVoice 是 offline：每次都用新 stream 喂全部样本、解码一次。
+    用于 partial（在增长中的缓冲上重解码）和 final（EOS 后最终缓冲）。
     """
     assert _recognizer is not None
-    r = _recognizer.get_result(stream)
+    stream = _recognizer.create_stream()
+    stream.accept_waveform(SAMPLE_RATE, samples)
+    _recognizer.decode_stream(stream)
+    r = stream.result
     return r if isinstance(r, str) else r.text
 
 
@@ -188,7 +194,7 @@ async def lifespan(app: FastAPI):
             log.exception("key_watcher stop failed")
 
 
-app = FastAPI(title="RTVoice STT Server", version="0.19.0", lifespan=lifespan)
+app = FastAPI(title="RTVoice STT Server", version="0.21.0", lifespan=lifespan)
 
 _cors_raw = os.environ.get("RTVOICE_CORS_ORIGINS", "*").strip()
 _cors_origins = ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
@@ -231,9 +237,10 @@ async def info() -> dict:
     # SP10 G4 — 4 service /info 统一返 service/version/capabilities/models
     return {
         "service": "stt-server",
-        "version": "0.19.0",
+        "version": "0.21.0",
         "capabilities": {
-            "streaming": True,
+            "streaming": False,
+            "architecture": "offline-non-autoregressive",
             "subprotocol_bearer": True,
             "endpoint_detection": False,
         },
@@ -243,11 +250,11 @@ async def info() -> dict:
         },
         "config": {
             "num_threads": NUM_THREADS,
-            "endpoint_rules": {
-                "rule1_silence_s": RULE1_TRAILING_SILENCE_S,
-                "rule2_silence_s": RULE2_TRAILING_SILENCE_S,
-                "rule3_min_utt_s": RULE3_MIN_UTT_LEN_S,
-            },
+            "language": STT_LANGUAGE,
+            "use_itn": STT_USE_ITN,
+            "partial_min_growth_s": PARTIAL_MIN_GROWTH_S,
+            "soft_segment": STT_SOFT_SEGMENT,
+            "soft_segment_max_s": STT_SOFT_SEGMENT_MAX_S,
         },
     }
 
@@ -276,18 +283,17 @@ async def _verify_ws_key(ws: WebSocket) -> Key | None:
 
 @app.websocket("/v1/asr")
 async def asr_ws(ws: WebSocket) -> None:
-    """v0.5.3：单线程消费循环，杜绝 stream 并发访问。
+    """SenseVoice (offline) WS handler。
 
-    旧版（v0.5.2）有两个 task 同时操作 sherpa-onnx Stream（decode_loop +
-    EOS handler），加上 sherpa 自己的端点检测会异步 reset，三方 race
-    导致 'STT 连接已关闭' WS crash。
+    协议与流式版本完全一致（client feed PCM / send EOS / recv partial+final），
+    但内部改为 offline 缓冲解码：
 
-    新版：
-        - 取消独立 decode_loop task
-        - 单一循环：receive WS msg（带超时）→ accept_waveform 或 EOS 处理
-        - 每个循环周期检查 is_ready → 同线程内 decode → emit partial
-        - sherpa endpoint detection 在 _build_recognizer 已禁用
-        - 全程一个协程操作 stream，无并发，无 race
+        - 累积收到的 PCM 到一个 float32 缓冲
+        - 缓冲每增长 PARTIAL_MIN_GROWTH_S 秒就在「当前全部缓冲」上重解码一次 → partial
+          （SenseVoice 极快、句子短，整段重解码成本可忽略；节流避免高频抖动）
+        - 收到 EOS：在最终缓冲上解码一次 → final，清空缓冲
+        - RESET：清空缓冲
+        - 单协程串行操作，无并发 race（offline 无内部 stream 状态，天然安全）
     """
     key = await _verify_ws_key(ws)
     if key is None:
@@ -301,21 +307,24 @@ async def asr_ws(ws: WebSocket) -> None:
         await ws.close()
         return
 
-    stream = _recognizer.create_stream()
+    buffer: list[np.ndarray] = []
+    buffered_samples = 0
+    decoded_at_samples = 0
     last_partial: str = ""
+    committed_text: str = ""  # 软切分已提交前缀（软切分关时恒为空，行为不变）
     log.info("WS connected: %s", ws.client)
     WS_TOTAL.inc()
     WS_ACTIVE.inc()
 
-    # decode 节奏：每 50ms 跑一次（与旧 _decode_loop 一致）
-    DECODE_INTERVAL_S = 0.05
-    last_decode_t = 0.0
+    partial_growth_samples = int(PARTIAL_MIN_GROWTH_S * SAMPLE_RATE)
+    soft_segment_samples = int(STT_SOFT_SEGMENT_MAX_S * SAMPLE_RATE)
+    # 收 WS 消息的超时——超时则有机会跑一次 partial 解码
+    RECV_TIMEOUT_S = 0.1
 
     try:
         while True:
-            # ws.receive() 带超时——超时返回 None 让我们能周期性 decode
             try:
-                msg = await asyncio.wait_for(ws.receive(), timeout=DECODE_INTERVAL_S)
+                msg = await asyncio.wait_for(ws.receive(), timeout=RECV_TIMEOUT_S)
             except asyncio.TimeoutError:
                 msg = None
 
@@ -330,8 +339,8 @@ async def asr_ws(ws: WebSocket) -> None:
                     # PCM int16 LE → float32 [-1, 1]
                     samples = np.frombuffer(data_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                     if samples.size > 0:
-                        # accept_waveform 是同步快操作，无需 to_thread
-                        stream.accept_waveform(SAMPLE_RATE, samples)
+                        buffer.append(samples)
+                        buffered_samples += samples.size
                         # SP10 G3 — per-key audio seconds counter
                         try:
                             STT_AUDIO_SECONDS_TOTAL.labels(
@@ -342,35 +351,64 @@ async def asr_ws(ws: WebSocket) -> None:
                 elif data_text:
                     cmd = data_text.strip().upper()
                     if cmd == "EOS":
-                        log.info("EOS received, flushing")
-                        stream.input_finished()
-                        while _recognizer.is_ready(stream):
+                        log.info("EOS received, decoding %d samples", buffered_samples)
+                        text = committed_text
+                        if buffered_samples > 0:
+                            audio = np.concatenate(buffer)
                             with DECODE_LATENCY.time():
-                                await asyncio.to_thread(_recognizer.decode_stream, stream)
-                        text = _get_text(stream)
+                                tail = await asyncio.to_thread(_decode_buffer, audio)
+                            text = join_segments(committed_text, tail)
                         log.info("final after EOS: %r", text)
                         await ws.send_json({"type": "final", "text": text})
                         EVENTS_TOTAL.labels(type="final_eos").inc()
-                        await asyncio.to_thread(_recognizer.reset, stream)
+                        buffer = []
+                        buffered_samples = 0
+                        decoded_at_samples = 0
                         last_partial = ""
-                        last_decode_t = 0.0
+                        committed_text = ""
                         continue
                     elif cmd == "RESET":
                         log.info("RESET received")
-                        await asyncio.to_thread(_recognizer.reset, stream)
+                        buffer = []
+                        buffered_samples = 0
+                        decoded_at_samples = 0
                         last_partial = ""
-                        last_decode_t = 0.0
+                        committed_text = ""
                         continue
                     else:
                         log.warning("未知文本指令: %r", cmd)
 
-            # 周期性 decode + 推 partial（同协程，与上面的处理 100% 串行）
-            now = asyncio.get_event_loop().time()
-            if (now - last_decode_t) >= DECODE_INTERVAL_S and _recognizer.is_ready(stream):
+            # 软切分：缓冲超过阈值且无 VAD 端点时，强制提交当前窗口、清空音频缓冲，
+            # 把单次解码窗口限制在 N 秒内。已提交文本累积进 committed_text，等 EOS 一并发 final。
+            if buffered_samples > 0 and should_soft_segment(
+                buffered_samples, STT_SOFT_SEGMENT, soft_segment_samples
+            ):
+                audio = np.concatenate(buffer)
                 with DECODE_LATENCY.time():
-                    await asyncio.to_thread(_recognizer.decode_stream, stream)
-                last_decode_t = now
-                text = _get_text(stream)
+                    seg = await asyncio.to_thread(_decode_buffer, audio)
+                committed_text = join_segments(committed_text, seg)
+                log.info("soft-segment commit (%d samples): %r", buffered_samples, committed_text)
+                buffer = []
+                buffered_samples = 0
+                decoded_at_samples = 0
+                EVENTS_TOTAL.labels(type="soft_segment").inc()
+                # 推一条带已提交前缀的 partial，避免界面文本回缩
+                if committed_text and committed_text != last_partial:
+                    last_partial = committed_text
+                    try:
+                        await ws.send_json({"type": "partial", "text": committed_text})
+                        EVENTS_TOTAL.labels(type="partial").inc()
+                    except Exception:
+                        break
+                continue
+
+            # 节流 partial：缓冲较上次解码增长到阈值才重解码（同协程串行）
+            if buffered_samples - decoded_at_samples >= partial_growth_samples:
+                audio = np.concatenate(buffer)
+                with DECODE_LATENCY.time():
+                    seg = await asyncio.to_thread(_decode_buffer, audio)
+                decoded_at_samples = buffered_samples
+                text = join_segments(committed_text, seg)
                 if text and text != last_partial:
                     last_partial = text
                     try:

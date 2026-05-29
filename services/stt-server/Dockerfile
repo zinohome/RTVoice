@@ -1,13 +1,13 @@
-# stt-server — sherpa-onnx 中文流式 ASR (CPU)
+# stt-server — sherpa-onnx 中文 ASR (CPU)
 #
-# v0.3 dev：sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
+# v0.20：SenseVoice-Small（FunAudioLLM，非自回归 offline 模型）
 #
 # 模型选择历史：
-#   - ENGINES.md §2 原计划用 Paraformer streaming
-#   - 实测发现 Paraformer streaming 的 HF 仓库匿名下载受限（401）
-#   - Zipformer streaming 是 ENGINES.md 同档备选（中文 SOTA + CPU 友好），
-#     公开可下载，与 Paraformer 同协议接入，零改动切换
-#   - v0.5 prod 阶段评估实测 CER 后再决定是否切回 Paraformer
+#   - v0.3 dev：Paraformer streaming（HF 匿名下载 401，放弃）
+#   - v0.3-0.19：streaming Zipformer bilingual zh-en 2023-02-20（transducer+greedy）
+#     —— 自回归+贪心解码会掉进 token 重复循环（啦啦啦/妈妈妈幻觉）
+#   - v0.20：切 SenseVoice-Small —— 非自回归一次性出整段，架构性免疫重复幻觉，
+#     中文 CER 更低，int8 权重 <300MB、CPU 即可、显存零占用
 
 FROM python:3.11-slim
 
@@ -29,18 +29,16 @@ RUN pip install --upgrade pip && \
     pip install -r /app/requirements.txt && \
     pip install --no-cache-dir /app/common
 
-# Zipformer streaming bilingual zh-en (int8 量化版，~120MB 总体)
-ARG MODEL_NAME=sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
-ARG HF_REPO=csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
+# SenseVoice-Small（int8 量化版，model.int8.onnx ~230MB + tokens.txt）
+ARG MODEL_NAME=sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17
+ARG HF_REPO=csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17
 
 COPY scripts/download_model.sh /usr/local/bin/download_model.sh
 RUN chmod +x /usr/local/bin/download_model.sh
 
 RUN mkdir -p /app/models/${MODEL_NAME} && cd /app/models/${MODEL_NAME} && \
     base="https://huggingface.co/${HF_REPO}/resolve/main" && \
-    /usr/local/bin/download_model.sh "${base}/encoder-epoch-99-avg-1.int8.onnx" "encoder-epoch-99-avg-1.int8.onnx" 1048576 && \
-    /usr/local/bin/download_model.sh "${base}/decoder-epoch-99-avg-1.int8.onnx" "decoder-epoch-99-avg-1.int8.onnx" 102400 && \
-    /usr/local/bin/download_model.sh "${base}/joiner-epoch-99-avg-1.int8.onnx" "joiner-epoch-99-avg-1.int8.onnx" 1048576 && \
+    /usr/local/bin/download_model.sh "${base}/model.int8.onnx" "model.int8.onnx" 104857600 && \
     /usr/local/bin/download_model.sh "${base}/tokens.txt" "tokens.txt" 1024
 
 # 卸载下载工具

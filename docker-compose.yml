@@ -278,7 +278,7 @@ services:
     build:
       context: .
       dockerfile: services/stt-server/Dockerfile
-    image: rtvoice/stt-server:v0.19.0
+    image: rtvoice/stt-server:v0.21.0
     container_name: rtvoice-stt
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -286,6 +286,12 @@ services:
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STT_NUM_THREADS: ${STT_NUM_THREADS:-2}
+      # SenseVoice 识别语言（auto|zh|en|ja|ko|yue）与反向文本归一化
+      STT_LANGUAGE: ${STT_LANGUAGE:-auto}
+      STT_USE_ITN: ${STT_USE_ITN:-true}
+      # 软切分：长独白无 VAD 端点时，缓冲超过 MAX_S 秒强制提交一段、限制解码窗口长度（默认关）
+      STT_SOFT_SEGMENT: ${STT_SOFT_SEGMENT:-false}
+      STT_SOFT_SEGMENT_MAX_S: ${STT_SOFT_SEGMENT_MAX_S:-8.0}
       # Bearer 鉴权（留空 = 关闭，dev 默认；prod 暴露公网时必填）
       RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
       RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
@@ -300,7 +306,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 2G
           cpus: "2.0"
     logging:
       driver: json-file
