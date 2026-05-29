@@ -186,7 +186,7 @@ services:
     build:
       context: ./clients/admin-ui
       dockerfile: Dockerfile
-    image: rtvoice/admin-ui:v0.19.0
+    image: rtvoice/admin-ui:v0.19.4
     container_name: rtvoice-admin-ui
     profiles: ["dev", "prod"]
     restart: unless-stopped
