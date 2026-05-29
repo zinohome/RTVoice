@@ -219,6 +219,46 @@ async def voices_add(
     return JSONResponse(status_code=r.status_code, content=r.json())
 
 
+# ──────────────────────────────────────────────────────────────────
+# 运行时配置（默认音色）
+# ──────────────────────────────────────────────────────────────────
+class SetDefaultVoiceRequest(BaseModel):
+    voice: str = Field(..., min_length=1, max_length=64)
+
+
+@router.get("/config", summary="获取运行时配置",
+            responses={401: {"model": ErrorResponse}})
+async def get_config(_sess: str = Depends(require_console_session)) -> JSONResponse:
+    return JSONResponse({"default_voice": config.DEFAULT_VOICE})
+
+
+@router.patch("/config/voice", summary="设置默认音色（立即生效，无需重启）",
+              responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse},
+                         502: {"model": ErrorResponse}})
+async def set_default_voice(
+    req: SetDefaultVoiceRequest, _sess: str = Depends(require_console_session)
+) -> JSONResponse:
+    # 验证音色在 tts-server 中存在
+    url = f"{TTS_BASE_URL}/v1/voices"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url, headers=_bearer(RTVOICE_API_KEY))
+        if r.status_code != 200:
+            raise api_error(502, "console.voices_upstream", f"无法获取音色列表：HTTP {r.status_code}")
+        voices: list[str] = r.json().get("voices", [])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise api_error(502, "console.voices_upstream", f"获取音色列表失败：{e}")
+
+    if req.voice not in voices:
+        raise api_error(404, "console.voice_not_found", f"音色 {req.voice!r} 不存在")
+
+    config.DEFAULT_VOICE = req.voice
+    log.info("[console] default_voice updated → %s", req.voice)
+    return JSONResponse({"default_voice": config.DEFAULT_VOICE})
+
+
 @router.delete("/voices/{spk_id}", summary="删除音色",
                responses={401: {"model": ErrorResponse}, 502: {"model": ErrorResponse}})
 async def voices_delete(spk_id: str, _sess: str = Depends(require_console_session)) -> JSONResponse:
