@@ -58,7 +58,7 @@ AUDIT_QUEUE_MAX = _int("RTVOICE_AUDIT_QUEUE_MAX", 1000)
 PROMPT_MAX_CHARS = _int("RTVOICE_PROMPT_MAX_CHARS", 2000)
 
 # Voice defaults
-DEFAULT_VOICE = _str("TTS_VOICE", "zf_xiaobei")
+DEFAULT_VOICE = _str("TTS_VOICE", "default_zh_female")
 DEFAULT_LANG = _str("TTS_LANG", "cmn")
 
 # Logging

@@ -56,13 +56,14 @@ export default function RealtimeTestPage() {
   const [streamingReply, setStreamingReply] = useState("");
   const [err, setErr] = useState("");
   const [prompt, setPrompt] = useState("你是语音助手。用中文简短回答（≤2 句）。");
-  const [voice, setVoice] = useState("");
+  const [voice, setVoice] = useState("default_zh_female");
   const [speed, setSpeed] = useState(1.0);
 
-  // 音色列表加载后自动选中第一个有效音色
+  // 音色列表加载后：优先保留 default_zh_female，若不在列表则选第一个
   useEffect(() => {
     if (voices.length > 0 && !voices.includes(voice)) {
-      setVoice(voices[0]);
+      const preferred = voices.includes("default_zh_female") ? "default_zh_female" : voices[0];
+      setVoice(preferred);
     }
   }, [voices]);
 
