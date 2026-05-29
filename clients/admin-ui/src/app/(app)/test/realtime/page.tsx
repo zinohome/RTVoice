@@ -30,20 +30,6 @@ const SPEECH_RMS = 0.02;
 const SILENCE_HANG_MS = 900;
 const MIN_SPEECH_MS = 250;
 
-function pcm16ToWav(pcm: Uint8Array, rate = 24000): Blob {
-  const header = new ArrayBuffer(44);
-  const dv = new DataView(header);
-  const w = (off: number, s: string) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
-  const dataLen = pcm.byteLength;
-  w(0, "RIFF"); dv.setUint32(4, 36 + dataLen, true); w(8, "WAVE"); w(12, "fmt ");
-  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
-  dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true);
-  dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
-  w(36, "data"); dv.setUint32(40, dataLen, true);
-  const body = pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength) as ArrayBuffer;
-  return new Blob([header, body], { type: "audio/wav" });
-}
-
 /** 归一化 RMS 能量；int16 PCM bytes → [0,1) 区间能量值。 */
 function frameRms(buf: ArrayBuffer): number {
   const pcm = new Int16Array(buf);
@@ -66,8 +52,16 @@ export default function RealtimeTestPage() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const micRef = useRef<MicRecorder | null>(null);
-  const audioChunks = useRef<Uint8Array[]>([]);
   const replyRef = useRef("");
+
+  // TTS 渐进播放：收到一块 PCM 即排进 Web Audio 队列边到边放，而不是缓冲到
+  // response.done 再整段播放——后者导致"好几句长内容一起发出"。
+  const playCtxRef = useRef<AudioContext | null>(null);
+  const nextStartRef = useRef(0);        // 下一块的调度起点（秒）
+  const pendingSrcRef = useRef(0);        // 已排程未播完的源数量
+  const doneRef = useRef(false);          // 本轮 response.done 是否已到
+  // 流式回复文本用 rAF 合并渲染，避免每个 LLM token 都触发一次 React 重渲染。
+  const replyRafRef = useRef<number | null>(null);
 
   // VAD/通话状态镜像（onFrame 闭包内读取，避免 state 闭包过期）
   const stageRef = useRef<Stage>("idle");
@@ -83,29 +77,62 @@ export default function RealtimeTestPage() {
     lastVoiceRef.current = 0;
   };
 
-  const playAudio = () => {
-    if (audioChunks.current.length === 0) {
-      // 没有音频也要恢复聆听
-      if (stageRef.current !== "idle" && stageRef.current !== "error") setStage("listening");
-      resetVad();
-      return;
+  const ensurePlayCtx = (): AudioContext => {
+    if (!playCtxRef.current || playCtxRef.current.state === "closed") {
+      const AC =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      playCtxRef.current = new AC();
     }
-    const total = audioChunks.current.reduce((n, c) => n + c.byteLength, 0);
-    const merged = new Uint8Array(total);
-    let off = 0;
-    for (const c of audioChunks.current) { merged.set(c, off); off += c.byteLength; }
-    audioChunks.current = [];
-    const url = URL.createObjectURL(pcm16ToWav(merged));
-    const a = new Audio(url);
-    const resume = () => {
-      URL.revokeObjectURL(url);
-      // 回放结束后再恢复聆听 + 重置 VAD，避免把 TTS 回放采进麦克风形成自问自答
+    if (playCtxRef.current.state === "suspended") void playCtxRef.current.resume();
+    return playCtxRef.current;
+  };
+
+  // 全部已排程音频播完 + 本轮 response.done 已到 → 恢复聆听。保留回声防护：
+  // 思考/回放期间麦克风静音（onFrame 看 stage），直到这里才切回 listening + 重置 VAD。
+  const maybeFinishPlayback = () => {
+    if (doneRef.current && pendingSrcRef.current <= 0) {
+      doneRef.current = false;
+      nextStartRef.current = 0;
       if (stageRef.current !== "idle" && stageRef.current !== "error") setStage("listening");
       resetVad();
+    }
+  };
+
+  // 收到一块 TTS PCM（24k int16 LE mono）→ 接到播放队列尾部，边到边放。
+  const enqueuePcm = (bytes: ArrayBuffer) => {
+    const i16 = new Int16Array(bytes);
+    if (i16.length === 0) return;
+    const ctx = ensurePlayCtx();
+    const buf = ctx.createBuffer(1, i16.length, 24000);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < i16.length; i++) ch[i] = i16[i] / 32768;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    const startAt = Math.max(ctx.currentTime, nextStartRef.current);
+    src.start(startAt);
+    nextStartRef.current = startAt + buf.duration;
+    pendingSrcRef.current += 1;
+    src.onended = () => {
+      pendingSrcRef.current -= 1;
+      maybeFinishPlayback();
     };
-    a.onended = resume;
-    a.onerror = resume;
-    a.play().catch(() => resume());
+  };
+
+  // 新一轮开始：清空上一轮的播放调度状态。
+  const resetPlayback = () => {
+    doneRef.current = false;
+    nextStartRef.current = 0;
+    pendingSrcRef.current = 0;
+  };
+
+  const scheduleReplyRender = () => {
+    if (replyRafRef.current != null) return;
+    replyRafRef.current = requestAnimationFrame(() => {
+      replyRafRef.current = null;
+      setStreamingReply(replyRef.current);
+    });
   };
 
   const onFrame = (frame: ArrayBuffer) => {
@@ -143,6 +170,10 @@ export default function RealtimeTestPage() {
     micRef.current = null;
     if (wsRef.current && wsRef.current.readyState <= 1) wsRef.current.close();
     wsRef.current = null;
+    if (replyRafRef.current != null) { cancelAnimationFrame(replyRafRef.current); replyRafRef.current = null; }
+    resetPlayback();
+    if (playCtxRef.current && playCtxRef.current.state !== "closed") void playCtxRef.current.close();
+    playCtxRef.current = null;
     resetVad();
     setStage("idle");
     setPartial("");
@@ -155,6 +186,9 @@ export default function RealtimeTestPage() {
     setPartial("");
     setStreamingReply("");
     resetVad();
+    resetPlayback();
+    // 在用户手势（点击开始通话）内创建/恢复播放 AudioContext，满足浏览器自动播放策略。
+    ensurePlayCtx();
     setStage("connecting");
     try {
       const sess = await apiFetch<SessionResp>("/v1/sessions", {
@@ -181,7 +215,7 @@ export default function RealtimeTestPage() {
       ws.onclose = () => setStage((s) => (s === "error" ? s : "idle"));
       ws.onmessage = (ev) => {
         if (ev.data instanceof ArrayBuffer) {
-          audioChunks.current.push(new Uint8Array(ev.data));
+          enqueuePcm(ev.data); // 边到边放，不再缓冲到 done 整段播
           return;
         }
         let m: { type?: string; text?: string; message?: string };
@@ -195,25 +229,30 @@ export default function RealtimeTestPage() {
             setPartial("");
             replyRef.current = "";
             setStreamingReply("");
+            resetPlayback(); // 新一轮，清空上一轮播放调度状态
             setStage("thinking");
             break;
           case "response.text":
             replyRef.current += m.text ?? "";
-            setStreamingReply(replyRef.current);
+            scheduleReplyRender();
             setStage("speaking");
             break;
           case "response.done": {
             const full = m.text ?? replyRef.current;
             if (full) setLines((p) => [...p, { role: "assistant", text: full }]);
+            if (replyRafRef.current != null) { cancelAnimationFrame(replyRafRef.current); replyRafRef.current = null; }
             setStreamingReply("");
             replyRef.current = "";
-            playAudio(); // 回放结束后自动恢复聆听
+            // 标记本轮回复结束；待已排程音频全部播完后由 maybeFinishPlayback 恢复聆听
+            doneRef.current = true;
+            maybeFinishPlayback();
             break;
           }
           case "error":
             setErr(m.message ?? "对话出错");
             toast.error(m.message ?? "对话出错");
             // 出错也恢复聆听，保持通话不中断
+            resetPlayback();
             if (stageRef.current !== "idle") setStage("listening");
             resetVad();
             break;
