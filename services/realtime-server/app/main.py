@@ -24,8 +24,7 @@ from fastapi import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 import app.config as config
@@ -172,18 +171,6 @@ app.include_router(auth_router)
 # Admin Console 服务端代理：cookie 鉴权 → 注入内部 key → 转发 STT/TTS/Token/Voices
 app.include_router(console_router)
 
-
-_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-if _STATIC_DIR.is_dir():
-    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
-
-
-@app.get("/", include_in_schema=False, response_class=HTMLResponse)
-async def index() -> HTMLResponse:
-    idx = _STATIC_DIR / "index.html"
-    if not idx.is_file():
-        return HTMLResponse("<h1>RTVoice Realtime</h1><p>静态测试页未部署。</p>")
-    return HTMLResponse(idx.read_text(encoding="utf-8"))
 
 
 try:

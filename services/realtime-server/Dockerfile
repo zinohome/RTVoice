@@ -18,9 +18,6 @@ RUN pip install --upgrade pip && \
     pip install --no-cache-dir /app/common && \
     pip install --no-cache-dir /app/rtvoice-admin
 COPY services/realtime-server/app /app/app
-# SP9 T5 — prod web demo 真实来源是 clients/web/（4-tab demo）
-# 之前 services/realtime-server/static/ 是 SP3 旧 4KB Realtime 测试页，已迁
-COPY clients/web /app/static
 ENV PYTHONPATH=/app/common:/app
 
 RUN useradd -u 1000 -m appuser && chown -R appuser:appuser /app

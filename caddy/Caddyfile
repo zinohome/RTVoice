@@ -41,20 +41,8 @@
 192.168.66.163, 127.0.0.1, localhost {
     tls internal
 
-    # --- 旧 Admin 与 WebDemo 已归档（阶段④）：统一跳转到新版 Admin Console ---
-    # 旧 Alpine.js admin（/admin*）与旧 web demo（根路径）不再对外提供，
-    # 全部 301 到 /admin-v2/。静态资源仍在镜像内，仅入口被收起。
-    @old_admin path /admin /admin/*
-    handle @old_admin {
-        redir * /admin-v2/ permanent
-    }
     handle /v1/admin/* {
         reverse_proxy realtime-server:9000
-    }
-    handle_path /static/* {
-        reverse_proxy realtime-server:9000 {
-            rewrite /static{uri}
-        }
     }
 
     # SP14: Swagger UI 反代 — /swagger/{svc} → 各 service /docs
@@ -148,7 +136,6 @@
         redir * /admin-v2/favicon.ico permanent
     }
 
-    # 默认入口：旧 web demo 已归档（阶段④），根路径跳转到新版 Admin Console
     handle / {
         redir * /admin-v2/ permanent
     }
