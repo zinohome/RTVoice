@@ -20,6 +20,7 @@ from app.error_schema import ErrorResponse, api_error
 # admin CLI 已有逻辑，直接复用
 from rtvoice_admin.commands import (
     cmd_create, cmd_list, cmd_show, cmd_revoke, cmd_rotate,
+    cmd_delete, cmd_purge_revoked, KeyNotRevoked,
 )
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
@@ -177,3 +178,43 @@ async def rotate_key(
     except KeyError:
         raise api_error(404, "admin.key_not_found", f"key {key_id} not found")
     return KeyRotateResponse(**result)
+
+
+class PurgeRevokedResponse(BaseModel):
+    deleted: int
+    ids: list[str]
+
+
+@router.post(
+    "/keys/purge-revoked",
+    response_model=PurgeRevokedResponse,
+    summary="Permanently delete all revoked keys",
+    responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}},
+)
+async def purge_revoked_keys(
+    request: Request,
+    _admin: Key = Depends(require_admin_key),
+) -> PurgeRevokedResponse:
+    ids = await cmd_purge_revoked(request.app.state.key_store)
+    return PurgeRevokedResponse(deleted=len(ids), ids=ids)
+
+
+@router.delete(
+    "/keys/{key_id}",
+    summary="Permanently delete a revoked key (active keys must be revoked first)",
+    responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse},
+               404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def delete_key(
+    key_id: str,
+    request: Request,
+    _admin: Key = Depends(require_admin_key),
+) -> dict:
+    try:
+        ok = await cmd_delete(request.app.state.key_store, key_id=key_id)
+    except KeyNotRevoked:
+        raise api_error(409, "admin.key_not_revoked",
+                        "active key must be revoked before deletion")
+    if not ok:
+        raise api_error(404, "admin.key_not_found", f"key {key_id} not found")
+    return {"id": key_id, "deleted": True}

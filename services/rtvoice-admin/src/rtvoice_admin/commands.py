@@ -80,6 +80,35 @@ async def cmd_revoke(store: Any, *, key_id: str) -> bool:
     return ok
 
 
+class KeyNotRevoked(Exception):
+    """Raised when attempting to delete a key that is still active."""
+
+
+async def cmd_delete(store: Any, *, key_id: str) -> bool:
+    """删除单个已吊销 key。活跃 key 拒删（KeyNotRevoked）；不存在返回 False。"""
+    k = store.find_by_id(key_id)
+    if k is None:
+        return False
+    if k.revoked_at is None:
+        raise KeyNotRevoked(key_id)
+    ok = await store.delete(key_id)
+    if ok:
+        await _maybe_publish_change(store, key_id)
+    return ok
+
+
+async def cmd_purge_revoked(store: Any) -> list[str]:
+    """删除所有已吊销 key，返回被删 id 列表。"""
+    revoked_ids = [k.id for k in store.list_all() if k.revoked_at is not None]
+    deleted: list[str] = []
+    for kid in revoked_ids:
+        if await store.delete(kid):
+            deleted.append(kid)
+    if deleted:
+        await _maybe_publish_change(store, deleted[-1])
+    return deleted
+
+
 async def cmd_rotate(store: Any, *, key_id: str) -> dict:
     """重生成 secret；旧 hash 立即失效。"""
     k = store.find_by_id(key_id)

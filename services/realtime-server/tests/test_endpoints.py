@@ -248,6 +248,54 @@ def test_admin_create_key_then_revoke(admin_client):
     assert r2.status_code == 200
 
 
+def test_admin_delete_revoked_key(admin_client):
+    """删除已吊销 key 成功；再次 GET 应 404。"""
+    r = admin_client.post("/v1/admin/keys", json={
+        "name": "to-delete", "scopes": ["stt"],
+        "sessions_concurrent": 1, "sessions_per_hour": 10,
+    })
+    kid = r.json()["id"]
+    assert admin_client.post(f"/v1/admin/keys/{kid}/revoke").status_code == 200
+    rd = admin_client.delete(f"/v1/admin/keys/{kid}")
+    assert rd.status_code == 200
+    assert rd.json()["deleted"] is True
+    assert admin_client.get(f"/v1/admin/keys/{kid}").status_code == 404
+
+
+def test_admin_delete_active_key_409(admin_client):
+    """删除未吊销 key 返回 409 + admin.key_not_revoked。"""
+    r = admin_client.post("/v1/admin/keys", json={
+        "name": "still-active", "scopes": ["stt"],
+        "sessions_concurrent": 1, "sessions_per_hour": 10,
+    })
+    kid = r.json()["id"]
+    rd = admin_client.delete(f"/v1/admin/keys/{kid}")
+    assert rd.status_code == 409
+    assert rd.json()["code"] == "admin.key_not_revoked"
+    # key 仍然存在
+    assert admin_client.get(f"/v1/admin/keys/{kid}").status_code == 200
+
+
+def test_admin_purge_revoked_only(admin_client):
+    """一键清除只删已吊销 key，活跃 key 保留。"""
+    ids = []
+    for i in range(3):
+        r = admin_client.post("/v1/admin/keys", json={
+            "name": f"purge-{i}", "scopes": ["stt"],
+            "sessions_concurrent": 1, "sessions_per_hour": 10,
+        })
+        ids.append(r.json()["id"])
+    # 吊销前两个，第三个保持活跃
+    admin_client.post(f"/v1/admin/keys/{ids[0]}/revoke")
+    admin_client.post(f"/v1/admin/keys/{ids[1]}/revoke")
+    rp = admin_client.post("/v1/admin/keys/purge-revoked")
+    assert rp.status_code == 200
+    body = rp.json()
+    assert ids[0] in body["ids"] and ids[1] in body["ids"]
+    assert ids[2] not in body["ids"]
+    assert admin_client.get(f"/v1/admin/keys/{ids[2]}").status_code == 200
+
+
 def test_admin_unauth_without_admin_scope(client):
     """SP14 — 普通 client (legacy key, but our default fixture migrate-all scopes) — 应有 admin。
 
