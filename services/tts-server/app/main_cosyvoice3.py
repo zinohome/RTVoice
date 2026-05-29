@@ -203,12 +203,30 @@ def _normalize_voice_audio(
 def _truncate_text_for_duration(
     text: str, original_duration: float, effective_duration: float
 ) -> str:
-    """按时长比例截断文本，保留与 effective_duration 对应的字符数。"""
+    """按时长比例截断文本，在标点边界截断，避免文本超出音频内容。
+
+    纯字符比例截断会在句子中间切断（如 "...最美丽的桥梁。无论是清晨"），
+    导致 prompt_text 中存在但 prompt_speech 里没有对应音频的"悬挂文字"。
+    CosyVoice3 LLM 会把悬挂文字当作待合成内容输出，产生前缀音频 bug。
+    在标点处截断可确保文本始终不超出音频内容。
+    """
     if original_duration <= 0 or effective_duration >= original_duration:
         return text
     ratio = effective_duration / original_duration
     char_count = max(1, int(len(text) * ratio))
-    return text[:char_count]
+    if char_count >= len(text):
+        return text
+
+    truncated = text[:char_count]
+
+    # 找截断范围内最后一个句末/短句标点，确保不在词语中间断开
+    SENTENCE_END = "。？！，；：、"
+    for i in range(len(truncated) - 1, -1, -1):
+        if truncated[i] in SENTENCE_END:
+            return truncated[: i + 1]
+
+    # 没有找到标点（纯无标点文本），退回到字符截断
+    return truncated
 
 
 _cosyvoice: CosyVoice3 | None = None
