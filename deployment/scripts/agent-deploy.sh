@@ -103,7 +103,9 @@ if [[ ! -f "${KEYS_FILE}" ]]; then
   chmod 666 "${KEYS_FILE}"
   ok "keys.yaml 已初始化（空列表，容器启动时自动迁移 RTVOICE_API_KEY）"
 else
-  ok "keys.yaml 已存在（跳过）"
+  # 确保已有文件容器可写（所有者可能是其他用户）
+  chmod 666 "${KEYS_FILE}"
+  ok "keys.yaml 已存在（权限已确认 666）"
 fi
 
 # ─── 构建镜像 ─────────────────────────────────────────────────
