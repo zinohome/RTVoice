@@ -124,6 +124,11 @@ SILENCE_WINDOW_MS = int(os.environ.get("TTS_SILENCE_WINDOW_MS", "20"))
 # 最多从音频头部去除的静音时长（秒）。超过此段若仍无语音则放弃静音裁剪。
 MAX_SILENCE_TRIM_S = float(os.environ.get("TTS_MAX_SILENCE_TRIM_S", "5.0"))
 
+# 单次合成超时（秒）。CosyVoice 内部 llm_job 线程 OOM 崩溃时不会向外传播异常，
+# 外层 inference_zero_shot 会永久阻塞。此超时用于检测这种死锁并强制中断，
+# 防止 _inference_lock 被永久持有。120s 足以覆盖最长的合理推理时间。
+SYNTH_TIMEOUT_S = float(os.environ.get("TTS_SYNTH_TIMEOUT_S", "120.0"))
+
 # spk_id 限制：避免路径穿越/特殊字符；接受字母数字下划线和中日韩字符
 import re
 SPK_ID_RE = re.compile(r"^[\w\u4e00-\u9fff\u3040-\u30ff-]{1,64}$")
@@ -573,7 +578,14 @@ async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: st
             if await request.is_disconnected():
                 log.info("[TTS] client disconnected")
                 return
-            chunk = await chunk_queue.get()
+            try:
+                chunk = await asyncio.wait_for(chunk_queue.get(), timeout=SYNTH_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                # llm_job 线程 OOM 崩溃时不向外传播异常，inference_zero_shot 永久阻塞。
+                # 超时意味着 producer() 已死锁——记录错误、释放 lock，避免锁死整个服务。
+                log.error("[TTS] 合成超时 (%.0fs)，疑似 CosyVoice llm_job 线程崩溃，释放锁", SYNTH_TIMEOUT_S)
+                SYNTH_FAILS.inc()
+                return
             if chunk is None:
                 break
             if first_chunk:
@@ -784,7 +796,18 @@ async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
         if not sentence.strip() or disconnected:
             return not disconnected
         try:
-            chunks = await loop.run_in_executor(None, synth, sentence)
+            chunks = await asyncio.wait_for(
+                loop.run_in_executor(None, synth, sentence),
+                timeout=SYNTH_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            log.error("[ws-tts] 合成超时 (%.0fs)，疑似 CosyVoice llm_job 线程崩溃", SYNTH_TIMEOUT_S)
+            try:
+                await ws.send_json({"type": "error", "message": "合成超时，服务将在下次请求后自动恢复"})
+            except Exception:
+                pass
+            errored = True
+            return False
         except Exception as e:
             log.exception("[ws-tts] 推理异常")
             try:
