@@ -1,6 +1,6 @@
 # TTS Service API
 
-> 流式语音合成 + 音色克隆。Fun-CosyVoice 3 (0.5B GPU)（v0.7+）/ Kokoro 82M CPU（v0.5）/ CosyVoice 2 GPU（v0.6）。
+> 流式语音合成 + 音色克隆。**当前版本：Fun-CosyVoice 3 (0.5B GPU) v0.20.1**，镜像 `rtvoice/tts-server-cosyvoice3:v0.20.1`。
 
 ## Endpoints 速查
 
@@ -162,7 +162,21 @@ Authorization: Bearer <KEY>
 
 ## POST /v1/voices (admin)
 
-注册新音色 (zero-shot voice clone)。
+注册新音色 (zero-shot voice clone)。**v0.20.1 起支持自动音频规范化**，无需预先处理音频格式。
+
+### 自动规范化流程（v0.20.1+）
+
+上传时系统自动完成以下处理：
+
+| 步骤 | 说明 |
+|------|------|
+| ① 单声道 | 立体声/多声道 → 单声道（各声道平均） |
+| ② 重采样 | 任意采样率 → 16kHz（CosyVoice 原生要求） |
+| ③ 去前导静音 | 20ms 能量帧检测（RMS < -40dBFS），最多检测前 5 秒 |
+| ④ 截断到 8 秒 | 从语音起始点取 8 秒（控制显存，CosyVoice 官方推荐 3-10s） |
+| ⑤ 文本截断 | 按时长比例截断文本：`字符数 = 总字符 × (8s ÷ 原始时长)` |
+
+示例：上传 30s 32kHz 立体声 WAV + 100 字文本 → 注册为 8s 16kHz mono + 约 27 字
 
 ```http
 POST /v1/voices
@@ -170,25 +184,41 @@ Authorization: Bearer <TTS_ADMIN_API_KEY>
 Content-Type: multipart/form-data
 
 spk_id=alice
-prompt_text=参考音频对应的文字（≥3 秒）
-file=@reference_16k_mono.wav
+prompt_text=参考音频对应的完整文字（最多 1000 字，系统按比例自动截断）
+file=@any_audio.wav   # 支持 WAV/MP3/FLAC/OGG 等格式，最大 10MB
 ```
 
-返:
+### 响应（201 Created）
+
 ```json
-{"spk_id":"alice","voice_count":2}
+{
+  "spk_id": "alice",
+  "voice_count": 2,
+  "original_duration": 30.0,
+  "effective_duration": 8.0,
+  "effective_text": "（实际注册的截断文本，可核对）"
+}
 ```
+
+### 表单字段说明
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `spk_id` | string | ✓ | 音色 ID，仅限字母/数字/下划线/中日韩，最长 64 字 |
+| `prompt_text` | string | ✓ | 参考音频对应的完整文本，1-1000 字符 |
+| `file` | file | ✓ | 参考音频，支持任意 torchaudio 兼容格式，≤ 10MB |
 
 ### Error codes
 
 | Code | HTTP | 含义 |
-|---|---|---|
+|------|------|------|
 | `auth.admin_disabled` | 403 | TTS_ADMIN_API_KEY 未设置 |
 | `auth.invalid_token` | 401 | admin token 不对 |
 | `tts.invalid_spk_id` | 400 | spk_id 含非法字符或长度超限 |
-| `tts.voice_already_exists` | 409 | spk_id 已存在 |
-| `tts.invalid_wav` | 400 | wav 文件过小 / 解码失败 |
-| `tts.wav_too_large` | 413 | wav > 5MB |
+| `tts.voice_already_exists` | 409 | spk_id 已存在；先 DELETE 再 POST |
+| `tts.invalid_wav` | 400 | 音频文件过小（< 1KB）或无法解码 |
+| `tts.wav_too_large` | 413 | 音频 > 10MB |
+| `tts.wav_decode_failed` | 400 | 格式不支持 |
 
 ## DELETE /v1/voices/{spk_id} (admin)
 
