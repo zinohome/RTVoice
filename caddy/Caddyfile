@@ -143,6 +143,11 @@
         reverse_proxy tts-server:9880
     }
 
+    # favicon：浏览器自动请求 /favicon.ico，转发到 admin-ui 的 basePath 下
+    handle /favicon.ico {
+        redir * /admin-v2/favicon.ico permanent
+    }
+
     # 默认入口：旧 web demo 已归档（阶段④），根路径跳转到新版 Admin Console
     handle / {
         redir * /admin-v2/ permanent

@@ -1,0 +1,156 @@
+# RTVoice Caddy 反代配置
+#
+# 模式：内网 IP + Caddy 'tls internal' 自签证书
+# SERVER_IP 通过 docker-compose 环境变量注入（见 deployment/.env.example）
+#
+# 客户端首次访问需信任自签 CA：
+#   docker exec rtvoice-caddy cat /data/caddy/pki/authorities/local/root.crt > rtvoice-ca.crt
+#   # macOS：sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain rtvoice-ca.crt
+#   # Linux：sudo cp rtvoice-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates
+#   # Windows：双击 rtvoice-ca.crt → 安装到"受信任的根证书颁发机构"
+#   # 或临时用 curl -k 跳过验证（自测可用）
+#
+# 路由：
+#   /admin-v2/*                     → admin-ui:3000
+#   /auth/* /v1/admin/*             → realtime-server:9000
+#   /v1/sessions* /v1/realtime/*    → realtime-server:9000
+#   /v1/console/*                   → realtime-server:9000
+#   /v1/tokens                      → token-server:8000
+#   /v1/asr                         → stt-server:9090 (WS)
+#   /v1/tts/* /v1/voices*           → tts-server:9880
+#   /swagger/*                      → 各服务 /docs
+#   /health                         → realtime-server:9000/health（Caddy 自身 healthcheck 用）
+
+{
+    auto_https disable_redirects
+    servers {
+        protocols h1 h2
+    }
+    # 无 SNI 请求默认走 SERVER_IP 主体（IP 直访时 curl/浏览器不发 SNI）
+    default_sni {$SERVER_IP}
+    pki {
+        ca local {
+            name "RTVoice Internal CA"
+        }
+    }
+}
+
+# 监听服务器 IP + 127.0.0.1 + localhost（{$SERVER_IP} Caddy 支持 env 变量）
+{$SERVER_IP}, 127.0.0.1, localhost {
+    tls internal
+
+    # 旧路径重定向到 admin-v2
+    @old_admin path /admin /admin/*
+    handle @old_admin {
+        redir * /admin-v2/ permanent
+    }
+
+    # Realtime admin API
+    handle /v1/admin/* {
+        reverse_proxy realtime-server:9000
+    }
+
+    # Swagger UI（各服务 /docs）
+    handle /swagger/realtime* {
+        reverse_proxy realtime-server:9000 {
+            rewrite /docs
+        }
+    }
+    handle /swagger/token* {
+        reverse_proxy token-server:8000 {
+            rewrite /docs
+        }
+    }
+    handle /swagger/stt* {
+        reverse_proxy stt-server:9090 {
+            rewrite /docs
+        }
+    }
+    handle /swagger/tts* {
+        reverse_proxy tts-server:9880 {
+            rewrite /docs
+        }
+    }
+
+    # Realtime 会话与 WebSocket
+    handle /v1/sessions* {
+        reverse_proxy realtime-server:9000
+    }
+    handle /v1/realtime/* {
+        reverse_proxy realtime-server:9000
+    }
+
+    # Admin Console 后端（含 /v1/console/asr WebSocket）
+    handle /v1/console/* {
+        reverse_proxy realtime-server:9000
+    }
+
+    # Auth（登录/登出）
+    handle /auth/* {
+        reverse_proxy realtime-server:9000
+    }
+
+    # Admin UI（Next.js，/admin-v2 basePath）
+    handle /admin-v2* {
+        reverse_proxy admin-ui:3000
+    }
+
+    # Token Server
+    handle /v1/tokens {
+        reverse_proxy token-server:8000
+    }
+
+    # STT WebSocket
+    handle /v1/asr {
+        reverse_proxy stt-server:9090
+    }
+
+    # TTS HTTP + 音色管理
+    handle /v1/tts/* {
+        reverse_proxy tts-server:9880
+    }
+    handle /v1/voices* {
+        reverse_proxy tts-server:9880
+    }
+
+    # OpenAPI 聚合（开发调试用）
+    handle /openapi/realtime.json {
+        reverse_proxy realtime-server:9000 {
+            rewrite /openapi.json
+        }
+    }
+    handle /openapi/token.json {
+        reverse_proxy token-server:8000 {
+            rewrite /openapi.json
+        }
+    }
+    handle /openapi/stt.json {
+        reverse_proxy stt-server:9090 {
+            rewrite /openapi.json
+        }
+    }
+    handle /openapi/tts.json {
+        reverse_proxy tts-server:9880 {
+            rewrite /openapi.json
+        }
+    }
+
+    # Health（Caddy 自身 healthcheck 探测点）
+    handle /health {
+        reverse_proxy realtime-server:9000 {
+            rewrite /health
+        }
+    }
+
+    # 根路径默认跳转 admin-v2
+    handle / {
+        redir * /admin-v2/ permanent
+    }
+
+    # Static（兼容旧 web demo）
+    handle_path /static/* {
+        reverse_proxy realtime-server:9000 {
+            rewrite /static{uri}
+        }
+    }
+}

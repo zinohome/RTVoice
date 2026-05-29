@@ -1,0 +1,87 @@
+# RTVoice Prometheus alerting rules (SP11 / v0.17)
+#
+# 基础守门：服务 down / 高错误率 / 高延迟。
+# 严格不"覆盖式贪多"——3 条核心 + 1 条 per-key 流量异常。
+#
+# 加载方式：prometheus.yml 在 monitoring/ 加 `rule_files: [alert_rules.yml]`
+# 触发后 alertmanager 链路本 SP 不接（留 SP12+）；当前规则在 Prometheus UI
+# 可看 firing 状态。
+
+groups:
+  - name: rtvoice.availability
+    interval: 30s
+    rules:
+      - alert: RTVoiceServiceDown
+        expr: up{job=~"(stt|tts|token|realtime)-server"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} service is down"
+          description: "Service {{ $labels.job }} (instance {{ $labels.instance }}) has been unreachable for >2 minutes"
+
+  - name: rtvoice.errors
+    interval: 30s
+    rules:
+      - alert: RTVoiceHighErrorRate
+        # 5 分钟窗口内 5xx 比例 > 5%（按 service 维度），且 5xx 计数 > 5 防数据过少误报
+        expr: |
+          (
+            sum by(service)(rate(rtvoice_requests_total{status=~"5.."}[5m]))
+            /
+            sum by(service)(rate(rtvoice_requests_total[5m]))
+          ) > 0.05
+          and
+          sum by(service)(increase(rtvoice_requests_total{status=~"5.."}[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} 5xx error rate > 5%"
+          description: "Service {{ $labels.service }} 5xx rate {{ $value | humanizePercentage }} over 5min"
+
+      - alert: RTVoiceAuthFailuresSpike
+        # 1 分钟 401 突增（暴破尝试 / key revoked 后大量失败）
+        expr: sum by(service)(rate(rtvoice_requests_total{status="401"}[1m])) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} auth failures > 5/sec sustained"
+          description: "Possible brute force or stale key in client. Check token-server logs."
+
+  - name: rtvoice.latency
+    interval: 30s
+    rules:
+      - alert: RTVoiceHighLatencyP95
+        # 5 分钟 p95 > 2 秒（按 service+endpoint）
+        # 排 /v1/realtime/* （WS long-lived 不算请求延迟）和 /metrics
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by(service, endpoint, le)(
+              rate(rtvoice_request_duration_seconds_bucket{
+                endpoint!~"/v1/realtime/.*",
+                endpoint!="/metrics"
+              }[5m])
+            )
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }}{{ $labels.endpoint }} p95 > 2s"
+          description: "p95 latency {{ $value | humanizeDuration }} over 5min"
+
+  - name: rtvoice.per_key
+    interval: 1m
+    rules:
+      - alert: RTVoiceKeyQuotaAbuse
+        # 单 key 每分钟 > 200 请求（按 quota_per_hour=12000 折算）— 早期信号
+        expr: sum by(key_id, service)(rate(rtvoice_requests_total[1m])) * 60 > 200
+        for: 3m
+        labels:
+          severity: info
+        annotations:
+          summary: "key {{ $labels.key_id }} > 200 req/min on {{ $labels.service }}"
+          description: "Possible runaway client or DoS by valid key. Inspect rtvoice-admin show"

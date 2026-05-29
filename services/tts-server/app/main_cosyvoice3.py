@@ -103,8 +103,31 @@ RTVOICE_API_KEY = os.environ.get("RTVOICE_API_KEY", "").strip()
 # 留空 = 禁用 admin endpoints（防止误开放）
 ADMIN_API_KEY = os.environ.get("TTS_ADMIN_API_KEY", "").strip()
 
-# 上传 wav 大小上限（防爆磁盘）；CosyVoice 推荐 prompt 3-30 秒 16k mono → ≤2 MB
-MAX_WAV_BYTES = int(os.environ.get("TTS_MAX_WAV_BYTES", str(5 * 1024 * 1024)))
+# 上传音频大小上限。支持任意格式（torchaudio 自动解码），内部规范化为 16kHz mono。
+# 30s 32kHz 立体声 16-bit WAV ≈ 3.8MB；留 10MB 余量应对高采样率/24-bit 输入。
+MAX_WAV_BYTES = int(os.environ.get("TTS_MAX_WAV_BYTES", str(10 * 1024 * 1024)))
+
+# 参考音频规范化目标采样率（Hz）。CosyVoice 内部用 16kHz。
+VOICE_TARGET_SR = int(os.environ.get("TTS_VOICE_TARGET_SR", "16000"))
+
+# 参考音频截断上限（秒）。>8s 的 prompt_speech_token 序列在 12GB 显存环境下
+# 会导致 LLM attention 显存消耗激增（自定义音色 OOM 的根因）。
+# CosyVoice 官方推荐 3-10s；8s 是安全中点：音色质量好，显存占用可控。
+MAX_PROMPT_DURATION_S = float(os.environ.get("TTS_MAX_PROMPT_DURATION_S", "8.0"))
+
+# 静音检测阈值（RMS，线性）。约 -40 dBFS，低于此视为静音/噪底。
+SILENCE_RMS_THRESHOLD = float(os.environ.get("TTS_SILENCE_RMS_THRESHOLD", "0.01"))
+
+# 静音检测窗口大小（毫秒）。
+SILENCE_WINDOW_MS = int(os.environ.get("TTS_SILENCE_WINDOW_MS", "20"))
+
+# 最多从音频头部去除的静音时长（秒）。超过此段若仍无语音则放弃静音裁剪。
+MAX_SILENCE_TRIM_S = float(os.environ.get("TTS_MAX_SILENCE_TRIM_S", "5.0"))
+
+# 单次合成超时（秒）。CosyVoice 内部 llm_job 线程 OOM 崩溃时不会向外传播异常，
+# 外层 inference_zero_shot 会永久阻塞。此超时用于检测这种死锁并强制中断，
+# 防止 _inference_lock 被永久持有。120s 足以覆盖最长的合理推理时间。
+SYNTH_TIMEOUT_S = float(os.environ.get("TTS_SYNTH_TIMEOUT_S", "120.0"))
 
 # spk_id 限制：避免路径穿越/特殊字符；接受字母数字下划线和中日韩字符
 import re
@@ -123,6 +146,69 @@ VOICE_ALIASES = {
     # （v0.7+ 加 /voices/add API 支持运行时注册）
     "中文男": DEFAULT_SPK_ID,
 }
+
+
+def _normalize_voice_audio(
+    waveform: torch.Tensor,
+    sr: int,
+    target_sr: int = VOICE_TARGET_SR,
+    target_duration_s: float = MAX_PROMPT_DURATION_S,
+    silence_rms: float = SILENCE_RMS_THRESHOLD,
+    window_ms: int = SILENCE_WINDOW_MS,
+    max_trim_s: float = MAX_SILENCE_TRIM_S,
+) -> tuple[torch.Tensor, float, float]:
+    """规范化参考音频：多声道→单声道 → 重采样 → 去前导静音 → 截断。
+
+    Returns:
+        (normalized_waveform, original_duration_s, effective_duration_s)
+    """
+    original_duration = waveform.shape[-1] / sr
+
+    # 多声道 → 单声道（平均）
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+
+    # 重采样到目标采样率
+    if sr != target_sr:
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)
+        waveform = resampler(waveform)
+
+    # 去除前导静音/噪声（基于 RMS 能量帧检测）
+    audio = waveform[0]
+    window_size = max(1, int(target_sr * window_ms / 1000))
+    max_trim_samples = int(target_sr * max_trim_s)
+    step = max(1, window_size // 2)
+
+    start_sample = 0
+    for i in range(0, min(len(audio) - window_size, max_trim_samples), step):
+        frame = audio[i : i + window_size]
+        rms = float(torch.sqrt(torch.mean(frame ** 2)))
+        if rms > silence_rms:
+            # 退一个窗口，避免切到语音起始瞬态
+            start_sample = max(0, i - window_size)
+            break
+
+    if start_sample > 0:
+        waveform = waveform[:, start_sample:]
+
+    # 截断到目标时长
+    max_samples = int(target_sr * target_duration_s)
+    if waveform.shape[-1] > max_samples:
+        waveform = waveform[:, :max_samples]
+
+    effective_duration = waveform.shape[-1] / target_sr
+    return waveform, original_duration, effective_duration
+
+
+def _truncate_text_for_duration(
+    text: str, original_duration: float, effective_duration: float
+) -> str:
+    """按时长比例截断文本，保留与 effective_duration 对应的字符数。"""
+    if original_duration <= 0 or effective_duration >= original_duration:
+        return text
+    ratio = effective_duration / original_duration
+    char_count = max(1, int(len(text) * ratio))
+    return text[:char_count]
 
 
 _cosyvoice: CosyVoice3 | None = None
@@ -312,6 +398,9 @@ class VoicesListResponse(BaseModel):
 class AddVoiceResponse(BaseModel):
     spk_id: str
     voice_count: int = Field(..., description="注册后总音色数")
+    original_duration: float = Field(..., description="上传音频原始时长（秒）")
+    effective_duration: float = Field(..., description="实际注册使用的音频时长（秒，去除静音后截断）")
+    effective_text: str = Field(..., description="实际注册使用的文本（按时长比例截断后）")
 
 
 class DeleteVoiceResponse(BaseModel):
@@ -489,7 +578,14 @@ async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: st
             if await request.is_disconnected():
                 log.info("[TTS] client disconnected")
                 return
-            chunk = await chunk_queue.get()
+            try:
+                chunk = await asyncio.wait_for(chunk_queue.get(), timeout=SYNTH_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                # llm_job 线程 OOM 崩溃时不向外传播异常，inference_zero_shot 永久阻塞。
+                # 超时意味着 producer() 已死锁——记录错误、释放 lock，避免锁死整个服务。
+                log.error("[TTS] 合成超时 (%.0fs)，疑似 CosyVoice llm_job 线程崩溃，释放锁", SYNTH_TIMEOUT_S)
+                SYNTH_FAILS.inc()
+                return
             if chunk is None:
                 break
             if first_chunk:
@@ -513,6 +609,9 @@ async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: st
                 await asyncio.wait_for(producer_task, timeout=2)
             except asyncio.TimeoutError:
                 pass
+        # 方案A：每次推理后主动释放 CUDA fragment，防止自定义音色长 token 序列
+        # 积累的碎片在 12GB 显存上触发 OOM
+        torch.cuda.empty_cache()
 
 
 @app.post(
@@ -671,15 +770,18 @@ async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
         # 每句 reset token_hop_len，防跨 inference 累积污染（见 _synthesize_stream_locked）
         _cosyvoice.model.token_hop_len = 25
         out: list[bytes] = []
-        for output in _cosyvoice.inference_zero_shot(
-            sentence,
-            DEFAULT_PROMPT_TEXT,    # 占位；spk_id 非空时不使用
-            DEFAULT_PROMPT_WAV,     # 占位；spk_id 非空时不使用
-            zero_shot_spk_id=voice,
-            stream=False,
-            speed=speed,
-        ):
-            out.append(_tensor_to_pcm_bytes(output["tts_speech"]))
+        try:
+            for output in _cosyvoice.inference_zero_shot(
+                sentence,
+                DEFAULT_PROMPT_TEXT,    # 占位；spk_id 非空时不使用
+                DEFAULT_PROMPT_WAV,     # 占位；spk_id 非空时不使用
+                zero_shot_spk_id=voice,
+                stream=False,
+                speed=speed,
+            ):
+                out.append(_tensor_to_pcm_bytes(output["tts_speech"]))
+        finally:
+            torch.cuda.empty_cache()
         return out
 
     sent_chunks = 0
@@ -694,7 +796,18 @@ async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
         if not sentence.strip() or disconnected:
             return not disconnected
         try:
-            chunks = await loop.run_in_executor(None, synth, sentence)
+            chunks = await asyncio.wait_for(
+                loop.run_in_executor(None, synth, sentence),
+                timeout=SYNTH_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            log.error("[ws-tts] 合成超时 (%.0fs)，疑似 CosyVoice llm_job 线程崩溃", SYNTH_TIMEOUT_S)
+            try:
+                await ws.send_json({"type": "error", "message": "合成超时，服务将在下次请求后自动恢复"})
+            except Exception:
+                pass
+            errored = True
+            return False
         except Exception as e:
             log.exception("[ws-tts] 推理异常")
             try:
@@ -778,9 +891,9 @@ def _validate_spk_id(spk_id: str) -> str:
 @app.post("/v1/voices", status_code=201, response_model=AddVoiceResponse)
 async def add_voice(
     spk_id: str = Form(..., description="新音色 ID（不能与现有冲突）"),
-    prompt_text: str = Form(..., min_length=1, max_length=200,
-                            description="参考音频对应的文本（≥3 秒发音）"),
-    file: UploadFile = File(..., description="参考音频 wav (16kHz mono 推荐, 3-30 秒)"),
+    prompt_text: str = Form(..., min_length=1, max_length=1000,
+                            description="参考音频对应的完整文本（系统自动按时长比例截断）"),
+    file: UploadFile = File(..., description="参考音频（任意格式，3–30 秒；系统自动规范化为 16kHz mono 8s）"),
     _auth: None = Depends(_check_admin_auth),
 ) -> AddVoiceResponse:
     if _cosyvoice is None:
@@ -790,50 +903,77 @@ async def add_voice(
     if spk_id in _cosyvoice.list_available_spks():
         raise api_error(409, "tts.voice_already_exists", f"音色 {spk_id!r} 已存在；先 DELETE 再 POST")
 
-    # 读到内存校验（5 MB 上限够 30 秒 16k mono 16-bit wav）
+    # 读到内存校验
     raw = await file.read()
     if len(raw) > MAX_WAV_BYTES:
-        raise api_error(413, "tts.wav_too_large", f"wav 超过 {MAX_WAV_BYTES} 字节上限")
+        raise api_error(413, "tts.wav_too_large", f"音频超过 {MAX_WAV_BYTES // (1024*1024)} MB 上限")
     if len(raw) < 1024:
-        raise api_error(400, "tts.invalid_wav", "wav 文件过小，疑似无效")
+        raise api_error(400, "tts.invalid_wav", "音频文件过小，疑似无效")
 
-    # 持久化到 named volume；先写再注册，失败时清理
+    # 先写原始文件（torchaudio 支持从文件路径解码各种格式）
     wav_path = VOICES_WAV_DIR / f"{spk_id}.wav"
-    wav_path.write_bytes(raw)
+    raw_path = VOICES_WAV_DIR / f"{spk_id}.orig"
+    raw_path.write_bytes(raw)
 
     try:
-        # torchaudio 校验 + load 给 CosyVoice
+        # 解码原始音频（支持 wav/mp3/flac/ogg 等 torchaudio 支持的格式）
         try:
-            waveform, sr = torchaudio.load(str(wav_path))
+            waveform, sr = torchaudio.load(str(raw_path))
         except Exception as e:
-            raise api_error(400, "tts.wav_decode_failed", f"wav 解码失败：{e}")
-        log.info("[admin] add voice spk_id=%s sr=%d duration=%.2fs",
-                 spk_id, sr, waveform.shape[-1] / sr)
+            raise api_error(400, "tts.wav_decode_failed", f"音频解码失败：{e}")
+
+        log.info("[admin] add voice spk_id=%s sr=%d ch=%d duration=%.2fs",
+                 spk_id, sr, waveform.shape[0], waveform.shape[-1] / sr)
+
+        # 规范化：单声道 + 重采样到 16kHz + 去前导静音 + 截断到 8s
+        waveform, original_duration, effective_duration = await asyncio.to_thread(
+            _normalize_voice_audio, waveform, sr
+        )
+        log.info("[admin] normalized: original=%.2fs effective=%.2fs sr=%d mono",
+                 original_duration, effective_duration, VOICE_TARGET_SR)
+
+        # 保存规范化后的 WAV（16kHz mono），供 CosyVoice 注册和审计
+        torchaudio.save(str(wav_path), waveform, VOICE_TARGET_SR, encoding="PCM_S", bits_per_sample=16)
+
+        # 清理原始文件
+        raw_path.unlink(missing_ok=True)
+
+        # 按时长比例截断文本
+        effective_text = _truncate_text_for_duration(prompt_text, original_duration, effective_duration)
+        log.info("[admin] text truncated: %d→%d chars", len(prompt_text), len(effective_text))
 
         # v3 约定：prompt_text 必须形如 "<system><|endofprompt|><transcript>"
-        # （见 DEFAULT_PROMPT_TEXT 上方说明）。client 一般只传 transcript，
-        # 这里和 triton runtime model.py:260-261 一致，自动前置 system 指令。
-        if "<|endofprompt|>" not in prompt_text:
-            prompt_text = f"You are a helpful assistant.<|endofprompt|>{prompt_text}"
+        full_prompt_text = (
+            effective_text if "<|endofprompt|>" in effective_text
+            else f"You are a helpful assistant.<|endofprompt|>{effective_text}"
+        )
 
         # 调 CosyVoice 注册（同步 → 跑线程，避免阻塞 event loop）
         await asyncio.to_thread(
-            _cosyvoice.add_zero_shot_spk, prompt_text, str(wav_path), spk_id
+            _cosyvoice.add_zero_shot_spk, full_prompt_text, str(wav_path), spk_id
         )
         # 持久化 spk2info.pt 到 MODEL_DIR（重启自动 reload）
         await asyncio.to_thread(_cosyvoice.save_spkinfo)
     except HTTPException:
         wav_path.unlink(missing_ok=True)
+        raw_path.unlink(missing_ok=True)
         raise
     except Exception as e:
         wav_path.unlink(missing_ok=True)
+        raw_path.unlink(missing_ok=True)
         log.exception("[admin] add voice 失败")
         raise api_error(500, "tts.register_failed", f"注册失败：{e}")
 
     # 刷新 voices 列表
     global _cosyvoice_voices
     _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
-    return AddVoiceResponse(spk_id=spk_id, voice_count=len(_cosyvoice_voices))
+    return AddVoiceResponse(
+        spk_id=spk_id,
+        voice_count=len(_cosyvoice_voices),
+        original_duration=round(original_duration, 2),
+        effective_duration=round(effective_duration, 2),
+        effective_text=effective_text,
+    )
 
 
 @app.delete("/v1/voices/{spk_id}", response_model=DeleteVoiceResponse)

@@ -1,0 +1,116 @@
+{
+  "annotations": {"list": []},
+  "title": "RTVoice — Per-Key Tenant View",
+  "tags": ["rtvoice", "sp10", "sp11", "multitenant"],
+  "uid": "rtvoice-per-key",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "templating": {"list": []},
+  "panels": [
+    {
+      "id": 1,
+      "title": "Top 10 keys — requests/min (last 5min)",
+      "type": "table",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "topk(10, sum by(key_id) (rate(rtvoice_requests_total[5m])) * 60)",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"align": "auto", "displayMode": "auto"},
+          "unit": "reqps"
+        }
+      },
+      "options": {"showHeader": true}
+    },
+    {
+      "id": 2,
+      "title": "p95 latency by key_id (last 5min)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by(key_id, le)(rate(rtvoice_request_duration_seconds_bucket{endpoint!~\"/v1/realtime/.*\"}[5m])))",
+          "legendFormat": "{{key_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 3,
+      "title": "STT audio seconds per key (1h cumulative)",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by(key_id) (increase(rtvoice_stt_audio_seconds_total[1h]))",
+          "legendFormat": "{{key_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 4,
+      "title": "TTS chars per key (1h cumulative)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by(key_id) (increase(rtvoice_tts_chars_total[1h]))",
+          "legendFormat": "{{key_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 5,
+      "title": "Realtime session duration p50/p95 (last 1h)",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by(key_id, le)(rate(rtvoice_realtime_session_duration_seconds_bucket[1h])))",
+          "legendFormat": "{{key_id}} p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by(key_id, le)(rate(rtvoice_realtime_session_duration_seconds_bucket[1h])))",
+          "legendFormat": "{{key_id}} p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 6,
+      "title": "Auth failure rate (any key)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 24, "w": 24, "h": 6},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by(service)(rate(rtvoice_requests_total{status=\"401\"}[5m]))",
+          "legendFormat": "{{service}} 401/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    }
+  ]
+}
