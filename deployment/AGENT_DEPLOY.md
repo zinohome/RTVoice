@@ -77,23 +77,22 @@ sed -i "s/^TTS_ADMIN_API_KEY=.*/TTS_ADMIN_API_KEY=${TTS_ADMIN_KEY}/" .env
 docker network inspect 1panel-network > /dev/null 2>&1 || docker network create 1panel-network
 ```
 
-### STEP 5：创建数据目录
+### STEP 5：创建数据目录并修复权限
 
 ```bash
-mkdir -p /data/RTVoice/{keys,transcripts,cosyvoice-models,caddy/data,caddy/config,prometheus,grafana}
+# 创建目录并设置 777 权限（容器以非 root 用户运行，需要写权限）
+for dir in keys transcripts cosyvoice-models caddy/data caddy/config prometheus grafana; do
+  mkdir -p /data/RTVoice/$dir
+  chmod 777 /data/RTVoice/$dir
+done
 ```
 
 ### STEP 6：初始化 API Keys
 
 ```bash
-RTVOICE_KEY="$(grep '^RTVOICE_API_KEY=' .env | cut -d= -f2)"
-cat > /data/RTVoice/keys/keys.yaml << EOF
-keys:
-  - key: "${RTVOICE_KEY}"
-    name: "default"
-    scopes: ["stt", "tts", "tokens", "realtime"]
-    created_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-EOF
+# 创建空列表；容器启动时自动将 RTVOICE_API_KEY 迁移为正确格式（含 id + secret_hash）
+printf 'keys: []\n' > /data/RTVoice/keys/keys.yaml
+chmod 666 /data/RTVoice/keys/keys.yaml
 ```
 
 ### STEP 7：构建 Docker 镜像
