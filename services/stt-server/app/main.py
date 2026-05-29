@@ -27,6 +27,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
+import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -85,6 +87,13 @@ PARTIAL_MIN_GROWTH_S = float(os.environ.get("STT_PARTIAL_MIN_GROWTH_S", "0.6"))
 # tradeoff：N 越小延迟越低但越易切断完整句子；N 越大语义越完整但延迟越高。
 STT_SOFT_SEGMENT = os.environ.get("STT_SOFT_SEGMENT", "false").lower() in ("1", "true", "yes")
 STT_SOFT_SEGMENT_MAX_S = float(os.environ.get("STT_SOFT_SEGMENT_MAX_S", "8.0"))
+# 前导静音裁剪：裁掉音频缓冲头部低能量帧，降低 CIF predictor 对噪底 over-firing 产生的重复幻觉
+STT_TRIM_SILENCE = os.environ.get("STT_TRIM_SILENCE", "true").lower() in ("1", "true", "yes")
+STT_TRIM_SILENCE_THRESHOLD = float(os.environ.get("STT_TRIM_SILENCE_THRESHOLD", "0.008"))
+# 调试：非空时将每条 EOS 触发的最终音频 dump 到该目录（用于离线分析重复幻觉）
+STT_DEBUG_DUMP_DIR = os.environ.get("STT_DEBUG_DUMP_DIR", "").strip()
+# 内部服务鉴权（供 TTS server 调用 /v1/transcribe 时使用，与 TTS 共享同一 env key）
+_RTVOICE_API_KEY = os.environ.get("RTVOICE_API_KEY", "").strip()
 
 
 def _build_recognizer() -> sherpa_onnx.OfflineRecognizer:
@@ -124,6 +133,24 @@ def _build_recognizer() -> sherpa_onnx.OfflineRecognizer:
 _recognizer: sherpa_onnx.OfflineRecognizer | None = None
 
 
+def _trim_leading_silence(samples: np.ndarray, threshold_rms: float = 0.008) -> np.ndarray:
+    """裁剪缓冲头部低能量帧，降低 CIF predictor 对噪底 over-firing 产生的字符重复幻觉。
+
+    SenseVoice-Small int8 量化版本中，CIF 预测器会对低能量噪声帧连续 fire，
+    产生高频汉字的重复幻觉（如"你你你你不你不"）。裁掉头部静音帧可显著减少此现象。
+    """
+    window_size = int(SAMPLE_RATE * 0.02)  # 20ms 窗口
+    if len(samples) <= window_size * 2:
+        return samples
+    step = max(1, window_size // 2)
+    for i in range(0, len(samples) - window_size, step):
+        rms = float(np.sqrt(np.mean(samples[i : i + window_size] ** 2)))
+        if rms > threshold_rms:
+            start = max(0, i - step)
+            return samples[start:] if start > 0 else samples
+    return samples
+
+
 def _decode_buffer(samples: np.ndarray) -> str:
     """在累积音频缓冲上做一次整段离线解码，返回识别文本。
 
@@ -131,6 +158,8 @@ def _decode_buffer(samples: np.ndarray) -> str:
     用于 partial（在增长中的缓冲上重解码）和 final（EOS 后最终缓冲）。
     """
     assert _recognizer is not None
+    if STT_TRIM_SILENCE and len(samples) > 0:
+        samples = _trim_leading_silence(samples, STT_TRIM_SILENCE_THRESHOLD)
     stream = _recognizer.create_stream()
     stream.accept_waveform(SAMPLE_RATE, samples)
     _recognizer.decode_stream(stream)
@@ -237,12 +266,13 @@ async def info() -> dict:
     # SP10 G4 — 4 service /info 统一返 service/version/capabilities/models
     return {
         "service": "stt-server",
-        "version": "0.21.0",
+        "version": "0.22.0",
         "capabilities": {
             "streaming": False,
             "architecture": "offline-non-autoregressive",
             "subprotocol_bearer": True,
             "endpoint_detection": False,
+            "transcribe_endpoint": True,
         },
         "models": {
             "stt": MODEL_NAME,
@@ -255,8 +285,37 @@ async def info() -> dict:
             "partial_min_growth_s": PARTIAL_MIN_GROWTH_S,
             "soft_segment": STT_SOFT_SEGMENT,
             "soft_segment_max_s": STT_SOFT_SEGMENT_MAX_S,
+            "trim_silence": STT_TRIM_SILENCE,
+            "trim_silence_threshold": STT_TRIM_SILENCE_THRESHOLD,
         },
     }
+
+
+@app.post("/v1/transcribe")
+async def transcribe(request: Request) -> dict:
+    """内部服务接口：一次性音频转写（供 TTS server 验证参考音频文本）。
+
+    Body:    raw PCM int16 LE 16kHz mono bytes（不含 WAV header）
+    Returns: {"text": "..."}
+    Auth:    Bearer RTVOICE_API_KEY（空时不鉴权）
+    """
+    if _recognizer is None:
+        raise HTTPException(status_code=503, detail="recognizer not loaded")
+
+    if _RTVOICE_API_KEY:
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer ") or auth[len("Bearer "):] != _RTVOICE_API_KEY:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+    raw = await request.body()
+    if not raw:
+        return {"text": ""}
+
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    with DECODE_LATENCY.time():
+        text = await asyncio.to_thread(_decode_buffer, samples)
+    log.info("[transcribe] %.2fs audio → %r", len(samples) / SAMPLE_RATE, text)
+    return {"text": text}
 
 
 async def _verify_ws_key(ws: WebSocket) -> Key | None:
@@ -358,6 +417,22 @@ async def asr_ws(ws: WebSocket) -> None:
                             with DECODE_LATENCY.time():
                                 tail = await asyncio.to_thread(_decode_buffer, audio)
                             text = join_segments(committed_text, tail)
+                            # 诊断 dump：将原始音频写入磁盘（分析重复幻觉用）
+                            if STT_DEBUG_DUMP_DIR:
+                                try:
+                                    dump_dir = Path(STT_DEBUG_DUMP_DIR)
+                                    dump_dir.mkdir(parents=True, exist_ok=True)
+                                    ts = int(time.time() * 1000)
+                                    dump_path = dump_dir / f"stt_eos_{ts}.wav"
+                                    audio_int16 = (audio * 32767).clip(-32768, 32767).astype(np.int16)
+                                    with wave.open(str(dump_path), "wb") as wf:
+                                        wf.setnchannels(1)
+                                        wf.setsampwidth(2)
+                                        wf.setframerate(SAMPLE_RATE)
+                                        wf.writeframes(audio_int16.tobytes())
+                                    log.info("STT debug dump: %s text=%r", dump_path, text)
+                                except Exception:
+                                    log.exception("STT debug dump failed")
                         log.info("final after EOS: %r", text)
                         await ws.send_json({"type": "final", "text": text})
                         EVENTS_TOTAL.labels(type="final_eos").inc()

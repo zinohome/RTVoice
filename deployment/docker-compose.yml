@@ -122,6 +122,8 @@ services:
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STT_NUM_THREADS: ${STT_NUM_THREADS:-2}
+      STT_SOFT_SEGMENT: "true"
+      STT_TRIM_SILENCE: "true"
       RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
       RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
       RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
@@ -174,6 +176,8 @@ services:
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:256}
       # 跳过 RL 变体（省 2GB 显存）；需要时改为 0
       SKIP_RL_MODEL: ${SKIP_RL_MODEL:-1}
+      # STT 内部转写接口（供参考音频文本验证）
+      STT_TRANSCRIBE_URL: http://stt-server:9090/v1/transcribe
     volumes:
       - /data/RTVoice/keys:/data/keys:rw
       - /data/RTVoice/cosyvoice-models:/opt/CosyVoice/pretrained_models

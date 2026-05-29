@@ -32,6 +32,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import urllib.error
+import urllib.request
+import wave as _wave
 import numpy as np
 import torch
 import torchaudio
@@ -114,6 +117,11 @@ VOICE_TARGET_SR = int(os.environ.get("TTS_VOICE_TARGET_SR", "16000"))
 # 会导致 LLM attention 显存消耗激增（自定义音色 OOM 的根因）。
 # CosyVoice 官方推荐 3-10s；8s 是安全中点：音色质量好，显存占用可控。
 MAX_PROMPT_DURATION_S = float(os.environ.get("TTS_MAX_PROMPT_DURATION_S", "8.0"))
+
+# STT 服务内部转写接口 URL（供参考音频文本验证；仅容器间通信）
+STT_TRANSCRIBE_URL = os.environ.get(
+    "STT_TRANSCRIBE_URL", "http://stt-server:9090/v1/transcribe"
+).strip()
 
 # 静音检测阈值（RMS，线性）。约 -40 dBFS，低于此视为静音/噪底。
 SILENCE_RMS_THRESHOLD = float(os.environ.get("TTS_SILENCE_RMS_THRESHOLD", "0.01"))
@@ -227,6 +235,38 @@ def _truncate_text_for_duration(
 
     # 没有找到标点（纯无标点文本），退回到字符截断
     return truncated
+
+
+def _stt_verify_prompt_text(wav_path: str, api_key: str) -> str | None:
+    """调用 STT 服务转写规范化后的参考音频，返回准确的 prompt_text。
+
+    比字符比例截断更可靠：直接让 SenseVoice 告诉我们 8s 音频里说了什么，
+    而不是靠时长比例估算文本覆盖范围（存在语速不均匀、静音裁剪等误差）。
+
+    Returns None 表示调用失败，调用方应 fallback 到 _truncate_text_for_duration。
+    wav_path: 已规范化的 16kHz mono int16 WAV 文件路径（torchaudio.save 输出）。
+    """
+    try:
+        with _wave.open(wav_path, "rb") as wf:
+            pcm_data = wf.readframes(wf.getnframes())
+
+        headers: dict[str, str] = {"Content-Type": "application/octet-stream"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        req = urllib.request.Request(
+            STT_TRANSCRIBE_URL, data=pcm_data, headers=headers, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read()
+
+        result = json.loads(body)
+        text = result.get("text", "").strip()
+        log.info("[admin] STT 验证 prompt_text: %r (%d chars)", text, len(text))
+        return text if text else None
+    except Exception:
+        log.warning("[admin] STT verify 失败，将 fallback 到字符比例截断", exc_info=True)
+        return None
 
 
 _cosyvoice: CosyVoice3 | None = None
@@ -956,9 +996,16 @@ async def add_voice(
         # 清理原始文件
         raw_path.unlink(missing_ok=True)
 
-        # 按时长比例截断文本
-        effective_text = _truncate_text_for_duration(prompt_text, original_duration, effective_duration)
-        log.info("[admin] text truncated: %d→%d chars", len(prompt_text), len(effective_text))
+        # STT 验证：转写规范化后的音频获取精确 prompt_text，避免"悬挂文字"导致前缀音频 bug
+        # fallback 到字符比例截断（STT 服务不可用时）
+        effective_text = await asyncio.to_thread(
+            _stt_verify_prompt_text, str(wav_path), RTVOICE_API_KEY
+        )
+        if effective_text is None:
+            effective_text = _truncate_text_for_duration(prompt_text, original_duration, effective_duration)
+            log.info("[admin] STT verify fallback: text %d→%d chars", len(prompt_text), len(effective_text))
+        else:
+            log.info("[admin] STT verified: %r (%d chars)", effective_text, len(effective_text))
 
         # v3 约定：prompt_text 必须形如 "<system><|endofprompt|><transcript>"
         full_prompt_text = (
