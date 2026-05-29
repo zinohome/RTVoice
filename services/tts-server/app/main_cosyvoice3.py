@@ -106,6 +106,11 @@ ADMIN_API_KEY = os.environ.get("TTS_ADMIN_API_KEY", "").strip()
 # 上传 wav 大小上限（防爆磁盘）；CosyVoice 推荐 prompt 3-30 秒 16k mono → ≤2 MB
 MAX_WAV_BYTES = int(os.environ.get("TTS_MAX_WAV_BYTES", str(5 * 1024 * 1024)))
 
+# 参考音频截断上限（秒）。>8s 的 prompt_speech_token 序列在 12GB 显存环境下
+# 会导致 LLM attention 显存消耗激增（自定义音色 OOM 的根因）。
+# CosyVoice 官方推荐 3-10s；8s 是安全中点：音色质量好，显存占用可控。
+MAX_PROMPT_DURATION_S = float(os.environ.get("TTS_MAX_PROMPT_DURATION_S", "8.0"))
+
 # spk_id 限制：避免路径穿越/特殊字符；接受字母数字下划线和中日韩字符
 import re
 SPK_ID_RE = re.compile(r"^[\w\u4e00-\u9fff\u3040-\u30ff-]{1,64}$")
@@ -513,6 +518,9 @@ async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: st
                 await asyncio.wait_for(producer_task, timeout=2)
             except asyncio.TimeoutError:
                 pass
+        # 方案A：每次推理后主动释放 CUDA fragment，防止自定义音色长 token 序列
+        # 积累的碎片在 12GB 显存上触发 OOM
+        torch.cuda.empty_cache()
 
 
 @app.post(
@@ -671,15 +679,18 @@ async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
         # 每句 reset token_hop_len，防跨 inference 累积污染（见 _synthesize_stream_locked）
         _cosyvoice.model.token_hop_len = 25
         out: list[bytes] = []
-        for output in _cosyvoice.inference_zero_shot(
-            sentence,
-            DEFAULT_PROMPT_TEXT,    # 占位；spk_id 非空时不使用
-            DEFAULT_PROMPT_WAV,     # 占位；spk_id 非空时不使用
-            zero_shot_spk_id=voice,
-            stream=False,
-            speed=speed,
-        ):
-            out.append(_tensor_to_pcm_bytes(output["tts_speech"]))
+        try:
+            for output in _cosyvoice.inference_zero_shot(
+                sentence,
+                DEFAULT_PROMPT_TEXT,    # 占位；spk_id 非空时不使用
+                DEFAULT_PROMPT_WAV,     # 占位；spk_id 非空时不使用
+                zero_shot_spk_id=voice,
+                stream=False,
+                speed=speed,
+            ):
+                out.append(_tensor_to_pcm_bytes(output["tts_speech"]))
+        finally:
+            torch.cuda.empty_cache()
         return out
 
     sent_chunks = 0
@@ -807,8 +818,19 @@ async def add_voice(
             waveform, sr = torchaudio.load(str(wav_path))
         except Exception as e:
             raise api_error(400, "tts.wav_decode_failed", f"wav 解码失败：{e}")
+        duration_s = waveform.shape[-1] / sr
         log.info("[admin] add voice spk_id=%s sr=%d duration=%.2fs",
-                 spk_id, sr, waveform.shape[-1] / sr)
+                 spk_id, sr, duration_s)
+
+        # 自动截断：参考音频 >MAX_PROMPT_DURATION_S 时只取前段。
+        # prompt_speech_token 数量正比于参考音频时长，过长会导致 LLM attention
+        # 显存激增（12GB 显存的 OOM 根因）。截到 8s 对音色质量无损，显存可控。
+        max_samples = int(MAX_PROMPT_DURATION_S * sr)
+        if waveform.shape[-1] > max_samples:
+            log.info("[admin] 参考音频 %.2fs 超过 %.1fs 上限，自动截断", duration_s, MAX_PROMPT_DURATION_S)
+            waveform = waveform[:, :max_samples]
+            torchaudio.save(str(wav_path), waveform, sr)
+            duration_s = MAX_PROMPT_DURATION_S
 
         # v3 约定：prompt_text 必须形如 "<system><|endofprompt|><transcript>"
         # （见 DEFAULT_PROMPT_TEXT 上方说明）。client 一般只传 transcript，

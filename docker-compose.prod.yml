@@ -155,6 +155,10 @@ services:
       # Admin endpoints (POST/DELETE /voices/...) Bearer 鉴权
       # 留空 = 禁用 admin（生产建议设置）
       TTS_ADMIN_API_KEY: ${TTS_ADMIN_API_KEY:-}
+      # 方案A：CUDA 内存分配优化，防止碎片化导致 OOM（12GB 显存 LLM+TTS 共存场景）
+      # expandable_segments 允许显存块按需扩展而非一次性申请大块；max_split_size_mb
+      # 限制单次分配片段上限，减少碎片。
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:256}
       # Fun-CosyVoice 3 (Dockerfile.cosyvoice3) 模型下载控制：
       # 1 = 跳过 llm.rl.pt（默认；省 2GB）；0 = 全量下载含 RL 变体
       SKIP_RL_MODEL: ${SKIP_RL_MODEL:-1}
