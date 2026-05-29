@@ -2,6 +2,7 @@
 
 import { Phone, PhoneOff, Loader2, Mic } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import { startMicCapture, type MicRecorder } from "@/lib/audio";
@@ -43,12 +44,20 @@ function frameRms(buf: ArrayBuffer): number {
 }
 
 export default function RealtimeTestPage() {
+  const { data: voicesData } = useQuery<{ voices: string[] }>({
+    queryKey: ["console", "voices"],
+    queryFn: () => apiFetch<{ voices: string[] }>("/v1/console/voices"),
+  });
+  const voices = voicesData?.voices ?? [];
+
   const [stage, setStage] = useState<Stage>("idle");
   const [lines, setLines] = useState<Line[]>([]);
   const [partial, setPartial] = useState("");
   const [streamingReply, setStreamingReply] = useState("");
   const [err, setErr] = useState("");
   const [prompt, setPrompt] = useState("你是语音助手。用中文简短回答（≤2 句）。");
+  const [voice, setVoice] = useState("default_zh_female");
+  const [speed, setSpeed] = useState(1.0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const micRef = useRef<MicRecorder | null>(null);
@@ -193,7 +202,7 @@ export default function RealtimeTestPage() {
     try {
       const sess = await apiFetch<SessionResp>("/v1/sessions", {
         method: "POST",
-        body: JSON.stringify({ prompt, speed: 1.0 }),
+        body: JSON.stringify({ prompt, voice, speed }),
       });
       const ws = new WebSocket(sess.ws_url);
       ws.binaryType = "arraybuffer";
@@ -289,6 +298,35 @@ export default function RealtimeTestPage() {
               <div className="space-y-1.5">
                 <Label htmlFor="rt-prompt">系统提示词（可选）</Label>
                 <Input id="rt-prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="rt-voice">音色</Label>
+                  <select
+                    id="rt-voice"
+                    value={voice}
+                    onChange={(e) => setVoice(e.target.value)}
+                    className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  >
+                    {voices.length === 0 && <option value="default_zh_female">default_zh_female</option>}
+                    {voices.map((v) => (
+                      <option key={v} value={v}>{v}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="rt-speed">语速：{speed.toFixed(2)}×</Label>
+                  <input
+                    id="rt-speed"
+                    type="range"
+                    min={0.5}
+                    max={2}
+                    step={0.05}
+                    value={speed}
+                    onChange={(e) => setSpeed(Number(e.target.value))}
+                    className="w-full"
+                  />
+                </div>
               </div>
               <Button onClick={startCall} disabled={stage === "connecting"}>
                 {stage === "connecting" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Phone className="h-4 w-4" />}
