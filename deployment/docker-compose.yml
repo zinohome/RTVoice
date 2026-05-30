@@ -298,7 +298,7 @@ services:
     expose:
       - "3000"
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/admin-v2/login',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/admin/login',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
       interval: 15s
       timeout: 3s
       retries: 3
@@ -369,7 +369,7 @@ services:
 
   # ─────────────────────────────────────────────────────────────
   # Caddy（TLS 反向代理，自签 CA，HTTPS/WSS 统一入口）
-  # 访问：https://SERVER_IP/admin-v2/
+  # 访问：https://SERVER_IP/admin/
   # ─────────────────────────────────────────────────────────────
   caddy:
     image: caddy:2.8-alpine

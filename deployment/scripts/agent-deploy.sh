@@ -203,7 +203,7 @@ docker compose \
 
 echo
 echo "=== 关键 URL ==="
-echo "Admin Console: https://${SERVER_IP}/admin-v2/"
+echo "Admin Console: https://${SERVER_IP}/admin/"
 echo "Grafana 监控:  http://127.0.0.1:13000"
 echo
 echo "=== 信任 CA 命令（客户端执行）==="

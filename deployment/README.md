@@ -87,7 +87,7 @@ sudo update-ca-certificates
 
 | 服务 | 地址 |
 |------|------|
-| Admin Console | `https://SERVER_IP/admin-v2/` |
+| Admin Console | `https://SERVER_IP/admin/` |
 | Grafana 监控 | `http://SERVER_IP:13000`（默认 admin/admin） |
 | LiveKit | `ws://SERVER_IP:7880` |
 
@@ -156,7 +156,7 @@ docker compose -f docker-compose.yml up -d tts-server
 
 ## 自定义音色
 
-1. 登录 Admin Console：`https://SERVER_IP/admin-v2/`
+1. 登录 Admin Console：`https://SERVER_IP/admin/`
 2. 进入 **Voice Keys** → **注册音色**
 3. 上传参考音频（3-30 秒清晰人声 wav）和对应文本
 4. 系统自动规范化（转 16kHz mono，取 8 秒）

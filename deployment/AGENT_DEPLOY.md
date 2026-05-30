@@ -160,7 +160,7 @@ docker exec rtvoice-caddy cat /data/caddy/pki/authorities/local/root.crt > /tmp/
 curl -s --cacert /tmp/rtvoice-ca.crt "https://${SERVER_IP}/health" | grep -c '"status":"ok"' && echo "HTTPS OK"
 
 # 测试 Admin Console 可访问
-curl -sk --cacert /tmp/rtvoice-ca.crt "https://${SERVER_IP}/admin-v2/login" | grep -c "RTVoice" && echo "Admin UI OK"
+curl -sk --cacert /tmp/rtvoice-ca.crt "https://${SERVER_IP}/admin/login" | grep -c "RTVoice" && echo "Admin UI OK"
 ```
 
 ---
@@ -171,7 +171,7 @@ curl -sk --cacert /tmp/rtvoice-ca.crt "https://${SERVER_IP}/admin-v2/login" | gr
 
 ```
 RTVoice 部署完成
-- Admin Console: https://SERVER_IP/admin-v2/
+- Admin Console: https://SERVER_IP/admin/
 - Admin 用户名: admin（密码在 .env RTVOICE_ADMIN_PASSWORD）
 - Grafana 监控: http://SERVER_IP:13000（初始 admin/admin）
 - CA 证书: ssh root@SERVER_IP 'docker exec rtvoice-caddy cat /data/caddy/pki/authorities/local/root.crt' > rtvoice-ca.crt

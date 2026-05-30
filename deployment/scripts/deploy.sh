@@ -117,7 +117,7 @@ if [[ ! -f "$KEYS_FILE" ]]; then
   RTVOICE_API_KEY="$(source_env RTVOICE_API_KEY)"
   cat > "$KEYS_FILE" << KEYS_EOF
 # RTVoice API Keys（由 deploy.sh 初始化）
-# 使用 Admin Console 管理 key：https://${SERVER_IP}/admin-v2/
+# 使用 Admin Console 管理 key：https://${SERVER_IP}/admin/
 keys:
   - key: "${RTVOICE_API_KEY}"
     name: "default"
@@ -177,7 +177,7 @@ echo "  RTVoice 部署完成！"
 echo "══════════════════════════════════════════════════════"
 echo
 echo "  访问地址："
-echo "  Admin Console：https://${SERVER_IP}/admin-v2/"
+echo "  Admin Console：https://${SERVER_IP}/admin/"
 echo "  Grafana 监控：http://127.0.0.1:13000  (admin/admin 首次改密)"
 echo
 echo "  ⚠️  首次访问 HTTPS 需信任 Caddy 自签 CA："

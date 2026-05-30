@@ -6,7 +6,7 @@
  * 各服务接口（/v1/*、/auth/*）同源，路径用相对根路径即可，无需注入 API base URL。
  */
 
-export const BASE_PATH = "/admin-v2";
+export const BASE_PATH = "/admin";
 
 export interface ApiError {
   type?: string;

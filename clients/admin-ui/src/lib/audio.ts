@@ -63,7 +63,7 @@ export async function startMicCapture(
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
   const ctx = new AudioCtx();
-  // worklet 静态资源经 Caddy 挂在 basePath 下；硬编码 "/" 在 /admin-v2 部署下会 404。
+  // worklet 静态资源经 Caddy 挂在 basePath 下；硬编码 "/" 在 /admin 部署下会 404。
   await ctx.audioWorklet.addModule(`${BASE_PATH}/audio/pcm-worklet.js`);
   const source = ctx.createMediaStreamSource(stream);
   const node = new AudioWorkletNode(ctx, "pcm-capture");

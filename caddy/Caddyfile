@@ -82,25 +82,11 @@
     handle /auth/* {
         reverse_proxy realtime-server:9000
     }
-    # 新 Admin UI 挂在 /admin-v2（Next.js basePath=/admin-v2，不剥前缀）
-    # 单一 handle 覆盖 /admin-v2 及其子路径，整体透传给 admin-ui，
-    # 由 Next.js 自己处理 /admin-v2 → /admin-v2/home 的规范跳转。
+    # 新 Admin UI 挂在 /admin（Next.js basePath=/admin，不剥前缀）
+    # 单一 handle 覆盖 /admin 及其子路径，整体透传给 admin-ui，
+    # 由 Next.js 自己处理 /admin → /admin/home 的规范跳转。
     # 旧 /admin/ 保持不变，归档收尾在后续阶段处理
-    handle /admin-v2* {
-        reverse_proxy admin-ui:3000
-    }
-
-    # --- Admin Console (新版 Next.js Admin UI，独立容器) ---
-    # 会话登录端点（用户名/密码 + HttpOnly cookie），走 realtime-server
-    handle /auth/* {
-        reverse_proxy realtime-server:9000
-    }
-    # 新 Admin UI 挂在 /admin-v2/（Next.js basePath=/admin-v2，不剥前缀）
-    # 旧 /admin/ 保持不变，归档收尾在后续阶段处理
-    handle /admin-v2 {
-        redir /admin-v2/ permanent
-    }
-    handle /admin-v2/* {
+    handle /admin* {
         reverse_proxy admin-ui:3000
     }
 
@@ -147,11 +133,11 @@
 
     # favicon：浏览器自动请求 /favicon.ico，转发到 admin-ui 的 basePath 下
     handle /favicon.ico {
-        redir * /admin-v2/favicon.ico permanent
+        redir * /admin/favicon.ico permanent
     }
 
     handle / {
-        redir * /admin-v2/ permanent
+        redir * /admin/ permanent
     }
 
     # 其他都 404

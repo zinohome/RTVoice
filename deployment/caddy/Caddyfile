@@ -11,7 +11,7 @@
 #   # 或临时用 curl -k 跳过验证（自测可用）
 #
 # 路由：
-#   /admin-v2/*                     → admin-ui:3000
+#   /admin/*                     → admin-ui:3000
 #   /auth/* /v1/admin/*             → realtime-server:9000
 #   /v1/sessions* /v1/realtime/*    → realtime-server:9000
 #   /v1/console/*                   → realtime-server:9000
@@ -38,12 +38,6 @@
 # 监听服务器 IP + 127.0.0.1 + localhost（{$SERVER_IP} Caddy 支持 env 变量）
 {$SERVER_IP}, 127.0.0.1, localhost {
     tls internal
-
-    # 旧路径重定向到 admin-v2
-    @old_admin path /admin /admin/*
-    handle @old_admin {
-        redir * /admin-v2/ permanent
-    }
 
     # Realtime admin API
     handle /v1/admin/* {
@@ -90,8 +84,8 @@
         reverse_proxy realtime-server:9000
     }
 
-    # Admin UI（Next.js，/admin-v2 basePath）
-    handle /admin-v2* {
+    # Admin UI（Next.js，/admin basePath）
+    handle /admin* {
         reverse_proxy admin-ui:3000
     }
 
@@ -144,7 +138,7 @@
 
     # 根路径默认跳转 admin-v2
     handle / {
-        redir * /admin-v2/ permanent
+        redir * /admin/ permanent
     }
 
     # Static（兼容旧 web demo）
