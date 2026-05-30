@@ -16,46 +16,59 @@
 
 ```bash
 git clone https://github.com/zinohome/RTVoice.git
-cd RTVoice
-cp .env.example .env       # 默认 dev 配置已可用
-docker compose --profile dev up -d
+cd RTVoice/deployment
+cp .env.example .env       # 填写 SERVER_IP、API key 等
+# 编辑 .env，至少设置：SERVER_IP=<你的服务器IP>
+docker compose -f docker-compose.yml --env-file .env up -d
 ```
 
-服务起来后:
+服务起来后（`SERVER_IP=192.168.66.163` 为例），所有 API 通过 Caddy 反代 HTTPS 443 端口访问：
 
 | 想试什么 | 怎么试 |
 |---|---|
-| **STT**（语音转文字）| [测试页](http://127.0.0.1:8000/) 录一段；或编程方式见 [STT 集成示例](./COZYVOICE_INTEGRATION.md) |
-| **TTS**（文字转语音）| `curl -X POST http://127.0.0.1:9880/v1/tts/stream -d '{"text":"你好"}' \| ffplay -f s16le -ar 24000 -` |
-| **Realtime 对话**（API 方式）| `curl -X POST http://127.0.0.1:9000/v1/sessions -d '{}' -H "Content-Type: application/json"` 拿 ws_url，然后 websocat 连 |
-| **Realtime 对话**| 浏览器 [测试页](http://127.0.0.1:8000/) → 加入语音 → 说话 |
+| **Admin 管理后台** | 浏览器 `https://192.168.66.163/admin/` |
+| **STT**（语音转文字）| `wss://192.168.66.163/v1/asr`；完整示例见 [集成指南](./COZYVOICE_INTEGRATION.md) |
+| **TTS**（文字转语音）| `curl --cacert rtvoice-ca.crt -X POST https://192.168.66.163/v1/tts/stream -H "Authorization: Bearer $API_KEY" -d '{"text":"你好"}' \| ffplay -f s16le -ar 24000 -` |
+| **Realtime 对话**（API 方式）| `curl --cacert rtvoice-ca.crt -X POST https://192.168.66.163/v1/sessions -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -d '{}'` 拿 ws_url，然后 websocat 连 |
+| **Realtime 对话**（浏览器）| `https://192.168.66.163/admin/` → 测试标签页 → 开启语音 → 说话 |
 
-**Realtime Voice 完整能力（v0.10+）**: 多轮记忆 / 流式 transcript+text / 中途换 prompt / 异步 audit JSONL。详见 [SP3 spec](./docs/superpowers/specs/2026-05-09-sp3-realtime-memory-design.md)。
+> **TLS 说明**：Caddy 使用 `tls internal` 自签 CA 证书（IP 地址无法申请公开可信证书）。**推荐**：先执行 `./scripts/get-rtvoice-ca.sh` 导出 CA 并安装到系统信任库（一次性操作），之后客户端无需额外配置。`rtvoice-ca.crt` 是导出的 CA 文件，`curl --cacert` 用于指定信任的 CA。详见 [QUICKSTART.md §1](./QUICKSTART.md)。
+
+**Realtime Voice 完整能力（v0.10+）**: 多轮记忆 / 流式 transcript+text / 中途换 prompt / barge-in 打断 / 异步 audit JSONL。详见 [SP3 spec](./docs/superpowers/specs/2026-05-09-sp3-realtime-memory-design.md)。
 
 **首次启动注意**：LLM (Ollama) 需要 `ollama pull qwen2.5:1.5b`（约 1GB）。完整下好后约 3-5 分钟可对话。prod GPU 部署见 [DEPLOY.md](./DEPLOY.md)。
 
 ---
 
-## Python SDK (v0.11+)
+## Python SDK
+
+SDK 源码在 `clients/python/`，尚未发布至 PyPI，使用 git URL 安装：
 
 ```bash
-pip install rtvoice-client
+pip install "git+https://github.com/zinohome/RTVoice.git#subdirectory=clients/python"
 ```
 
 ```python
 from rtvoice_client import Client
-c = Client(api_key="...", base_url="https://your-rtvoice.example.com")
+import ssl, certifi
+
+# 使用系统信任库；若已安装 RTVoice CA 则无需额外配置
+c = Client(api_key="...", base_url="https://192.168.66.163",
+           verify="path/to/rtvoice-ca.crt")  # 指向导出的 CA 证书
 text = c.stt.transcribe(pcm)
 pcm = c.tts.synthesize("你好")
 ```
 
-详见 [clients/python/README.md](./clients/python/README.md)。
+详见 [clients/python/README.md](./clients/python/README.md) 和 [COZYVOICE_INTEGRATION.md](./COZYVOICE_INTEGRATION.md)。
 
-## Monitoring (v0.11+)
+## Monitoring
 
 ```bash
-docker compose --profile prod --profile monitoring up -d
-# Grafana: http://your-host:3000  (anonymous viewer)
+# 监控组件已内置于 docker-compose.yml（monitoring profile）
+cd deployment
+docker compose -f docker-compose.yml --env-file .env \
+  --profile monitoring up -d
+# Grafana: https://192.168.66.163:3000  (或通过 Caddy 反代)
 ```
 
 详见 [OPERATIONS.md §5](./OPERATIONS.md)。
@@ -66,26 +79,29 @@ docker compose --profile prod --profile monitoring up -d
 
 ### 🎤 STT — 流式语音识别
 
-- **接口**：WS `/v1/asr`
+- **接口**：`wss://<host>/v1/asr`（经 Caddy 反代）
 - **引擎**：sherpa-onnx Streaming Zipformer 中英文
 - **协议**：PCM int16 LE 16kHz mono in → JSON `{partial,final,error}` events out
+- **配置**：`STT_PROVIDER=cpu|cuda`（设备）、`STT_QUANTIZED=true|false`（量化）
 - **场景**：实时转写、麦克风听写、对话录音
-- → [集成示例](./COZYVOICE_INTEGRATION.md) · [API spec](./docs/api/stt.md)（即将上线）
+- **鉴权**：`Authorization: Bearer <API_KEY>` header 或 WS subprotocol
+- → [集成示例](./COZYVOICE_INTEGRATION.md) · [API spec](./docs/api/stt.md)
 
 ### 🔊 TTS — 流式语音合成 + 音色克隆
 
-- **接口**：HTTP POST `/v1/tts/stream`（单次）+ WS `/v1/tts/stream_ws`（双向流式）
+- **接口**：`POST https://<host>/v1/tts/stream`（单次）+ `wss://<host>/v1/tts/stream_ws`（双向流式）
 - **引擎**：Fun-CosyVoice 3 (0.5B GPU)
 - **协议**：text in（HTTP body 或 WS 流）→ chunked PCM int16 LE 24kHz mono out
 - **特性**：音色克隆（POST /v1/voices）、speed 0.5-2.0
-- → [集成示例](./COZYVOICE_INTEGRATION.md) · [API spec](./docs/api/tts.md)（即将上线）
+- → [集成示例](./COZYVOICE_INTEGRATION.md) · [API spec](./docs/api/tts.md)
 
 ### 💬 Realtime Voice — 实时语音对话
 
-- **接口**：HTTP POST `/v1/sessions` 创建 + WS `/v1/realtime/{session_id}` 连接
+- **接口**：`POST https://<host>/v1/sessions` 创建 + `wss://<host>/v1/realtime/{session_id}` 连接
 - **协议**：客户端发 PCM in / 收 PCM + transcript events out（OpenAI Realtime 风格）
 - **引擎**：内部 STT (sherpa) + LLM (Ollama / vLLM) + TTS (Fun-CosyVoice 3)
-- **特性**：双向流式、prompt+memory、同步 transcript、换音色、barge-in
+- **特性**：双向流式、多轮记忆、同步 transcript、换音色、**barge-in 打断**（发送 `{"type":"interrupt"}` 即时终止当前回复）
+- **超时配置**：`SESSION_IDLE_TIMEOUT_S`（默认 120s）、`SESSION_MAX_LIFETIME_S`（默认 3600s）
 - **高级模式**：LiveKit endpoint 可选保留（适合 end-user 跨公网移动场景）
 - → [集成示例](./COZYVOICE_INTEGRATION.md) · [API spec](./docs/api/sessions.md)
 
@@ -168,23 +184,35 @@ docker compose --profile prod --profile monitoring up -d
 
 | 服务 | 地址 | 说明 |
 |---|---|---|
-| **前端测试页** | `https://192.168.66.163/` | Web Demo 语音对话页面 |
-| **Admin 管理页** | `https://192.168.66.163/admin/` | 8-tab 管理 UI（会话、配置、监控等） |
+| **Admin 管理后台** | `https://192.168.66.163/admin/` | 管理 UI（会话、配置、监控等）；根路径自动跳转此处 |
 | **Realtime Voice API** | `https://192.168.66.163/v1/sessions`（HTTP）<br>`wss://192.168.66.163/v1/realtime/{session_id}`（WebSocket） | 创建会话 / 实时语音通道 |
 | **STT API** | `wss://192.168.66.163/v1/asr` | 流式语音识别 WebSocket |
-| **TTS API** | `https://192.168.66.163/v1/tts/stream` | 流式语音合成 HTTP |
+| **TTS API（单次）** | `https://192.168.66.163/v1/tts/stream` | 流式语音合成 HTTP POST |
+| **TTS API（流式）** | `wss://192.168.66.163/v1/tts/stream_ws` | 双向流式 TTS WebSocket |
+| **音色管理** | `https://192.168.66.163/v1/voices` | GET 列表 / POST 注册音色 |
+| **Token Server** | `https://192.168.66.163/v1/tokens` | LiveKit JWT 签发 |
 | **LiveKit SFU** | `ws://192.168.66.163:7880` | WebRTC 信令（此端口独立暴露，不经过 Caddy） |
 
 #### 自签 TLS 证书说明
 
-测试环境的 Caddy 使用 `tls internal` 生成自签 CA 证书（IP 地址无法申请公开可信证书）。首次通过浏览器访问 `https://192.168.66.163/` 时会弹出"连接不安全"警告：
+测试环境的 Caddy 使用 `tls internal` 生成自签 CA 证书（IP 地址无法申请公开可信证书）。
 
-- **快速方式**：点击「高级」→「继续访问（不安全）」即可进入页面。
-- **免警告方式**：从测试服务器导出 Caddy root CA 证书（`/data/caddy/pki/authorities/local/root.crt`），导入到本机的系统/浏览器信任证书库。
+**推荐做法（一次性配置）**：
 
-使用 API 客户端（curl、Postman 等）时，需加 `-k`（curl）或关闭 SSL 校验，否则请求会因证书不受信任而失败。
+```bash
+# 从服务器导出 CA 证书
+ssh root@192.168.66.163 'docker exec rtvoice-caddy cat /data/caddy/pki/authorities/local/root.crt' > rtvoice-ca.crt
 
-**鉴权**：如测试环境已配置 `RTVOICE_API_KEY`，访问 STT/TTS/Realtime API 需在请求头带 `Authorization: Bearer <key>`。测试页（Token Server）若 `DEV_AUTO_INJECT_KEY=true` 则自动注入，否则需手动输入。具体 key 值请向运维确认。
+# macOS
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain rtvoice-ca.crt
+# Linux
+sudo cp rtvoice-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates
+# Windows：双击 rtvoice-ca.crt → 安装到"受信任的根证书颁发机构"
+```
+
+完成后浏览器和 curl 均无需额外配置即可正常访问。API 客户端中指定 CA 文件：`curl --cacert rtvoice-ca.crt ...` / Python `requests.get(url, verify="rtvoice-ca.crt")`。
+
+**鉴权**：所有 STT/TTS/Realtime API 调用需在请求头带 `Authorization: Bearer <RTVOICE_API_KEY>`。测试页若 `DEV_AUTO_INJECT_KEY=true` 则自动注入，否则需手动输入。具体 key 值请向运维确认或参考 [QUICKSTART.md §2](./QUICKSTART.md)。
 
 ---
 

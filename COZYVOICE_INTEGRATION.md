@@ -6,20 +6,41 @@
 
 ---
 
-## 0. 端口拓扑速览（SP9 T7 新增）
+## 0. 接入拓扑速览
 
 **先读这节再继续**——决定哪些 URL 你能从浏览器 / 三方进程访问。
 
-| Service | 容器内 port | prod host 暴露 (v0.15+) | 用途 | 公共 endpoints |
-|---|---|---|---|---|
-| token-server | 8000 | `${BIND_HOST}:8000` ✅ | LiveKit JWT 颁发 | POST /v1/tokens |
-| realtime-server | 9000 | `${BIND_HOST}:9000` ✅ | Realtime Voice session + Web Demo | POST /v1/sessions, WS /v1/realtime/{id}, /static/ |
-| stt-server | 9090 | `${BIND_HOST}:9090` ✅ (SP9 T4) | STT | WS /v1/asr |
-| tts-server | 9880 | `${BIND_HOST}:9880` ✅ (SP9 T4) | TTS | GET/POST /v1/voices, POST /v1/tts/stream, WS /v1/tts/stream_ws |
-| livekit-server | 7880/7881 | 公网开放 | WebRTC realtime media | （见 LiveKit 官方） |
+### 0.1 生产部署接入层（推荐）
 
-**v0.14 及之前** stt/tts 不对外暴露——只能从同机 docker network 调（拓扑 A）。
-**v0.15+** 全部对外可达，浏览器 / 三方进程直连各 service URL 都行。
+生产环境所有服务统一通过 **Caddy 反向代理**（HTTPS/WSS 443 端口）对外暴露，各容器内部端口**不直接对外**。这是外部应用集成的标准路径：
+
+| 用途 | 协议 | Caddy 路径 | 示例 URL（`SERVER_IP=192.168.66.163`） |
+|---|---|---|---|
+| Admin 管理后台 | HTTPS | `/admin/` | `https://192.168.66.163/admin/` |
+| 创建 Realtime 会话 | HTTPS | `POST /v1/sessions` | `https://192.168.66.163/v1/sessions` |
+| Realtime 语音 WebSocket | WSS | `/v1/realtime/{session_id}` | `wss://192.168.66.163/v1/realtime/{id}` |
+| STT 流式识别 | WSS | `/v1/asr` | `wss://192.168.66.163/v1/asr` |
+| TTS 单次合成 | HTTPS | `POST /v1/tts/stream` | `https://192.168.66.163/v1/tts/stream` |
+| TTS 双向流式 | WSS | `/v1/tts/stream_ws` | `wss://192.168.66.163/v1/tts/stream_ws` |
+| 音色管理 | HTTPS | `/v1/voices` | `https://192.168.66.163/v1/voices` |
+| LiveKit JWT | HTTPS | `POST /v1/tokens` | `https://192.168.66.163/v1/tokens` |
+| LiveKit SFU（直连）| WS | `:7880` 直连 | `ws://192.168.66.163:7880`（不经 Caddy） |
+
+> **TLS**：Caddy 使用 `tls internal` 自签 CA。客户端需信任该 CA，详见 [QUICKSTART.md §1](./QUICKSTART.md)。
+
+### 0.2 同机 docker 内部直连（可选）
+
+若你的应用与 RTVoice **部署在同一台机器同一 docker 网络**（`1panel-network`），可直接用容器名访问，无需 TLS：
+
+| Service | 容器名 | 内部地址 | 用途 |
+|---|---|---|---|
+| realtime-server | `rtvoice-realtime` | `http://realtime-server:9000` | sessions / realtime WS |
+| stt-server | `rtvoice-stt` | `ws://stt-server:9090/v1/asr` | STT |
+| tts-server | `rtvoice-tts` | `http://tts-server:9880` | TTS |
+| token-server | `rtvoice-token` | `http://token-server:8000` | tokens |
+| livekit-server | `rtvoice-livekit` | `ws://livekit-server:7880` | LiveKit SFU |
+
+这是拓扑 A（§1 中的最高推荐拓扑）的使用方式。docker 外部进程不能使用此方式。
 
 ---
 
@@ -154,16 +175,40 @@ print(urllib.request.urlopen(req, timeout=5).read().decode())
 
 ## 4. Endpoints 参考
 
+所有路径均通过 Caddy 对外（`https://<SERVER_IP>/...` 或 `wss://<SERVER_IP>/...`）。
+
+### Realtime Voice
+
 | 用途 | 方法 | 路径 | 鉴权 |
 |---|---|---|---|
-| 健康检查 | GET | `/health` | 无 |
-| 服务信息 | GET | `/info` | 无（公开元数据） |
-| STT 流式识别 | WS | `/v1/asr` | Bearer |
+| 创建会话 | POST | `/v1/sessions` | Bearer |
+| 查询会话 | GET | `/v1/sessions/{id}` | Bearer |
+| 关闭会话 | DELETE | `/v1/sessions/{id}` | Bearer |
+| 实时语音 WebSocket | WS | `/v1/realtime/{session_id}` | Bearer |
+| 更新会话配置（WS 内） | — | `{"type":"session.update","prompt":"..."}` | — |
+| 打断当前回复（WS 内） | — | `{"type":"interrupt"}` | — |
+
+### STT
+
+| 用途 | 方法 | 路径 | 鉴权 |
+|---|---|---|---|
+| 流式语音识别 | WS | `/v1/asr` | Bearer |
+
+### TTS
+
+| 用途 | 方法 | 路径 | 鉴权 |
+|---|---|---|---|
 | TTS 单次合成 | POST | `/v1/tts/stream` | Bearer |
 | **TTS 双向流式** | **WS** | **`/v1/tts/stream_ws`** | **Bearer** |
 | 列出音色 | GET | `/v1/voices` | Bearer |
 | 注册音色（admin） | POST | `/v1/voices` | TTS_ADMIN_API_KEY |
 | 删除音色（admin） | DELETE | `/v1/voices/{id}` | TTS_ADMIN_API_KEY |
+
+### Token Server
+
+| 用途 | 方法 | 路径 | 鉴权 |
+|---|---|---|---|
+| 签发 LiveKit JWT | POST | `/v1/tokens` | Bearer |
 
 ### 鉴权方式
 
@@ -173,6 +218,22 @@ print(urllib.request.urlopen(req, timeout=5).read().decode())
 1. `Authorization: Bearer <KEY>` header（推荐 server-to-server）
 2. `Sec-WebSocket-Protocol: bearer.<KEY>`（浏览器场景，标准 subprotocol）
 3. `?token=<KEY>` query param（兜底，会进 access log）
+
+### WS 事件类型（Realtime Voice）
+
+| 方向 | 类型 | 含义 |
+|---|---|---|
+| 客户端 → 服务端 | `bytes` | PCM int16 LE 16kHz mono 音频帧 |
+| 客户端 → 服务端 | `"audio.eos"` | 音频结束（可选） |
+| 客户端 → 服务端 | `{"type":"interrupt"}` | 打断当前 AI 回复 |
+| 客户端 → 服务端 | `{"type":"session.update","prompt":"..."}` | 中途更换 system prompt |
+| 服务端 → 客户端 | `bytes` | TTS 音频帧（PCM int16 LE 24kHz mono） |
+| 服务端 → 客户端 | `{"type":"transcript.partial","text":"..."}` | 实时识别中间结果 |
+| 服务端 → 客户端 | `{"type":"transcript.final","text":"..."}` | 识别最终结果 |
+| 服务端 → 客户端 | `{"type":"response.text","delta":"..."}` | LLM 回复文本 delta |
+| 服务端 → 客户端 | `{"type":"response.done"}` | 本轮回复完成 |
+| 服务端 → 客户端 | `{"type":"interrupted","cancelled":true}` | 打断确认 |
+| 服务端 → 客户端 | `{"type":"error","message":"..."}` | 错误 |
 
 ---
 
@@ -488,6 +549,22 @@ async with websockets.connect(ws_url) as ws:
     # 下一 turn 起 agent 用新 prompt
 ```
 
+**Barge-in（打断）**：
+
+用户在 AI 回复播放期间重新开口时，客户端应发送 `interrupt` 事件立即停止当前回复，避免 AI 音频继续播出并覆盖用户的话：
+
+```python
+async with websockets.connect(ws_url) as ws:
+    # 检测到用户开始说话（VAD 触发）且 AI 正在回复时：
+    await ws.send(json.dumps({"type": "interrupt"}))
+    # 服务端收到后：取消当前 turn 任务、重置 STT、回复 interrupted 事件
+    resp = json.loads(await ws.recv())
+    # resp = {"type": "interrupted", "cancelled": True}
+    # 之后可继续发送用户音频开始新一轮对话
+```
+
+> **客户端时序建议**：收到 `interrupted` 确认后再开始播放新的用户音频或 AI 回复，避免乱序。
+
 ---
 
 ## 6. 常见模式
@@ -560,24 +637,36 @@ RTVOICE_STT_URL=ws://127.0.0.1:9090/v1/asr
 RTVOICE_TTS_URL=http://127.0.0.1:9880
 ```
 
-### 7.2 跨机内网（自签 TLS）
+### 7.2 跨机内网（Caddy TLS，默认配置）
 
-启用 `docker-compose.tls.yml` + `caddy/Caddyfile`（默认走 `tls internal`）：
+生产部署默认已通过 `deployment/docker-compose.yml` 启动 Caddy，`tls internal` 自签 CA，无需额外 overlay：
+
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-               -f docker-compose.tls.yml --profile prod up -d
+cd /data/RTVoice/deployment
+docker compose -f docker-compose.yml --env-file .env up -d
 ```
 
-CozyVoice 端：
+CozyVoice 端配置（以 SERVER_IP=192.168.66.163 为例）：
 ```
 RTVOICE_STT_URL=wss://192.168.66.163/v1/asr
 RTVOICE_TTS_URL=https://192.168.66.163
+RTVOICE_RT_HTTP=https://192.168.66.163
 ```
-首次需信任 caddy 自签 root CA：
+
+首次需在 CozyVoice 所在机器信任 RTVoice CA 证书（**一次性操作**）：
 ```bash
-docker exec rtvoice-caddy cat /data/caddy/pki/authorities/local/root.crt > /tmp/root.crt
-# 在 CozyVoice 端：cp /tmp/root.crt /usr/local/share/ca-certificates/ && update-ca-certificates
+# 从 RTVoice 服务器导出 CA
+ssh root@192.168.66.163 'docker exec rtvoice-caddy cat /data/caddy/pki/authorities/local/root.crt' > /tmp/rtvoice-ca.crt
+
+# Linux（在 CozyVoice 机器上执行）
+sudo cp /tmp/rtvoice-ca.crt /usr/local/share/ca-certificates/rtvoice-ca.crt
+sudo update-ca-certificates
+
+# 验证
+curl --cacert /tmp/rtvoice-ca.crt https://192.168.66.163/health
 ```
+
+Python SDK 指定 CA：`Client(..., verify="/tmp/rtvoice-ca.crt")`
 
 ### 7.3 公网域名（Let's Encrypt）
 
