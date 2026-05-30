@@ -122,6 +122,10 @@ services:
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STT_NUM_THREADS: ${STT_NUM_THREADS:-2}
+      # cpu = 零显存占用（推荐，显存紧张时使用）；cuda = GPU 推理（显存约 500MB–1GB）
+      STT_PROVIDER: ${STT_PROVIDER:-cpu}
+      # true = 量化版 model.int8.onnx（~230MB，略有幻觉）；false = 非量化版 model.onnx（~1.1GB，精度更高）
+      STT_QUANTIZED: ${STT_QUANTIZED:-true}
       STT_SOFT_SEGMENT: "true"
       STT_TRIM_SILENCE: "true"
       RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}

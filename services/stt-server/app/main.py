@@ -73,6 +73,9 @@ MODEL_NAME = os.environ.get(
 MODEL_DIR = MODELS_DIR / MODEL_NAME
 NUM_THREADS = int(os.environ.get("STT_NUM_THREADS", "2"))
 PROVIDER = os.environ.get("STT_PROVIDER", "cpu")  # "cpu" | "cuda"
+# STT_QUANTIZED=true → model.int8.onnx（量化版，~230MB，显存零占用）
+# STT_QUANTIZED=false → model.onnx（非量化版，~1.1GB，精度更高，显存低占用）
+STT_QUANTIZED = os.environ.get("STT_QUANTIZED", "true").lower() in ("1", "true", "yes")
 SAMPLE_RATE = 16000
 
 # SenseVoice 识别语言："auto"|"zh"|"en"|"ja"|"ko"|"yue"（空串=auto）
@@ -107,11 +110,12 @@ def _build_recognizer() -> sherpa_onnx.OfflineRecognizer:
     SenseVoice 是 offline 模型（不逐帧流式），但 RTVoice 的断句权威是客户端 silero VAD：
     客户端 feed PCM、发 EOS 标记一句结束。服务端在缓冲上做整段解码即可，WS 协议不变。
     """
-    model = MODEL_DIR / "model.int8.onnx"
+    model_file = "model.int8.onnx" if STT_QUANTIZED else "model.onnx"
+    model = MODEL_DIR / model_file
     tokens = MODEL_DIR / "tokens.txt"
 
     log.info("加载 sherpa-onnx SenseVoice (offline, non-autoregressive):")
-    log.info("  model=%s (%.1fMB)", model, model.stat().st_size / 1e6)
+    log.info("  model=%s (%.1fMB) quantized=%s", model, model.stat().st_size / 1e6, STT_QUANTIZED)
     log.info("  tokens=%s", tokens)
     log.info("  threads=%d provider=%s language=%s itn=%s",
              NUM_THREADS, PROVIDER, STT_LANGUAGE, STT_USE_ITN)
