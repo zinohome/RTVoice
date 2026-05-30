@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
+COPY services/agent-worker/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 下载 silero VAD ONNX 模型（来自官方 github releases）
@@ -32,7 +32,7 @@ RUN mkdir -p /app/models && \
 # 卸载 wget（运行期不需要）
 RUN apt-get purge -y --auto-remove wget && rm -rf /var/lib/apt/lists/*
 
-COPY app ./app
+COPY services/agent-worker/app ./app
 
 RUN useradd -u 1000 -m appuser && chown -R appuser:appuser /app
 USER appuser
