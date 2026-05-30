@@ -39,7 +39,7 @@ RUN chmod +x /usr/local/bin/download_model.sh
 RUN mkdir -p /app/models/${MODEL_NAME} && cd /app/models/${MODEL_NAME} && \
     base="https://huggingface.co/${HF_REPO}/resolve/main" && \
     /usr/local/bin/download_model.sh "${base}/model.int8.onnx" "model.int8.onnx" 104857600 && \
-    /usr/local/bin/download_model.sh "${base}/model.onnx" "model.onnx" 1073741824 && \
+    /usr/local/bin/download_model.sh "${base}/model.onnx" "model.onnx" 900000000 && \
     /usr/local/bin/download_model.sh "${base}/tokens.txt" "tokens.txt" 1024
 
 # 卸载下载工具
