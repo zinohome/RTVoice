@@ -45,6 +45,7 @@ export default function KeysPage() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [secret, setSecret] = useState<SecretResult | null>(null);
+  const [showRevoked, setShowRevoked] = useState(false);
 
   // 创建表单
   const [name, setName] = useState("");
@@ -100,6 +101,9 @@ export default function KeysPage() {
   const toggleScope = (s: string) =>
     setScopes((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
 
+  const revokedCount = data?.filter((k) => k.revoked_at !== null).length ?? 0;
+  const visibleKeys = showRevoked ? data : data?.filter((k) => k.revoked_at === null);
+
   return (
     <div className="mx-auto max-w-5xl">
       <div className="flex items-start justify-between">
@@ -110,13 +114,46 @@ export default function KeysPage() {
         </Button>
       </div>
 
+      <div className="mb-3 mt-1 flex items-center gap-2">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={showRevoked}
+          onClick={() => setShowRevoked((v) => !v)}
+          className={
+            "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors " +
+            (showRevoked ? "bg-primary" : "bg-input")
+          }>
+          <span
+            className={
+              "inline-block h-4 w-4 rounded-full bg-background shadow transition-transform " +
+              (showRevoked ? "translate-x-4" : "translate-x-0.5")
+            }
+          />
+        </button>
+        <Label
+          className="cursor-pointer text-sm text-muted-foreground"
+          onClick={() => setShowRevoked((v) => !v)}>
+          显示已吊销 Key
+          {!showRevoked && revokedCount > 0 && (
+            <span className="ml-1">（已隐藏 {revokedCount} 个）</span>
+          )}
+        </Label>
+      </div>
+
       {isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-16 rounded-lg" />)}
         </div>
+      ) : visibleKeys && visibleKeys.length === 0 ? (
+        <Card className="p-8 text-center text-sm text-muted-foreground">
+          {revokedCount > 0
+            ? "暂无活跃 Key，已吊销的 Key 已隐藏（打开上方开关可查看）。"
+            : "暂无 Key，点击右上角「新建 Key」开始签发。"}
+        </Card>
       ) : (
         <div className="space-y-2">
-          {data?.map((k) => {
+          {visibleKeys?.map((k) => {
             const active = k.revoked_at === null;
             return (
               <Card key={k.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
