@@ -109,7 +109,7 @@ services:
     build:
       context: .
       dockerfile: services/realtime-server/Dockerfile
-    image: rtvoice/realtime-server:v0.19.0
+    image: rtvoice/realtime-server:v0.19.1
     container_name: rtvoice-realtime
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -186,7 +186,7 @@ services:
     build:
       context: ./clients/admin-ui
       dockerfile: Dockerfile
-    image: rtvoice/admin-ui:v0.19.0
+    image: rtvoice/admin-ui:v0.19.5
     container_name: rtvoice-admin-ui
     profiles: ["dev", "prod"]
     restart: unless-stopped

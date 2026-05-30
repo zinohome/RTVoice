@@ -20,6 +20,7 @@ ID（zf_xiaobei 等）+ "中文女"/"中文男" 等都 alias 到 default_zh_fema
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -31,7 +32,10 @@ from pathlib import Path
 import numpy as np
 import torch
 import torchaudio
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import (
+    Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile,
+    WebSocket, WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import Counter, Histogram
@@ -52,6 +56,13 @@ from rtvoice_auth.models import Key
 from rtvoice_auth.verify import verify_key
 from rtvoice_auth.errors import AuthError, InvalidToken, TokenRevoked, ScopeDenied
 from rtvoice_auth.lifespan import auto_migrate_legacy
+from rtvoice_auth.ws import pick_bearer_subprotocol
+from rtvoice_auth.instrumentation import RequestMetricsMiddleware
+from rtvoice_auth.openapi import add_bearer_security_scheme
+from rtvoice_auth.metrics import TTS_CHARS_TOTAL
+from rtvoice_auth.metrics_labels import safe_key_id
+
+import re
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -89,8 +100,7 @@ ADMIN_API_KEY = os.environ.get("TTS_ADMIN_API_KEY", "").strip()
 MAX_WAV_BYTES = int(os.environ.get("TTS_MAX_WAV_BYTES", str(5 * 1024 * 1024)))
 
 # spk_id 限制：避免路径穿越/特殊字符；接受字母数字下划线和中日韩字符
-import re
-SPK_ID_RE = re.compile(r"^[\w\u4e00-\u9fff\u3040-\u30ff-]{1,64}$")
+SPK_ID_RE = re.compile(r"^[\w一-鿿぀-ヿ-]{1,64}$")
 
 # 任意 voice 别名都 fallback 到默认注册的 SFT id
 # Kokoro 用户不改 .env 可直接复用
@@ -110,10 +120,16 @@ VOICE_ALIASES = {
 _cosyvoice: CosyVoice2 | None = None
 _cosyvoice_voices: list[str] = []
 
+# 单 GPU 模型的 inference 必须串行 —— CosyVoice2 并发调用时共享内部 state，
+# 多路并发会导致音频输出混乱或 GPU state 污染。此 lock 包住每路推理全程，
+# 确保任何时刻只一路在 GPU。N 路并发→排队。
+_inference_lock: asyncio.Lock | None = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cosyvoice, _cosyvoice_voices
+    global _cosyvoice, _cosyvoice_voices, _inference_lock
+    _inference_lock = asyncio.Lock()
     log.info("加载 CosyVoice2 模型: %s", MODEL_DIR)
     if not Path(MODEL_DIR, "llm.pt").exists():
         raise RuntimeError(
@@ -142,6 +158,30 @@ async def lifespan(app: FastAPI):
         DEFAULT_SPK_ID,
     )
     log.info("默认音色注册完成 (%.1fs)", time.time() - t0)
+
+    # 启动 warmup：跑一次完整 inference_zero_shot，丢弃输出。
+    # 首次推理 LLM/flow/hifigan 内部 cache 还没进入稳态，warmup 拉热路径，
+    # 让后续真实请求走稳态。
+    log.info("启动 warmup 推理（丢弃输出）...")
+    t0 = time.time()
+
+    def _warmup() -> None:
+        warmup_text = "系统启动预热中，本句仅用于初始化推理路径，输出会被丢弃。"
+        for _ in _cosyvoice.inference_zero_shot(
+            warmup_text,
+            DEFAULT_PROMPT_TEXT,
+            DEFAULT_PROMPT_WAV,
+            zero_shot_spk_id=DEFAULT_SPK_ID,
+            stream=True,
+            speed=1.0,
+        ):
+            pass
+
+    try:
+        await asyncio.to_thread(_warmup)
+        log.info("warmup 推理完成 (%.1fs)", time.time() - t0)
+    except Exception:
+        log.exception("warmup 推理失败（不影响启动，首次请求可能仍受影响）")
 
     # 用户上传的 reference 持久化目录（admin 注册的音色由 spk2info.pt 自动恢复，
     # 这里只放原始 wav 文件用于审计/重建）
@@ -221,6 +261,10 @@ app.add_middleware(
 )
 
 app.add_exception_handler(HTTPException, http_exception_handler())
+
+# SP10 G3 + G4
+app.add_middleware(RequestMetricsMiddleware, service_name="tts-server")
+add_bearer_security_scheme(app)
 app.add_exception_handler(RequestValidationError, validation_exception_handler())
 
 # Prometheus 指标（与 Kokoro 版同名，dashboard 不变）
@@ -244,6 +288,21 @@ class TTSRequest(BaseModel):
     voice: str | None = Field(None, description="SFT 音色名 或 Kokoro 别名")
     lang: str | None = Field(None, description="忽略 (CosyVoice 自动判语言)")
     speed: float = Field(1.0, ge=0.5, le=2.0)
+
+
+class VoicesListResponse(BaseModel):
+    voices: list[str] = Field(..., description="可用 SFT 音色 ID 列表")
+
+
+class AddVoiceResponse(BaseModel):
+    spk_id: str
+    voice_count: int = Field(..., description="注册后总音色数")
+
+
+class DeleteVoiceResponse(BaseModel):
+    spk_id: str
+    deleted: bool
+    voice_count: int
 
 
 def _resolve_voice(voice: str | None) -> str:
@@ -272,15 +331,33 @@ async def require_key(
         raise api_error(401, "auth.missing_token", "Authorization: Bearer required")
     secret = authorization[len("Bearer "):]
     try:
-        return await verify_key(secret,
-                                scope=request.app.state.scope,
-                                store=request.app.state.key_store)
+        key = await verify_key(secret,
+                               scope=request.app.state.scope,
+                               store=request.app.state.key_store)
+        # SP10 G3 — 喂 key_id 给 RequestMetricsMiddleware
+        request.state.key_id = key.id
+        return key
     except InvalidToken as e:
         raise api_error(401, e.code, e.message)
     except TokenRevoked as e:
         raise api_error(401, e.code, e.message)
     except ScopeDenied as e:
         raise api_error(403, e.code, e.message)
+
+
+def _ws_auth_ok(ws: WebSocket) -> bool:
+    """WS 三路 Bearer：header / subprotocol / query。RTVOICE_API_KEY 空时通过。"""
+    if not RTVOICE_API_KEY:
+        return True
+    proto = ws.headers.get("sec-websocket-protocol", "")
+    for p in (s.strip() for s in proto.split(",")):
+        if p.startswith("bearer.") and p[len("bearer."):] == RTVOICE_API_KEY:
+            return True
+    if ws.headers.get("authorization") == f"Bearer {RTVOICE_API_KEY}":
+        return True
+    if ws.query_params.get("token") == RTVOICE_API_KEY:
+        return True
+    return False
 
 
 @app.get("/health")
@@ -291,18 +368,28 @@ async def health() -> dict[str, str]:
 @app.get("/info")
 async def info() -> dict:
     return {
-        "backend": "cosyvoice2",
-        "model": "CosyVoice2-0.5B",
-        "sample_rate": SAMPLE_RATE,
-        "default_voice": DEFAULT_VOICE,
-        "voice_count": len(_cosyvoice_voices),
+        "service": "tts-server",
+        "version": "0.19.0",
+        "capabilities": {
+            "streaming": True,
+            "text_streaming": True,
+            "voice_clone": True,
+            "subprotocol_bearer": True,
+        },
+        "models": {
+            "tts": "CosyVoice2-0.5B",
+            "backend": "cosyvoice2",
+            "sample_rate": SAMPLE_RATE,
+            "default_voice": DEFAULT_VOICE,
+            "voice_count": len(_cosyvoice_voices),
+        },
         "ready": _cosyvoice is not None,
     }
 
 
-@app.get("/v1/voices")
-async def voices(key: Key = Depends(require_key)) -> dict:
-    return {"voices": _cosyvoice_voices}
+@app.get("/v1/voices", response_model=VoicesListResponse)
+async def voices(key: Key = Depends(require_key)) -> VoicesListResponse:
+    return VoicesListResponse(voices=_cosyvoice_voices)
 
 
 def _tensor_to_pcm_bytes(samples: torch.Tensor) -> bytes:
@@ -318,11 +405,20 @@ async def _synthesize_stream(req: TTSRequest, request: Request) -> AsyncIterator
     """流式合成：把 CosyVoice 同步生成器桥接到 asyncio。
 
     sync 生成器跑在线程里，每个 chunk 通过 Queue 推回 event loop。
+    用 _inference_lock 串行化（CosyVoice 单 GPU 模型并发会污染 state）。
     """
-    assert _cosyvoice is not None
+    assert _cosyvoice is not None and _inference_lock is not None
     voice = _resolve_voice(req.voice)
-    log.info("[TTS] voice=%s speed=%.2f text_len=%d", voice, req.speed, len(req.text))
+    log.info("[TTS] voice=%s speed=%.2f text_len=%d (waiting lock)", voice, req.speed, len(req.text))
 
+    async with _inference_lock:
+        log.info("[TTS] lock acquired, start inference")
+        async for chunk in _synthesize_stream_locked(req, request, voice):
+            yield chunk
+
+
+async def _synthesize_stream_locked(req: TTSRequest, request: Request, voice: str) -> AsyncIterator[bytes]:
+    assert _cosyvoice is not None
     loop = asyncio.get_running_loop()
     chunk_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
     error_holder: list[Exception] = []
@@ -392,7 +488,15 @@ async def _synthesize_stream(req: TTSRequest, request: Request) -> AsyncIterator
                 pass
 
 
-@app.post("/v1/tts/stream")
+@app.post(
+    "/v1/tts/stream",
+    responses={
+        200: {
+            "description": "PCM int16 LE 24kHz mono streaming audio",
+            "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}},
+        },
+    },
+)
 async def tts_stream(req: TTSRequest, request: Request,
                      key: Key = Depends(require_key)):
     if _cosyvoice is None:
@@ -400,6 +504,11 @@ async def tts_stream(req: TTSRequest, request: Request,
     voice = _resolve_voice(req.voice)
     if _cosyvoice_voices and voice not in _cosyvoice_voices:
         raise api_error(400, "tts.voice_not_found", f"未知音色 voice={req.voice!r} → {voice!r}; 可用={_cosyvoice_voices}")
+    # SP10 G3 — per-key chars total
+    try:
+        TTS_CHARS_TOTAL.labels(key_id=safe_key_id(key)).inc(len(req.text or ""))
+    except Exception:
+        pass
     return StreamingResponse(
         _synthesize_stream(req, request),
         media_type="application/octet-stream",
@@ -409,6 +518,190 @@ async def tts_stream(req: TTSRequest, request: Request,
             "X-Format": "pcm-int16-le",
         },
     )
+
+
+# ---------------------------------------------------------------
+# WebSocket /v1/tts/stream_ws — 双向流式（text-in 流入，audio-out 流出）
+# ---------------------------------------------------------------
+# 协议：
+#   连接：       wss://host:9880/v1/tts/stream_ws
+#   鉴权：       三路 Bearer（同 STT 风格）
+#
+#   client → server（按顺序）：
+#     1) text frame: JSON metadata {"voice":"...", "speed":1.0, "lang":"cmn"}
+#     2..N) text frame: 文本增量（任意长度，累积按句切分）
+#     EOS:  text "EOS"  → 关闭文本流，等待最后 PCM
+#
+#   server → client：
+#     binary frames: PCM int16 LE 24kHz mono chunks
+#     {"type":"done"}    text frame，最后一帧（PCM 流结束后）
+#     {"type":"error", "message":"..."}  text frame，异常即关
+
+_SENT_BOUNDARY = "。！？!?；;…\n"
+
+
+def _drain_sentences(buf: str) -> tuple[list[str], str]:
+    """从累积缓冲里切出完整句子，返回 (完整句子列表, 剩余未完成片段)。"""
+    sentences: list[str] = []
+    start = 0
+    for i, ch in enumerate(buf):
+        if ch in _SENT_BOUNDARY:
+            seg = buf[start:i + 1].strip()
+            if seg:
+                sentences.append(seg)
+            start = i + 1
+    return sentences, buf[start:]
+
+
+@app.websocket("/v1/tts/stream_ws")
+async def tts_stream_ws(ws: WebSocket) -> None:
+    if _cosyvoice is None:
+        await ws.close(code=1013, reason="CosyVoice 尚未加载")
+        return
+    if not _ws_auth_ok(ws):
+        await ws.close(code=4401, reason="unauthorized")
+        log.warning("[ws-tts] 鉴权失败 client=%s", ws.client)
+        return
+    await ws.accept(subprotocol=pick_bearer_subprotocol(ws))
+
+    # 1) 接收 metadata
+    try:
+        meta_raw = await asyncio.wait_for(ws.receive_text(), timeout=5)
+    except (asyncio.TimeoutError, WebSocketDisconnect):
+        await ws.close(code=4400, reason="metadata 超时或断连")
+        return
+    try:
+        meta = json.loads(meta_raw)
+    except json.JSONDecodeError:
+        await ws.send_json({"type": "error", "message": "首帧必须是 JSON metadata"})
+        await ws.close()
+        return
+    voice = _resolve_voice(meta.get("voice"))
+    speed = float(meta.get("speed", 1.0))
+    if _cosyvoice_voices and voice not in _cosyvoice_voices:
+        await ws.send_json({"type": "error",
+                            "message": f"未知音色 {meta.get('voice')!r}"})
+        await ws.close()
+        return
+
+    log.info("[ws-tts] start voice=%s speed=%.2f (waiting lock)", voice, speed)
+
+    assert _inference_lock is not None
+    async with _inference_lock:
+        log.info("[ws-tts] lock acquired")
+        await _ws_inference(ws, voice, speed)
+
+
+async def _ws_inference(ws: WebSocket, voice: str, speed: float) -> None:
+    """按句缓冲 + str 流式合成。"""
+    assert _cosyvoice is not None
+    loop = asyncio.get_running_loop()
+    delta_q: asyncio.Queue[str | None] = asyncio.Queue()
+    disconnected = False
+
+    async def reader():
+        """读 ws 文本帧 → delta_q。EOS / disconnect → 推 None 收尾。"""
+        nonlocal disconnected
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    disconnected = True
+                    break
+                text = msg.get("text")
+                if text is None:
+                    continue
+                if text == "EOS":
+                    break
+                await delta_q.put(text)
+        except Exception:
+            log.exception("[ws-tts] reader 异常")
+            disconnected = True
+        finally:
+            await delta_q.put(None)
+
+    reader_task = asyncio.create_task(reader())
+
+    def synth(sentence: str) -> list[bytes]:
+        """单句 str 流式合成 → PCM 块列表。"""
+        out: list[bytes] = []
+        for output in _cosyvoice.inference_zero_shot(
+            sentence,
+            DEFAULT_PROMPT_TEXT,
+            DEFAULT_PROMPT_WAV,
+            zero_shot_spk_id=voice,
+            stream=True,
+            speed=speed,
+        ):
+            out.append(_tensor_to_pcm_bytes(output["tts_speech"]))
+        return out
+
+    sent_chunks = 0
+    t_start = time.time()
+    first = True
+    errored = False
+    pending = ""
+
+    async def emit(sentence: str) -> bool:
+        """合成并推送一句；返回 False 表示应停止（断连/错误）。"""
+        nonlocal sent_chunks, first, errored
+        if not sentence.strip() or disconnected:
+            return not disconnected
+        try:
+            chunks = await loop.run_in_executor(None, synth, sentence)
+        except Exception as e:
+            log.exception("[ws-tts] 推理异常")
+            try:
+                await ws.send_json({"type": "error", "message": str(e)[:200]})
+            except Exception:
+                pass
+            errored = True
+            return False
+        for pcm in chunks:
+            if first:
+                TTFB.observe(time.time() - t_start)
+                first = False
+            try:
+                await ws.send_bytes(pcm)
+                sent_chunks += 1
+            except (WebSocketDisconnect, RuntimeError) as e:
+                log.info("[ws-tts] client disconnected (%s)", type(e).__name__)
+                return False
+        return True
+
+    try:
+        while True:
+            item = await delta_q.get()
+            if item is None:
+                if pending.strip() and not disconnected:
+                    await emit(pending)
+                break
+            pending += item
+            sentences, pending = _drain_sentences(pending)
+            for s in sentences:
+                if not await emit(s):
+                    pending = ""
+                    break
+            else:
+                continue
+            break
+        if not errored and not disconnected:
+            try:
+                await ws.send_json({"type": "done", "chunks": sent_chunks})
+            except Exception:
+                pass
+    finally:
+        reader_task.cancel()
+        try:
+            await reader_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        try:
+            await ws.close()
+        except Exception:
+            pass
+    SYNTH_PHRASES.inc()
+    log.info("[ws-tts] done chunks=%d elapsed=%.1fs", sent_chunks, time.time() - t_start)
 
 
 # ---------------------------------------------------------------
@@ -435,14 +728,14 @@ def _validate_spk_id(spk_id: str) -> str:
     return spk_id
 
 
-@app.post("/v1/voices", status_code=201)
+@app.post("/v1/voices", status_code=201, response_model=AddVoiceResponse)
 async def add_voice(
     spk_id: str = Form(..., description="新音色 ID（不能与现有冲突）"),
     prompt_text: str = Form(..., min_length=1, max_length=200,
                             description="参考音频对应的文本（≥3 秒发音）"),
     file: UploadFile = File(..., description="参考音频 wav (16kHz mono 推荐, 3-30 秒)"),
     _auth: None = Depends(_check_admin_auth),
-) -> dict:
+) -> AddVoiceResponse:
     if _cosyvoice is None:
         raise api_error(503, "tts.not_ready", "CosyVoice 尚未加载")
 
@@ -487,14 +780,14 @@ async def add_voice(
     # 刷新 voices 列表
     global _cosyvoice_voices
     _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
-    return {"spk_id": spk_id, "voice_count": len(_cosyvoice_voices)}
+    return AddVoiceResponse(spk_id=spk_id, voice_count=len(_cosyvoice_voices))
 
 
-@app.delete("/v1/voices/{spk_id}")
+@app.delete("/v1/voices/{spk_id}", response_model=DeleteVoiceResponse)
 async def delete_voice(
     spk_id: str,
     _auth: None = Depends(_check_admin_auth),
-) -> dict:
+) -> DeleteVoiceResponse:
     if _cosyvoice is None:
         raise api_error(503, "tts.not_ready", "CosyVoice 尚未加载")
     spk_id = _validate_spk_id(spk_id)
@@ -515,6 +808,4 @@ async def delete_voice(
     global _cosyvoice_voices
     _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
     log.info("[admin] deleted voice spk_id=%s", spk_id)
-    return {"spk_id": spk_id, "deleted": True, "voice_count": len(_cosyvoice_voices)}
-
-
+    return DeleteVoiceResponse(spk_id=spk_id, deleted=True, voice_count=len(_cosyvoice_voices))

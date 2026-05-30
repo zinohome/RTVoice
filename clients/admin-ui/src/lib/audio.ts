@@ -1,12 +1,15 @@
 /**
  * 浏览器音频采集/解码工具：统一产出 STT 需要的 PCM int16 LE 16kHz mono。
  *
- * - 麦克风：getUserMedia → AudioContext → ScriptProcessor → 降采样到 16k → Int16 帧
+ * - 麦克风：getUserMedia → AudioContext → AudioWorklet（音频线程降采样到 16k）→ Int16 帧
  * - 文件：decodeAudioData → 取首声道 → 降采样到 16k → 单个 Int16 缓冲
  *
- * ScriptProcessorNode 虽已废弃，但无需额外 worklet 文件、在子路径部署下零配置，
- * 对测试控制台足够可靠。
+ * 麦克风采集用 AudioWorkletNode 而非已废弃的 ScriptProcessorNode：后者跑在主线程，
+ * 长录音叠加频繁 React 重渲染时会丢音频帧 → 转写丢字。Worklet 在专用音频线程采集，
+ * 主线程繁忙时消息排队而非丢帧。
  */
+
+import { BASE_PATH } from "@/lib/api";
 
 const TARGET_RATE = 16000;
 
@@ -60,18 +63,23 @@ export async function startMicCapture(
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
   const ctx = new AudioCtx();
+  // worklet 静态资源经 Caddy 挂在 basePath 下；硬编码 "/" 在 /admin-v2 部署下会 404。
+  await ctx.audioWorklet.addModule(`${BASE_PATH}/audio/pcm-worklet.js`);
   const source = ctx.createMediaStreamSource(stream);
-  const processor = ctx.createScriptProcessor(4096, 1, 1);
-  source.connect(processor);
-  processor.connect(ctx.destination);
-  processor.onaudioprocess = (e) => {
-    const input = e.inputBuffer.getChannelData(0);
-    onFrame(floatTo16kPCM(new Float32Array(input), ctx.sampleRate));
-  };
+  const node = new AudioWorkletNode(ctx, "pcm-capture");
+  node.port.onmessage = (e) => onFrame(e.data as ArrayBuffer);
+  // worklet 的 process() 仅在节点被「拉取」（连到 destination）时调用；经零增益避免回放。
+  const sink = ctx.createGain();
+  sink.gain.value = 0;
+  source.connect(node);
+  node.connect(sink);
+  sink.connect(ctx.destination);
   return {
     stop: () => {
       try {
-        processor.disconnect();
+        node.port.onmessage = null;
+        node.disconnect();
+        sink.disconnect();
         source.disconnect();
         stream.getTracks().forEach((t) => t.stop());
         void ctx.close();
