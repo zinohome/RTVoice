@@ -69,8 +69,11 @@ export default function RealtimeTestPage() {
   const nextStartRef = useRef(0);        // 下一块的调度起点（秒）
   const pendingSrcRef = useRef(0);        // 已排程未播完的源数量
   const doneRef = useRef(false);          // 本轮 response.done 是否已到
+  const activeSrcsRef = useRef<Set<AudioBufferSourceNode>>(new Set()); // 所有存活 source，供打断时批量 stop
   // 流式回复文本用 rAF 合并渲染，避免每个 LLM token 都触发一次 React 重渲染。
   const replyRafRef = useRef<number | null>(null);
+  // 打断去重：防止连续帧同时触发多次 interrupt 消息
+  const interruptSentRef = useRef(false);
 
   // VAD/通话状态镜像（onFrame 闭包内读取，避免 state 闭包过期）
   const stageRef = useRef<Stage>("idle");
@@ -110,9 +113,23 @@ export default function RealtimeTestPage() {
     if (doneRef.current && pendingSrcRef.current <= 0) {
       doneRef.current = false;
       nextStartRef.current = 0;
-      if (stageRef.current !== "idle" && stageRef.current !== "error") setStage("listening");
+      if (stageRef.current !== "idle" && stageRef.current !== "error") {
+        stageRef.current = "listening";
+        setStage("listening");
+      }
       resetVad();
     }
+  };
+
+  // 立即停止所有正在播放/已排程的 TTS 音频（打断场景）。
+  const stopAllPlayback = () => {
+    for (const src of activeSrcsRef.current) {
+      try { src.stop(); } catch { /* 已结束，忽略 */ }
+    }
+    activeSrcsRef.current.clear();
+    nextStartRef.current = 0;
+    pendingSrcRef.current = 0;
+    doneRef.current = false;
   };
 
   // 收到一块 TTS PCM（24k int16 LE mono）→ 接到播放队列尾部，边到边放。
@@ -130,8 +147,10 @@ export default function RealtimeTestPage() {
     src.start(startAt);
     nextStartRef.current = startAt + buf.duration;
     pendingSrcRef.current += 1;
+    activeSrcsRef.current.add(src);
     src.onended = () => {
       pendingSrcRef.current -= 1;
+      activeSrcsRef.current.delete(src);
       maybeFinishPlayback();
     };
   };
@@ -154,13 +173,40 @@ export default function RealtimeTestPage() {
   const onFrame = (frame: ArrayBuffer) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== 1) return;
-    // 仅在"聆听中"采集并送流；思考/回复阶段静音，杜绝回声回环
-    if (stageRef.current !== "listening") return;
+
+    const stage = stageRef.current;
+    const now = Date.now();
+    const rms = frameRms(frame);
+
+    // 打断检测：AI 回复或思考中，用户开口超过 MIN_SPEECH_MS → 触发打断
+    if (stage === "speaking" || stage === "thinking") {
+      if (rms > SPEECH_RMS) {
+        if (!speakingRef.current) {
+          speakingRef.current = true;
+          speechStartRef.current = now;
+        }
+        lastVoiceRef.current = now;
+        const speechMs = now - speechStartRef.current;
+        if (speechMs >= MIN_SPEECH_MS && !interruptSentRef.current) {
+          interruptSentRef.current = true;
+          ws.send(JSON.stringify({ type: "interrupt" }));
+          stopAllPlayback();
+          stageRef.current = "listening";
+          setStage("listening");
+          resetVad();
+        }
+      } else if (speakingRef.current && now - lastVoiceRef.current > SILENCE_HANG_MS) {
+        // 噪声误触发：静音恢复后重置，不打断
+        speakingRef.current = false;
+      }
+      return; // thinking/speaking 阶段不发送音频（防回声），等打断后切 listening 才开始发
+    }
+
+    // 仅在"聆听中"采集并送流；其他阶段静音，杜绝回声回环
+    if (stage !== "listening") return;
 
     ws.send(frame);
 
-    const now = Date.now();
-    const rms = frameRms(frame);
     if (rms > SPEECH_RMS) {
       if (!speakingRef.current) {
         speakingRef.current = true;
@@ -175,6 +221,7 @@ export default function RealtimeTestPage() {
       speakingRef.current = false;
       if (speechMs >= MIN_SPEECH_MS) {
         ws.send("audio.eos");
+        stageRef.current = "thinking";
         setStage("thinking");
       }
       // 太短的语音视为噪声，丢弃后继续聆听
@@ -187,10 +234,13 @@ export default function RealtimeTestPage() {
     if (wsRef.current && wsRef.current.readyState <= 1) wsRef.current.close();
     wsRef.current = null;
     if (replyRafRef.current != null) { cancelAnimationFrame(replyRafRef.current); replyRafRef.current = null; }
-    resetPlayback();
+    stopAllPlayback();
     if (playCtxRef.current && playCtxRef.current.state !== "closed") void playCtxRef.current.close();
     playCtxRef.current = null;
+    activeSrcsRef.current.clear();
     resetVad();
+    interruptSentRef.current = false;
+    stageRef.current = "idle";
     setStage("idle");
     setPartial("");
     setStreamingReply("");
@@ -203,6 +253,7 @@ export default function RealtimeTestPage() {
     setStreamingReply("");
     resetVad();
     resetPlayback();
+    interruptSentRef.current = false;
     // 在用户手势（点击开始通话）内创建/恢复播放 AudioContext，满足浏览器自动播放策略。
     ensurePlayCtx();
     setStage("connecting");
@@ -264,12 +315,20 @@ export default function RealtimeTestPage() {
             maybeFinishPlayback();
             break;
           }
+          case "interrupted":
+            // 服务端确认打断完成：复位去重标志，已由 onFrame 切到 listening，此处仅清理状态
+            interruptSentRef.current = false;
+            resetVad();
+            break;
           case "error":
             setErr(m.message ?? "对话出错");
             toast.error(m.message ?? "对话出错");
             // 出错也恢复聆听，保持通话不中断
             resetPlayback();
-            if (stageRef.current !== "idle") setStage("listening");
+            if (stageRef.current !== "idle") {
+              stageRef.current = "listening";
+              setStage("listening");
+            }
             resetVad();
             break;
         }

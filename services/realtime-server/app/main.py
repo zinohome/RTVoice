@@ -535,6 +535,21 @@ async def realtime_ws(ws: WebSocket, session_id: str) -> None:
                             sess.tts_client_dirty = True
                             log.info("session %s speed updated to %.2f (dirty)",
                                      session_id, s)
+                    elif ev.get("type") == "interrupt":
+                        # 客户端打断：取消当前 turn，重置 STT 流，通知客户端已就绪
+                        cancelled = False
+                        if sess.current_turn_task and not sess.current_turn_task.done():
+                            sess.current_turn_task.cancel()
+                            try:
+                                await sess.current_turn_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                            cancelled = True
+                        await sess.stt_client.reset()
+                        sess.last_activity = datetime.now(timezone.utc)
+                        await ws.send_json({"type": "interrupted", "cancelled": cancelled})
+                        log.info("session %s: interrupted by client (turn_cancelled=%s)",
+                                 session_id, cancelled)
                     elif ev.get("type") == "memory.clear":
                         sess.memory.clear()
                         log.info("session %s memory cleared", session_id)
