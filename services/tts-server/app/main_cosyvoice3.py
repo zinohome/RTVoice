@@ -1029,6 +1029,30 @@ async def add_voice(
         log.exception("[admin] add voice 失败")
         raise api_error(500, "tts.register_failed", f"注册失败：{e}")
 
+    # 预热新音色：首次推理会把 reference audio token 泄漏到输出，预热丢弃该输出
+    # 与启动预热逻辑保持一致（stream=True + token_hop_len=25 + _inference_lock）
+    _warmup_spk_id = spk_id
+
+    def _warmup_new_voice() -> None:
+        _cosyvoice.model.token_hop_len = 25
+        for _ in _cosyvoice.inference_zero_shot(
+            "系统预热，本句仅用于初始化推理路径，输出会被丢弃。",
+            DEFAULT_PROMPT_TEXT,
+            DEFAULT_PROMPT_WAV,
+            zero_shot_spk_id=_warmup_spk_id,
+            stream=True,
+            speed=1.0,
+        ):
+            pass
+
+    try:
+        t_warmup = time.time()
+        async with _inference_lock:
+            await asyncio.to_thread(_warmup_new_voice)
+        log.info("[admin] voice %s warmup done (%.1fs)", spk_id, time.time() - t_warmup)
+    except Exception:
+        log.exception("[admin] voice %s warmup failed (non-fatal)", spk_id)
+
     # 刷新 voices 列表
     global _cosyvoice_voices
     _cosyvoice_voices = sorted(_cosyvoice.list_available_spks())
