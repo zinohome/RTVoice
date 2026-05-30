@@ -17,6 +17,7 @@ class KeyStore(Protocol):
     async def load(self) -> None: ...
     async def put(self, key: Key) -> None: ...
     async def revoke(self, key_id: str) -> bool: ...
+    async def delete(self, key_id: str) -> bool: ...
     def find_by_hash(self, secret_hash: str) -> Key | None: ...
     def find_by_id(self, key_id: str) -> Key | None: ...
     def list_all(self) -> list[Key]: ...
@@ -65,6 +66,15 @@ class YamlKeyStore:
             if k is None:
                 return False
             k.revoked_at = datetime.now(timezone.utc)
+            await self._flush()
+            return True
+
+    async def delete(self, key_id: str) -> bool:
+        async with self._lock:
+            k = self._by_id.pop(key_id, None)
+            if k is None:
+                return False
+            self._by_hash.pop(k.secret_hash, None)
             await self._flush()
             return True
 

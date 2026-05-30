@@ -60,6 +60,22 @@ class RedisKeyStore:
             self._cache[key_id].revoked_at = datetime.fromisoformat(ts)
         return True
 
+    async def delete(self, key_id: str) -> bool:
+        if not await self._r.sismember("rtvoice:keys", key_id):
+            return False
+        cached = self._cache.get(key_id)
+        secret_hash = cached.secret_hash if cached is not None else None
+        if secret_hash is None:
+            data = await self._r.hget(f"rtvoice:key:{key_id}", "secret_hash")
+            if data is not None:
+                secret_hash = data.decode() if isinstance(data, bytes) else data
+        await self._r.srem("rtvoice:keys", key_id)
+        await self._r.delete(f"rtvoice:key:{key_id}")
+        if secret_hash:
+            await self._r.delete(f"rtvoice:hash2id:{secret_hash}")
+        self._cache.pop(key_id, None)
+        return True
+
     def find_by_hash(self, secret_hash: str) -> Key | None:
         for k in self._cache.values():
             if k.secret_hash == secret_hash:

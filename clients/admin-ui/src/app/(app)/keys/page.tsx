@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Plus, RotateCw, Ban, TriangleAlert } from "lucide-react";
+import { KeyRound, Plus, RotateCw, Ban, TriangleAlert, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
@@ -98,6 +98,26 @@ export default function KeysPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const deleteMut = useMutation({
+    mutationFn: (id: string) =>
+      apiFetch(`/v1/admin/keys/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      toast.success("已删除吊销 Key");
+      refresh();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const purgeMut = useMutation({
+    mutationFn: () =>
+      apiFetch<{ deleted: number }>("/v1/admin/keys/purge-revoked", { method: "POST" }),
+    onSuccess: (r) => {
+      toast.success(`已清除 ${r.deleted} 个已吊销 Key`);
+      refresh();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const toggleScope = (s: string) =>
     setScopes((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
 
@@ -139,6 +159,19 @@ export default function KeysPage() {
             <span className="ml-1">（已隐藏 {revokedCount} 个）</span>
           )}
         </Label>
+        {revokedCount > 0 && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="ml-auto text-destructive hover:text-destructive"
+            disabled={purgeMut.isPending}
+            onClick={() => {
+              if (confirm(`确认清除全部 ${revokedCount} 个已吊销 Key？此操作永久删除，不可恢复。`))
+                purgeMut.mutate();
+            }}>
+            <Trash2 className="h-3.5 w-3.5" />一键清除已吊销
+          </Button>
+        )}
       </div>
 
       {isLoading ? (
@@ -177,7 +210,7 @@ export default function KeysPage() {
                     并发 {k.sessions_concurrent_max} · 每小时 {k.sessions_per_hour_max}
                   </p>
                 </div>
-                {active && (
+                {active ? (
                   <div className="flex gap-2 shrink-0">
                     <Button variant="outline" size="sm" onClick={() => rotateMut.mutate(k.id)}
                       disabled={rotateMut.isPending}>
@@ -188,6 +221,17 @@ export default function KeysPage() {
                         revokeMut.mutate(k.id);
                     }} disabled={revokeMut.isPending}>
                       <Ban className="h-3.5 w-3.5" />吊销
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex gap-2 shrink-0">
+                    <Button variant="outline" size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => {
+                        if (confirm(`确认删除已吊销 Key「${k.name}」？此操作永久删除，不可恢复。`))
+                          deleteMut.mutate(k.id);
+                      }} disabled={deleteMut.isPending}>
+                      <Trash2 className="h-3.5 w-3.5" />删除
                     </Button>
                   </div>
                 )}
