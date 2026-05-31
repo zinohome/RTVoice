@@ -16,6 +16,7 @@ from rtvoice_auth.verify import verify_key
 from rtvoice_auth.errors import InvalidToken, TokenRevoked, ScopeDenied
 
 from app.error_schema import ErrorResponse, api_error
+from app import config as _config
 
 # admin CLI 已有逻辑，直接复用
 from rtvoice_admin.commands import (
@@ -218,3 +219,59 @@ async def delete_key(
     if not ok:
         raise api_error(404, "admin.key_not_found", f"key {key_id} not found")
     return {"id": key_id, "deleted": True}
+
+
+# ─────────────────────────────────────────────────────────────
+# Runtime config — 动态读/写运行时默认值（不需重启，重启回到 env）
+# ─────────────────────────────────────────────────────────────
+
+class RuntimeConfig(BaseModel):
+    default_voice: str
+    default_voice_env: str  # env var 原始值（只读）
+    default_lang: str
+
+
+class RuntimeConfigPatch(BaseModel):
+    default_voice: str | None = Field(None, description="新的默认音色 spk_id；传 null 重置为 env 默认值")
+
+
+@router.get(
+    "/config",
+    response_model=RuntimeConfig,
+    summary="读取运行时配置（含动态默认音色）",
+    responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}},
+)
+async def get_runtime_config(
+    _admin: Key = Depends(require_admin_key),
+) -> RuntimeConfig:
+    return RuntimeConfig(
+        default_voice=_config.get_default_voice(),
+        default_voice_env=_config._DEFAULT_VOICE_ENV,
+        default_lang=_config.DEFAULT_LANG,
+    )
+
+
+@router.patch(
+    "/config",
+    response_model=RuntimeConfig,
+    summary="更新运行时配置（立即生效，不影响已有会话；重启回到 env 默认值）",
+    responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse},
+               422: {"model": ErrorResponse}},
+)
+async def patch_runtime_config(
+    req: RuntimeConfigPatch,
+    _admin: Key = Depends(require_admin_key),
+) -> RuntimeConfig:
+    if req.default_voice is not None:
+        voice = req.default_voice.strip()
+        if not voice:
+            raise api_error(422, "config.invalid_voice", "default_voice cannot be empty")
+        _config.set_default_voice(voice)
+    elif "default_voice" in req.model_fields_set:
+        # 显式传 null → 重置为 env 原始值
+        _config._runtime.pop("default_voice", None)
+    return RuntimeConfig(
+        default_voice=_config.get_default_voice(),
+        default_voice_env=_config._DEFAULT_VOICE_ENV,
+        default_lang=_config.DEFAULT_LANG,
+    )

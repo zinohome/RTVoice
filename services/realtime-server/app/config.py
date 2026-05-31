@@ -57,9 +57,24 @@ AUDIT_DIR = _str("RTVOICE_AUDIT_DIR", "/data/transcripts")
 AUDIT_QUEUE_MAX = _int("RTVOICE_AUDIT_QUEUE_MAX", 1000)
 PROMPT_MAX_CHARS = _int("RTVOICE_PROMPT_MAX_CHARS", 2000)
 
-# Voice defaults
-DEFAULT_VOICE = _str("TTS_VOICE", "default_zh_female")
+# Voice defaults（启动时从 env 读取；运行时可通过 admin API 热更新）
+_DEFAULT_VOICE_ENV = _str("TTS_VOICE", "default_zh_female")
 DEFAULT_LANG = _str("TTS_LANG", "cmn")
+
+# 运行时可变配置（内存级，重启回到 env 默认值）
+_runtime: dict = {}
+
+
+def get_default_voice() -> str:
+    return _runtime.get("default_voice", _DEFAULT_VOICE_ENV)
+
+
+def set_default_voice(voice: str) -> None:
+    _runtime["default_voice"] = voice
+
+
+# 向下兼容：模块级别仍可访问（只读，读的是启动时的 env 值）
+DEFAULT_VOICE = _DEFAULT_VOICE_ENV
 
 # Logging
 LOG_LEVEL = _str("LOG_LEVEL", "INFO").upper()

@@ -327,7 +327,7 @@ async def create_session(
     except QuotaExceeded as e:
         raise api_error(429, e.code, e.message)
 
-    voice = req.voice or config.DEFAULT_VOICE
+    voice = req.voice or config.get_default_voice()
     prompt = req.prompt if req.prompt is not None else config.DEFAULT_PROMPT
     if len(prompt) > config.PROMPT_MAX_CHARS:
         await request.app.state.quota.release_session(key.id)
