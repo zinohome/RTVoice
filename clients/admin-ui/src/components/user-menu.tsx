@@ -26,7 +26,12 @@ export function UserMenu() {
 
   return (
     <div className="flex items-center gap-2">
-      <span className="text-sm text-muted-foreground">{data?.username ?? ""}</span>
+      <div className="flex flex-col items-end leading-tight">
+        <span className="text-sm font-medium">{data?.username ?? ""}</span>
+        {data?.email && (
+          <span className="text-xs text-muted-foreground">{data.email}</span>
+        )}
+      </div>
       <Button variant="ghost" size="icon" onClick={logout} aria-label="退出登录" title="退出登录">
         <LogOut className="h-4 w-4" />
       </Button>

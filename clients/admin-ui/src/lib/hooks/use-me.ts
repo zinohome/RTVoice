@@ -5,6 +5,7 @@ import { apiFetch } from "@/lib/api";
 
 export interface AdminMe {
   username: string;
+  email?: string;
 }
 
 /** 拉 /auth/me 校验会话。401 不重定向（由 AuthGuard 决定跳转），失败即视为未登录。 */

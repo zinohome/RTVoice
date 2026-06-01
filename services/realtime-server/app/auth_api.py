@@ -34,6 +34,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # ── 配置（环境变量）────────────────────────────────────────────────
 ADMIN_USERNAME = os.environ.get("RTVOICE_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("RTVOICE_ADMIN_PASSWORD", "rtvoice-admin")
+ADMIN_EMAIL = os.environ.get("RTVOICE_ADMIN_EMAIL", "")
 _SESSION_SECRET_RAW = os.environ.get("RTVOICE_SESSION_SECRET", "").strip()
 if not _SESSION_SECRET_RAW:
     log.warning(
@@ -147,6 +148,7 @@ class LoginRequest(BaseModel):
 
 class MeResponse(BaseModel):
     username: str
+    email: str = ""
 
 
 @router.post(
@@ -172,7 +174,7 @@ async def login(req: LoginRequest, request: Request, response: Response) -> MeRe
         samesite="lax",
         path="/",
     )
-    return MeResponse(username=ADMIN_USERNAME)
+    return MeResponse(username=ADMIN_USERNAME, email=ADMIN_EMAIL)
 
 
 @router.post("/logout", summary="清除会话 cookie")
@@ -191,4 +193,4 @@ async def me(request: Request) -> MeResponse:
     payload = verify_session(request.cookies.get(COOKIE_NAME), SESSION_SECRET)
     if payload is None:
         raise api_error(401, "auth.not_authenticated", "未登录或会话已过期")
-    return MeResponse(username=str(payload.get("sub", ADMIN_USERNAME)))
+    return MeResponse(username=str(payload.get("sub", ADMIN_USERNAME)), email=ADMIN_EMAIL)
