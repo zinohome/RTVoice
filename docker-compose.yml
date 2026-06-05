@@ -225,8 +225,8 @@ services:
   # ---------------------------------------------------------------
   agent-worker:
     build:
-      context: ./services/agent-worker
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/agent-worker/Dockerfile
     image: ${RTVOICE_REGISTRY:-rtvoice}/agent-worker:v0.19.0
     container_name: rtvoice-agent
     profiles: ["dev", "prod"]
