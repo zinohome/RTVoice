@@ -237,8 +237,6 @@ services:
         condition: service_healthy
       stt-server:
         condition: service_healthy
-      llm-server:
-        condition: service_healthy
       tts-server:
         condition: service_healthy
     environment:

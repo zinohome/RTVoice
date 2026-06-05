@@ -1,0 +1,13 @@
+port: 7880
+rtc:
+  port_range_start: 50000
+  port_range_end: 50099
+  tcp_port: 7881
+  use_external_ip: true
+  enable_loopback_candidate: false
+keys:
+  rtvoice-prod-2026: YtM8jr8Nr_RG6L5nvBLslHP-mTRq0XkKcGzWi3oR8eo
+logging:
+  level: info
+turn:
+  enabled: false

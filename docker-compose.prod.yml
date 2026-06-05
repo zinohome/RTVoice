@@ -1,0 +1,67 @@
+# RTVoice 生产覆盖（GPU + 端口对外 + livekit prod config）
+services:
+  livekit-server:
+    volumes:
+      - ./livekit/livekit.prod.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "0.0.0.0:7880:7880"
+      - "0.0.0.0:7881:7881/tcp"
+      - "0.0.0.0:50000-50099:50000-50099/udp"
+
+  token-server:
+    ports:
+      - "0.0.0.0:8000:8000"
+
+  realtime-server:
+    ports:
+      - "0.0.0.0:9000:9000"
+
+  stt-server:
+    build:
+      context: .
+      dockerfile: services/stt-server/Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+        limits:
+          memory: 4G
+          cpus: "2.0"
+
+  tts-server:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+        limits:
+          memory: "${TTS_MEM_LIMIT:-8G}"
+          cpus: "${TTS_CPU_LIMIT:-2.0}"
+    volumes:
+      - /data/rtvoice/models:/models:rw
+
+  agent-worker:
+    # prod 不启动 llm-server（使用 CozyGate 外部 LLM API），覆盖 depends_on
+    depends_on:
+      livekit-server:
+        condition: service_healthy
+      stt-server:
+        condition: service_healthy
+      tts-server:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      LIVEKIT_URL: "ws://livekit-server:7880"
+      STT_URL: "ws://stt-server:9090/asr"
+      TTS_URL: "http://tts-server:9880"
+      RTVOICE_API_KEY: "${RTVOICE_API_KEY}"
+      AGENT_ROOM: "${AGENT_ROOM:-rtvoice-test}"
+      LLM_BASE_URL: "${LLM_BASE_URL_PROD:-http://172.31.14.11:9090/v1}"
+      LLM_MODEL: "${LLM_MODEL_PROD:-gpt-4o-mini}"
+      OPENAI_API_KEY: "${LLM_API_KEY_PROD:-CG-Key-2026-0001}"
