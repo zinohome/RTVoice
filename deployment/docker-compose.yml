@@ -71,7 +71,7 @@ services:
     build:
       context: ..
       dockerfile: services/token-server/Dockerfile
-    image: rtvoice/token-server:v0.22.0
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/token-server:v0.22.0
     container_name: rtvoice-token
     restart: unless-stopped
     networks: [1panel-network]
@@ -115,7 +115,7 @@ services:
     build:
       context: ..
       dockerfile: services/stt-server/Dockerfile
-    image: rtvoice/stt-server:v0.22.0
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/stt-server:v0.22.0
     container_name: rtvoice-stt
     restart: unless-stopped
     networks: [1panel-network]
@@ -162,7 +162,7 @@ services:
     build:
       context: ..
       dockerfile: services/tts-server/Dockerfile.cosyvoice3
-    image: rtvoice/tts-server-cosyvoice3:v0.21.0
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/tts-server-cosyvoice3:v0.21.0
     container_name: rtvoice-tts
     restart: unless-stopped
     networks: [1panel-network]
@@ -216,7 +216,7 @@ services:
     build:
       context: ..
       dockerfile: services/realtime-server/Dockerfile
-    image: rtvoice/realtime-server:v0.22.0
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/realtime-server:v0.22.0
     container_name: rtvoice-realtime
     restart: unless-stopped
     networks: [1panel-network]
@@ -290,7 +290,7 @@ services:
     build:
       context: ../clients/admin-ui
       dockerfile: Dockerfile
-    image: rtvoice/admin-ui:v0.22.0
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/admin-ui:v0.22.0
     container_name: rtvoice-admin-ui
     restart: unless-stopped
     networks: [1panel-network]
@@ -322,7 +322,7 @@ services:
     build:
       context: ..
       dockerfile: services/agent-worker/Dockerfile
-    image: rtvoice/agent-worker:v0.22.0
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/agent-worker:v0.22.0
     container_name: rtvoice-agent
     restart: unless-stopped
     networks: [1panel-network]

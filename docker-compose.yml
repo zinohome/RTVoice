@@ -1,9 +1,9 @@
 # =============================================================================
 # 镜像仓库配置
-# RTVOICE_REGISTRY: RTVoice 镜像仓库前缀（包含命名空间）
+# IMAGE_REGISTRY: RTVoice 镜像仓库前缀（统一变量名，与 Cozy 系列 / SelfCEO 一致）
 #   本地构建（默认）: rtvoice （Docker Hub 格式，本地构建后推送）
 #   AWS 生产 (ECR) : 345182146241.dkr.ecr.ap-east-1.amazonaws.com/rtvoice
-#   使用方法: 在 .env 文件中设置 RTVOICE_REGISTRY=<仓库前缀>
+#   使用方法: 在 .env 文件中设置 IMAGE_REGISTRY=<仓库前缀>；默认 harbor.naivehero.top:8443/rtvoice
 # =============================================================================
 
 # RTVoice 公共 compose 定义
@@ -69,7 +69,7 @@ services:
     build:
       context: .
       dockerfile: services/token-server/Dockerfile
-    image: ${RTVOICE_REGISTRY:-rtvoice}/token-server:v0.19.0
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/token-server:v0.19.0
     container_name: rtvoice-token
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -117,7 +117,7 @@ services:
     build:
       context: .
       dockerfile: services/realtime-server/Dockerfile
-    image: ${RTVOICE_REGISTRY:-rtvoice}/realtime-server:v0.19.1
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/realtime-server:v0.19.1
     container_name: rtvoice-realtime
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -194,7 +194,7 @@ services:
     build:
       context: ./clients/admin-ui
       dockerfile: Dockerfile
-    image: ${RTVOICE_REGISTRY:-rtvoice}/admin-ui:v0.19.5
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/admin-ui:v0.19.5
     container_name: rtvoice-admin-ui
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -227,7 +227,7 @@ services:
     build:
       context: .
       dockerfile: services/agent-worker/Dockerfile
-    image: ${RTVOICE_REGISTRY:-rtvoice}/agent-worker:v0.19.0
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/agent-worker:v0.19.0
     container_name: rtvoice-agent
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -284,7 +284,7 @@ services:
     build:
       context: .
       dockerfile: services/stt-server/Dockerfile
-    image: ${RTVOICE_REGISTRY:-rtvoice}/stt-server:v0.21.0
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/stt-server:v0.21.0
     container_name: rtvoice-stt
     profiles: ["dev", "prod"]
     restart: unless-stopped
@@ -328,7 +328,7 @@ services:
     build:
       context: ./services/llm-server
       dockerfile: Dockerfile
-    image: ${RTVOICE_REGISTRY:-rtvoice}/llm-server:v0.4.0
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/llm-server:v0.4.0
     container_name: rtvoice-llm
     # 仅 dev 启动；prod 默认走宿主 ollama（agent extra_hosts host.docker.internal）
     # 要在 prod 用 vLLM，单独 --profile prod-vllm（prod 覆盖文件已配 vLLM image）
@@ -368,7 +368,7 @@ services:
     build:
       context: .
       dockerfile: services/tts-server/${TTS_DOCKERFILE:-Dockerfile}
-    image: ${RTVOICE_REGISTRY:-rtvoice}/tts-server:v0.19.0
+    image: ${IMAGE_REGISTRY:-harbor.naivehero.top:8443/rtvoice}/tts-server:v0.19.0
     container_name: rtvoice-tts
     profiles: ["dev", "prod"]
     restart: unless-stopped
