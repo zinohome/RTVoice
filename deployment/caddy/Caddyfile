@@ -36,7 +36,7 @@
 }
 
 # 监听服务器 IP + 127.0.0.1 + localhost（{$SERVER_IP} Caddy 支持 env 变量）
-{$SERVER_IP}, 127.0.0.1, localhost {
+{$SERVER_IP}, 172.31.3.167, 127.0.0.1, localhost {
     tls internal
 
     # Realtime admin API
