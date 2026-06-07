@@ -184,7 +184,7 @@ services:
       STT_TRANSCRIBE_URL: http://stt-server:9090/v1/transcribe
     volumes:
       - /data/RTVoice/keys:/data/keys:rw
-      - /data/RTVoice/cosyvoice-models:/opt/CosyVoice/pretrained_models
+      - /mnt/extra/RTVoice/cosyvoice-models:/opt/CosyVoice/pretrained_models
     expose:
       - "9880"
     healthcheck:
