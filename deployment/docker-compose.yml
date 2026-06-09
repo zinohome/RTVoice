@@ -3,7 +3,7 @@
 # 适配目标：
 #   - 1Panel 编排（name 字段使其在编排界面可见）
 #   - 网络：1panel-network（1Panel 预创建的外部网络）
-#   - 数据：全部挂载到 /data/RTVoice/
+#   - 数据：全部挂载到 /mnt/extra/RTVoice/
 #   - GPU：NVIDIA RTX 3060 12GB（TTS 使用 GPU，STT 使用 CPU）
 #
 # 使用方式：
@@ -162,7 +162,7 @@ services:
     build:
       context: ..
       dockerfile: services/tts-server/Dockerfile.cosyvoice3
-    image: rtvoice/tts-server-cosyvoice3:v0.21.0
+    image: rtvoice/tts-server-cosyvoice3:v0.22.0
     container_name: rtvoice-tts
     restart: unless-stopped
     networks: [1panel-network]
