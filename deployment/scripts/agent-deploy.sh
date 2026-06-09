@@ -108,6 +108,25 @@ else
   ok "keys.yaml 已存在（权限已确认 666）"
 fi
 
+# ─── ECR 登录（TTS 镜像从 ECR 拉取）────────────────────────────
+log "--- [4.5/7] ECR 登录（拉取 TTS 预构建镜像）---"
+
+ECR_REGISTRY="345182146241.dkr.ecr.ap-east-1.amazonaws.com"
+TTS_IMAGE="${ECR_REGISTRY}/rtvoice/tts-server-cosyvoice3:v0.22.0"
+
+if aws ecr get-login-password --region ap-east-1 | docker login --username AWS --password-stdin "${ECR_REGISTRY}" 2>&1; then
+  ok "ECR 登录成功"
+  if docker image inspect "${TTS_IMAGE}" > /dev/null 2>&1; then
+    log "TTS 镜像已存在本地，跳过拉取"
+  else
+    log "拉取 TTS 镜像（首次约 10-30 分钟，取决于网速）..."
+    docker pull "${TTS_IMAGE}" 2>&1
+    ok "TTS 镜像拉取完成"
+  fi
+else
+  log "WARNING: ECR 登录失败，将尝试从本地缓存或在构建阶段重新构建 TTS 镜像"
+fi
+
 # ─── 构建镜像 ─────────────────────────────────────────────────
 log "--- [5/7] 构建 Docker 镜像 ---"
 

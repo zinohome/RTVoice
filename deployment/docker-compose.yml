@@ -162,7 +162,7 @@ services:
     build:
       context: ..
       dockerfile: services/tts-server/Dockerfile.cosyvoice3
-    image: rtvoice/tts-server-cosyvoice3:v0.22.0
+    image: 345182146241.dkr.ecr.ap-east-1.amazonaws.com/rtvoice/tts-server-cosyvoice3:v0.22.0
     container_name: rtvoice-tts
     restart: unless-stopped
     networks: [1panel-network]
