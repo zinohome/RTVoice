@@ -295,7 +295,7 @@ async def info() -> dict:
     }
 
 
-@app.post("/v1/transcribe")
+@app.post("/v1/transcribe", include_in_schema=False)
 async def transcribe(request: Request) -> dict:
     """内部服务接口：一次性音频转写（供 TTS server 验证参考音频文本）。
 
