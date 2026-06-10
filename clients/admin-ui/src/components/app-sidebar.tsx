@@ -4,6 +4,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   AudioLines,
+  BookOpen,
+  Code2,
   FlaskConical,
   KeyRound,
   LayoutDashboard,
@@ -28,7 +30,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { ThemeToggle } from "@/components/theme-toggle";
 
-type NavItem = { href: string; label: string; icon: LucideIcon; soon?: boolean };
+type NavItem = { href: string; label: string; icon: LucideIcon; soon?: boolean; external?: boolean };
 type NavGroup = { label: string; items: NavItem[] };
 
 // 信息架构（验收讨论敲定的三大块）。阶段① 仅「概览」可用，其余为后续阶段占位。
@@ -54,6 +56,18 @@ const GROUPS: NavGroup[] = [
     label: "资源管理",
     items: [{ href: "/voices", label: "Voice 音色", icon: AudioLines }],
   },
+  {
+    label: "参考文档",
+    items: [
+      { href: "/api", label: "API", icon: Code2 },
+      {
+        href: "https://github.com/zinohome/RTVoice",
+        label: "文档",
+        icon: BookOpen,
+        external: true,
+      },
+    ],
+  },
 ];
 
 export function AppSidebar() {
@@ -75,11 +89,17 @@ export function AppSidebar() {
             <SidebarMenu>
               {group.items.map((item, i) => {
                 const Icon = item.icon;
-                const active = !item.soon && pathname === item.href;
+                const active = !item.soon && !item.external && pathname === item.href;
                 return (
                   <SidebarMenuItem key={`${item.label}-${i}`}>
                     <SidebarMenuButton
-                      render={<Link href={item.href} />}
+                      render={
+                        item.external ? (
+                          <a href={item.href} target="_blank" rel="noopener noreferrer" />
+                        ) : (
+                          <Link href={item.href} />
+                        )
+                      }
                       isActive={active}
                     >
                       <Icon className="h-4 w-4" />
