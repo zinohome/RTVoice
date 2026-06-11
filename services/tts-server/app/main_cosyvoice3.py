@@ -532,7 +532,7 @@ async def info() -> dict:
     # SP10 G4 — 4 service /info 统一返 service/version/capabilities/models
     return {
         "service": "tts-server",
-        "version": "0.19.0",
+        "version": "0.22.0",
         "capabilities": {
             "streaming": True,
             "text_streaming": True,        # agent-worker 探测此字段决定走 ws 流式

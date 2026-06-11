@@ -247,7 +247,7 @@ def info() -> dict:
     """SP10 G4 — service capability discovery（4 service 同形）。"""
     return {
         "service": "token-server",
-        "version": "0.19.0",
+        "version": "0.22.0",
         "capabilities": {
             "issue_livekit_jwt": True,
             "rate_limit_per_minute": RATE_LIMIT_PER_MINUTE,

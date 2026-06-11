@@ -260,7 +260,7 @@ async def info() -> dict:
         # SP10 G4 — service 字段（与其他 service /info 一致）；保留 "name" 向后兼容
         "service": "realtime-server",
         "name": "realtime-server",
-        "version": "0.19.0",
+        "version": "0.22.0",
         "capabilities": {
             "session_api": True,
             "ws_realtime": True,
