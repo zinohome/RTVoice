@@ -196,6 +196,79 @@ async def voices_list(_sess: str = Depends(require_console_session)) -> JSONResp
     return JSONResponse(status_code=r.status_code, content=r.json())
 
 
+@router.post("/voices/preview", summary="音频预处理预览（规范化 + STT 转写）",
+             responses={401: {"model": ErrorResponse}, 502: {"model": ErrorResponse}})
+async def voices_preview(
+    file: UploadFile = File(...),
+    _sess: str = Depends(require_console_session),
+) -> JSONResponse:
+    """处理音频，返回规范化后的 WAV（base64）+ STT 转写文本。"""
+    import base64
+    import wave as _wave
+
+    if not TTS_ADMIN_API_KEY:
+        raise api_error(403, "console.voices_admin_disabled",
+                        "音色功能未启用（缺少 TTS_ADMIN_API_KEY）")
+
+    raw = await file.read()
+    files = {"file": (file.filename or "ref.wav", raw, file.content_type or "audio/wav")}
+
+    # 1. TTS preview → 处理后的 WAV 字节
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                f"{TTS_BASE_URL}/v1/voices/preview",
+                files=files,
+                headers=_bearer(TTS_ADMIN_API_KEY),
+            )
+        if r.status_code != 200:
+            raise api_error(502, "console.voices_preview_upstream",
+                            f"TTS 预处理失败 ({r.status_code}): {r.text[:200]}")
+        processed_wav = r.content
+        original_duration = float(r.headers.get("X-Original-Duration", "0"))
+        effective_duration = float(r.headers.get("X-Effective-Duration", "0"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise api_error(502, "console.voices_preview_upstream", f"TTS 预处理转发失败：{e}")
+
+    # 2. 提取 PCM 裸数据（去掉 WAV 文件头），转发给 STT /v1/transcribe
+    transcript = ""
+    try:
+        with _wave.open(io.BytesIO(processed_wav), "rb") as wf:
+            pcm_data = wf.readframes(wf.getnframes())
+
+        # 从 ws://stt-server:9090/v1/asr 派生 http://stt-server:9090/v1/transcribe
+        stt_http_url = STT_WS_URL.replace("ws://", "http://", 1).replace("wss://", "https://", 1)
+        stt_transcribe_url = stt_http_url.rsplit("/", 1)[0] + "/../transcribe"
+        # 更健壮的方式：直接构造，忽略路径部分
+        from urllib.parse import urlparse
+        parsed = urlparse(STT_WS_URL)
+        stt_base = f"{'https' if parsed.scheme == 'wss' else 'http'}://{parsed.netloc}"
+        stt_transcribe_url = f"{stt_base}/v1/transcribe"
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r_stt = await client.post(
+                stt_transcribe_url,
+                content=pcm_data,
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    **_bearer(RTVOICE_API_KEY),
+                },
+            )
+        if r_stt.status_code == 200:
+            transcript = r_stt.json().get("text", "").strip()
+    except Exception:
+        log.warning("[console] STT preview 转写失败，transcript 留空", exc_info=True)
+
+    return JSONResponse(content={
+        "audio_b64": base64.b64encode(processed_wav).decode(),
+        "transcript": transcript,
+        "original_duration": round(original_duration, 3),
+        "effective_duration": round(effective_duration, 3),
+    })
+
+
 @router.post("/voices", status_code=201, summary="注册音色（上传 wav + transcript）",
              responses={401: {"model": ErrorResponse}, 502: {"model": ErrorResponse}})
 async def voices_add(

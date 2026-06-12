@@ -26,6 +26,7 @@ import asyncio
 import logging
 import os
 import sys
+import tempfile
 import time
 import json
 from collections.abc import AsyncIterator
@@ -43,7 +44,7 @@ from fastapi import (
     WebSocket, WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
@@ -1087,6 +1088,51 @@ async def add_voice(
         original_duration=round(original_duration, 2),
         effective_duration=round(effective_duration, 2),
         effective_text=effective_text,
+    )
+
+
+@app.post("/v1/voices/preview", summary="音频预处理预览（规范化：16kHz mono + 去静音 + 截 8s）")
+async def preview_voice(
+    file: UploadFile = File(..., description="参考音频（任意格式）"),
+    _auth: None = Depends(_check_admin_auth),
+) -> Response:
+    """处理上传音频（与注册相同的规范化流程），返回处理后的 WAV 字节。
+    响应头 X-Original-Duration / X-Effective-Duration 携带前后时长（秒）。
+    """
+    raw = await file.read()
+    if len(raw) > MAX_WAV_BYTES:
+        raise api_error(413, "tts.wav_too_large", f"音频超过 {MAX_WAV_BYTES // (1024*1024)} MB 上限")
+    if len(raw) < 1024:
+        raise api_error(400, "tts.invalid_wav", "音频文件过小，疑似无效")
+
+    tmp = Path(tempfile.mktemp(suffix=".orig"))
+    tmp.write_bytes(raw)
+    try:
+        try:
+            waveform, sr = torchaudio.load(str(tmp))
+        except Exception as e:
+            raise api_error(400, "tts.wav_decode_failed", f"音频解码失败：{e}")
+
+        waveform, original_duration, effective_duration = await asyncio.to_thread(
+            _normalize_voice_audio, waveform, sr
+        )
+
+        out = Path(tempfile.mktemp(suffix=".wav"))
+        try:
+            torchaudio.save(str(out), waveform, VOICE_TARGET_SR, encoding="PCM_S", bits_per_sample=16)
+            wav_bytes = out.read_bytes()
+        finally:
+            out.unlink(missing_ok=True)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={
+            "X-Original-Duration": f"{original_duration:.3f}",
+            "X-Effective-Duration": f"{effective_duration:.3f}",
+        },
     )
 
 
