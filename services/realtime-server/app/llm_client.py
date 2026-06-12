@@ -15,11 +15,14 @@
     - 流式 generator 可被外部 cancel（barge-in 关键）
     - 单 client 实例可并发多次调用（OpenAI SDK 内部维护连接池）
     - max_tokens 默认偏小（语音回复要短）
+    - Ollama 原生 API 路径：当 base_url 含 11434 时走 /api/chat + think=false，
+      绕过 Ollama OpenAI 兼容层不支持 think=false 的限制（0.30.x 已验证）
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -29,6 +32,17 @@ from openai import AsyncOpenAI
 
 log = logging.getLogger("rtvoice.agent.llm")
 
+
+def _is_ollama_url(base_url: str) -> tuple[bool, str]:
+    """检测 base_url 是否为 Ollama 实例，返回 (is_ollama, ollama_root)。
+
+    Ollama 原生 API 端口为 11434。OpenAI 兼容层 /v1 不支持 think=false，
+    但原生 /api/chat 支持，因此对 Ollama 走不同代码路径。
+    """
+    if ":11434" not in base_url:
+        return False, ""
+    root = base_url.split(":11434")[0] + ":11434"
+    return True, root
 
 
 # max_tokens 是 LLM 上限，不是"文本长度限制"——pipeline 是 token 流式→句切分→并发 TTS→顺序播放，
@@ -68,20 +82,59 @@ class LLMClient:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.fallback_reply = fallback_reply
+        self._is_ollama, self._ollama_root = _is_ollama_url(base_url)
+        timeout = httpx.Timeout(
+            connect=connect_timeout_s,
+            read=read_timeout_s,
+            write=10.0,
+            pool=5.0,
+        )
         # openai SDK 默认 max_retries=2 —— 已经会重试 connect 失败；mid-stream 失败
         # 不重试（避免 prompt 被 LLM 重新执行说两遍）。
         self._client = AsyncOpenAI(
             base_url=base_url,
             api_key=api_key,
-            timeout=httpx.Timeout(
-                connect=connect_timeout_s,
-                read=read_timeout_s,
-                write=10.0,
-                pool=5.0,
-            ),
+            timeout=timeout,
         )
+        # Ollama 原生 API 路径专用的 httpx 客户端
+        self._http = httpx.AsyncClient(timeout=timeout) if self._is_ollama else None
+        if self._is_ollama:
+            log.info("[LLM] Ollama 模式：将使用原生 /api/chat + think=false (root=%s)", self._ollama_root)
 
-    async def _raw_stream(self, messages: list[dict]) -> AsyncIterator[str]:
+    async def _raw_stream_ollama(self, messages: list[dict]) -> AsyncIterator[str]:
+        """Ollama 原生 /api/chat streaming，带 think=false。
+
+        Ollama 0.30.x 的 OpenAI 兼容层不支持 think=false 参数，
+        但原生 API 完整支持，避免 qwen3/gemma4 系列模型陷入无限思考链导致 realtime 延迟暴增。
+        """
+        url = f"{self._ollama_root}/api/chat"
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "think": False,
+            "options": {
+                "num_predict": self.max_tokens,
+                "temperature": self.temperature,
+            },
+        }
+        async with self._http.stream("POST", url, json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = data.get("message", {})
+                delta = msg.get("content", "")
+                if delta:
+                    yield delta
+                if data.get("done"):
+                    break
+
+    async def _raw_stream_openai(self, messages: list[dict]) -> AsyncIterator[str]:
         stream = await self._client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -94,6 +147,14 @@ class LLMClient:
                 continue
             delta = chunk.choices[0].delta.content
             if delta:
+                yield delta
+
+    async def _raw_stream(self, messages: list[dict]) -> AsyncIterator[str]:
+        if self._is_ollama:
+            async for delta in self._raw_stream_ollama(messages):
+                yield delta
+        else:
+            async for delta in self._raw_stream_openai(messages):
                 yield delta
 
     async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
@@ -127,3 +188,5 @@ class LLMClient:
 
     async def close(self) -> None:
         await self._client.close()
+        if self._http is not None:
+            await self._http.aclose()
