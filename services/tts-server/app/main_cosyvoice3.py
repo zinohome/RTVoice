@@ -133,6 +133,11 @@ SILENCE_WINDOW_MS = int(os.environ.get("TTS_SILENCE_WINDOW_MS", "20"))
 # 最多从音频头部去除的静音时长（秒）。超过此段若仍无语音则放弃静音裁剪。
 MAX_SILENCE_TRIM_S = float(os.environ.get("TTS_MAX_SILENCE_TRIM_S", "5.0"))
 
+# 智能截断搜索窗口（秒）：在 [target - before, target + after] 范围内找能量最低帧截断，
+# 避免在语音中间硬切。若范围内全为持续语音，回退到 target_duration_s 硬截断。
+TRUNCATION_SEARCH_BEFORE_S = float(os.environ.get("TTS_TRUNCATION_SEARCH_BEFORE_S", "2.0"))
+TRUNCATION_SEARCH_AFTER_S = float(os.environ.get("TTS_TRUNCATION_SEARCH_AFTER_S", "1.0"))
+
 # 单次合成超时（秒）。CosyVoice 内部 llm_job 线程 OOM 崩溃时不会向外传播异常，
 # 外层 inference_zero_shot 会永久阻塞。此超时用于检测这种死锁并强制中断，
 # 防止 _inference_lock 被永久持有。120s 足以覆盖最长的合理推理时间。
@@ -165,8 +170,14 @@ def _normalize_voice_audio(
     silence_rms: float = SILENCE_RMS_THRESHOLD,
     window_ms: int = SILENCE_WINDOW_MS,
     max_trim_s: float = MAX_SILENCE_TRIM_S,
+    search_before_s: float = TRUNCATION_SEARCH_BEFORE_S,
+    search_after_s: float = TRUNCATION_SEARCH_AFTER_S,
 ) -> tuple[torch.Tensor, float, float]:
-    """规范化参考音频：多声道→单声道 → 重采样 → 去前导静音 → 截断。
+    """规范化参考音频：多声道→单声道 → 重采样 → 去前导静音 → 智能截断。
+
+    截断策略：在 [target - search_before_s, target + search_after_s] 窗口内扫描
+    RMS 能量帧，找能量最低点（最自然停顿处）截断，避免在语音中间硬切。
+    若搜索窗口内全为持续语音（无停顿），回退到 target_duration_s 硬截断。
 
     Returns:
         (normalized_waveform, original_duration_s, effective_duration_s)
@@ -200,10 +211,28 @@ def _normalize_voice_audio(
     if start_sample > 0:
         waveform = waveform[:, start_sample:]
 
-    # 截断到目标时长
-    max_samples = int(target_sr * target_duration_s)
-    if waveform.shape[-1] > max_samples:
-        waveform = waveform[:, :max_samples]
+    # 智能截断：在搜索窗口内找 RMS 最低帧（最自然停顿点）作为截断位置
+    audio = waveform[0]  # 重新取（前导静音已去除）
+    n = audio.shape[0]
+    target_samples = int(target_sr * target_duration_s)
+
+    if n > target_samples:
+        search_start = max(0, int(target_sr * (target_duration_s - search_before_s)))
+        search_end = min(n - window_size, int(target_sr * (target_duration_s + search_after_s)))
+
+        cut_pos = target_samples  # 默认回退到硬截断
+        if search_start < search_end:
+            min_rms = float("inf")
+            for i in range(search_start, search_end, step):
+                frame = audio[i : i + window_size]
+                if frame.shape[0] < window_size:
+                    continue
+                rms = float(torch.sqrt(torch.mean(frame ** 2)))
+                if rms < min_rms:
+                    min_rms = rms
+                    cut_pos = i + window_size  # 截断点在最低能量帧结束处
+
+        waveform = waveform[:, :cut_pos]
 
     effective_duration = waveform.shape[-1] / target_sr
     return waveform, original_duration, effective_duration
