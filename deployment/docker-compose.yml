@@ -355,6 +355,8 @@ services:
       AGENT_ROOM: ${AGENT_ROOM:-rtvoice-test}
       AGENT_IDENTITY: ${AGENT_IDENTITY:-rtvoice-agent}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LLM_READ_TIMEOUT_S: ${LLM_READ_TIMEOUT_S:-120}
+      LLM_CONNECT_TIMEOUT_S: ${LLM_CONNECT_TIMEOUT_S:-15}
     expose:
       - "9100"
     deploy:
