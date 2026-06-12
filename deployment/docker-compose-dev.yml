@@ -205,7 +205,7 @@ services:
     build:
       context: ..
       dockerfile: services/realtime-server/Dockerfile
-    image: rtvoice/realtime-server:v0.23.1
+    image: rtvoice/realtime-server:v0.23.0
     container_name: rtvoice-realtime
     restart: unless-stopped
     networks: [1panel-network]
