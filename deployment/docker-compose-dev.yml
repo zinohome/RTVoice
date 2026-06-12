@@ -1,0 +1,467 @@
+# RTVoice 本地/内网测试节点专用 Compose
+#
+# 目标机器：192.168.66.163（NVIDIA RTX 3060 12GB，1Panel 管理）
+#
+# 与生产 docker-compose.yml 的差异（仅这两处）：
+#   1. 数据卷挂载路径：/data/RTVoice/（非 EBS /mnt/extra/RTVoice/）
+#   2. TTS 镜像：本地构建 rtvoice/tts-server-cosyvoice3:v0.22.0
+#              （非 AWS ECR 镜像，ECR 仅 AWS 节点可拉取）
+#
+# 使用方式：
+#   cd deployment && cp .env.example .env && 编辑 .env
+#   docker compose -f docker-compose-dev.yml up -d --build
+#   或用 1Panel 编排界面，Compose 文件路径指向 deployment/docker-compose-dev.yml
+
+name: rtvoice
+
+networks:
+  1panel-network:
+    external: true
+
+services:
+
+  # ─────────────────────────────────────────────────────────────
+  # LiveKit WebRTC SFU
+  # ─────────────────────────────────────────────────────────────
+  livekit-server:
+    image: livekit/livekit-server:v1.11.0
+    container_name: rtvoice-livekit
+    restart: unless-stopped
+    networks: [1panel-network]
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${LIVEKIT_PORT:-7880}:7880"
+      - "${BIND_HOST:-0.0.0.0}:${LIVEKIT_RTC_TCP_PORT:-7881}:7881"
+      - "${BIND_HOST:-0.0.0.0}:50000-50099:50000-50099/udp"
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes:
+      - ./livekit/livekit.prod.yaml:/etc/livekit.yaml:ro
+    command:
+      - --config
+      - /etc/livekit.yaml
+      - --node-ip
+      - ${SERVER_IP:?请在 .env 中设置 SERVER_IP，例如：SERVER_IP=192.168.66.163}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:7880/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────
+  # Token Server
+  # ─────────────────────────────────────────────────────────────
+  token-server:
+    build:
+      context: ..
+      dockerfile: services/token-server/Dockerfile
+    image: rtvoice/token-server:v0.22.0
+    container_name: rtvoice-token
+    restart: unless-stopped
+    networks: [1panel-network]
+    depends_on:
+      livekit-server:
+        condition: service_healthy
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      APP_API_KEY: ${APP_API_KEY}
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL}
+      DEV_AUTO_INJECT_KEY: "false"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-30}
+      RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
+      RTVOICE_KEYS_FILE: /data/keys/keys.yaml
+      RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      - /data/RTVoice/keys:/data/keys:rw
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────
+  # STT Server（CPU 推理）
+  # ─────────────────────────────────────────────────────────────
+  stt-server:
+    build:
+      context: ..
+      dockerfile: services/stt-server/Dockerfile
+    image: rtvoice/stt-server:v0.22.0
+    container_name: rtvoice-stt
+    restart: unless-stopped
+    networks: [1panel-network]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      STT_NUM_THREADS: ${STT_NUM_THREADS:-2}
+      STT_PROVIDER: ${STT_PROVIDER:-cpu}
+      STT_QUANTIZED: ${STT_QUANTIZED:-true}
+      STT_SOFT_SEGMENT: "true"
+      STT_TRIM_SILENCE: "true"
+      RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
+      RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
+      RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
+      RTVOICE_KEYS_FILE: /data/keys/keys.yaml
+      RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      - /data/RTVoice/keys:/data/keys:rw
+    expose:
+      - "9090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9090/health',timeout=2).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "30m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────
+  # TTS Server（本地构建镜像，GPU 推理）
+  # 差异：使用本地构建 image，而非 AWS ECR
+  # ─────────────────────────────────────────────────────────────
+  tts-server:
+    build:
+      context: ..
+      dockerfile: services/tts-server/Dockerfile.cosyvoice3
+    image: rtvoice/tts-server-cosyvoice3:v0.22.0
+    container_name: rtvoice-tts
+    restart: unless-stopped
+    networks: [1panel-network]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TTS_DEFAULT_VOICE: ${TTS_DEFAULT_VOICE:-default_zh_female}
+      TTS_DEFAULT_LANG: ${TTS_DEFAULT_LANG:-cmn}
+      RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
+      RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
+      RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
+      RTVOICE_KEYS_FILE: /data/keys/keys.yaml
+      RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
+      TTS_ADMIN_API_KEY: ${TTS_ADMIN_API_KEY:-}
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:256}
+      SKIP_RL_MODEL: ${SKIP_RL_MODEL:-1}
+      STT_TRANSCRIBE_URL: http://stt-server:9090/v1/transcribe
+    volumes:
+      - /data/RTVoice/keys:/data/keys:rw
+      - /data/RTVoice/cosyvoice-models:/opt/CosyVoice/pretrained_models
+    expose:
+      - "9880"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9880/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+        limits:
+          memory: ${TTS_MEM_LIMIT:-10G}
+          cpus: "${TTS_CPU_LIMIT:-2.0}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────
+  # Realtime Server
+  # ─────────────────────────────────────────────────────────────
+  realtime-server:
+    build:
+      context: ..
+      dockerfile: services/realtime-server/Dockerfile
+    image: rtvoice/realtime-server:v0.22.0
+    container_name: rtvoice-realtime
+    restart: unless-stopped
+    networks: [1panel-network]
+    depends_on:
+      stt-server:
+        condition: service_healthy
+      tts-server:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
+      RTVOICE_CORS_ORIGINS: ${RTVOICE_CORS_ORIGINS:-*}
+      STT_WS_URL: ws://stt-server:9090/v1/asr
+      LLM_BASE_URL: ${LLM_BASE_URL_PROD:-http://host.docker.internal:11434/v1}
+      LLM_MODEL: ${LLM_MODEL_PROD:-qwen2.5:7b}
+      LLM_API_KEY: ${LLM_API_KEY_PROD:-ollama}
+      LLM_READ_TIMEOUT_S: ${LLM_READ_TIMEOUT_S:-120}
+      LLM_CONNECT_TIMEOUT_S: ${LLM_CONNECT_TIMEOUT_S:-15}
+      TTS_BASE_URL: http://tts-server:9880
+      PUBLIC_WS_BASE: ${PUBLIC_WS_BASE}
+      AGENT_SYSTEM_PROMPT: ${AGENT_SYSTEM_PROMPT:-}
+      AGENT_LLM_MAX_TOKENS: ${AGENT_LLM_MAX_TOKENS:-2000}
+      RTVOICE_MAX_CONCURRENT_SESSIONS: ${RTVOICE_MAX_CONCURRENT_SESSIONS:-5}
+      RTVOICE_SESSION_QUEUE_DEPTH: ${RTVOICE_SESSION_QUEUE_DEPTH:-0}
+      RTVOICE_SESSION_CREATE_TIMEOUT_S: ${RTVOICE_SESSION_CREATE_TIMEOUT_S:-60}
+      RTVOICE_SESSION_IDLE_TIMEOUT_S: ${RTVOICE_SESSION_IDLE_TIMEOUT_S:-30}
+      RTVOICE_SESSION_MAX_LIFETIME_S: ${RTVOICE_SESSION_MAX_LIFETIME_S:-1800}
+      RTVOICE_WS_DISCONNECT_GRACE_S: ${RTVOICE_WS_DISCONNECT_GRACE_S:-0}
+      RTVOICE_TURN_TIMEOUT_S: ${RTVOICE_TURN_TIMEOUT_S:-60}
+      RTVOICE_MEMORY_MAX_TURNS: ${RTVOICE_MEMORY_MAX_TURNS:-6}
+      RTVOICE_DEFAULT_PROMPT: ${RTVOICE_DEFAULT_PROMPT:-你是语音助手。用中文简短回答（≤2 句）。}
+      RTVOICE_AUDIT_DIR: /data/transcripts
+      RTVOICE_AUDIT_QUEUE_MAX: ${RTVOICE_AUDIT_QUEUE_MAX:-1000}
+      RTVOICE_PROMPT_MAX_CHARS: ${RTVOICE_PROMPT_MAX_CHARS:-2000}
+      RTVOICE_KEYS_BACKEND: ${RTVOICE_KEYS_BACKEND:-yaml}
+      RTVOICE_KEYS_FILE: /data/keys/keys.yaml
+      RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
+      RTVOICE_ADMIN_USERNAME: ${RTVOICE_ADMIN_USERNAME:-admin}
+      RTVOICE_ADMIN_EMAIL: ${RTVOICE_ADMIN_EMAIL:-}
+      RTVOICE_ADMIN_PASSWORD: ${RTVOICE_ADMIN_PASSWORD:?请在 .env 中设置 RTVOICE_ADMIN_PASSWORD}
+      RTVOICE_SESSION_SECRET: ${RTVOICE_SESSION_SECRET:?请在 .env 中设置 RTVOICE_SESSION_SECRET}
+      RTVOICE_SESSION_COOKIE_SECURE: ${RTVOICE_SESSION_COOKIE_SECURE:-true}
+      TTS_ADMIN_API_KEY: ${TTS_ADMIN_API_KEY:-}
+      TOKEN_BASE_URL: http://token-server:8000
+    volumes:
+      - /data/RTVoice/transcripts:/data/transcripts:rw
+      - /data/RTVoice/keys:/data/keys:rw
+    expose:
+      - "9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9000/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "30m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────
+  # Admin UI
+  # ─────────────────────────────────────────────────────────────
+  admin-ui:
+    build:
+      context: ../clients/admin-ui
+      dockerfile: Dockerfile
+    image: rtvoice/admin-ui:v0.22.0
+    container_name: rtvoice-admin-ui
+    restart: unless-stopped
+    networks: [1panel-network]
+    environment:
+      NODE_ENV: production
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/admin/login',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────
+  # Agent Worker
+  # ─────────────────────────────────────────────────────────────
+  agent-worker:
+    build:
+      context: ..
+      dockerfile: services/agent-worker/Dockerfile
+    image: rtvoice/agent-worker:v0.22.0
+    container_name: rtvoice-agent
+    restart: unless-stopped
+    networks: [1panel-network]
+    depends_on:
+      livekit-server:
+        condition: service_healthy
+      stt-server:
+        condition: service_healthy
+      tts-server:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      LIVEKIT_INTERNAL_URL: ws://livekit-server:7880
+      STT_WS_URL: ws://stt-server:9090/v1/asr
+      LLM_BASE_URL: ${LLM_BASE_URL_PROD:-http://host.docker.internal:11434/v1}
+      LLM_MODEL: ${LLM_MODEL_PROD:-qwen2.5:7b}
+      LLM_API_KEY: ${LLM_API_KEY_PROD:-ollama}
+      TTS_BASE_URL: http://tts-server:9880
+      TTS_VOICE: ${TTS_VOICE:-default_zh_female}
+      TTS_LANG: ${TTS_LANG:-cmn}
+      TTS_PIPELINE_CONCURRENCY: ${TTS_PIPELINE_CONCURRENCY:-2}
+      AGENT_SYSTEM_PROMPT: ${AGENT_SYSTEM_PROMPT:-}
+      AGENT_LLM_MAX_TOKENS: ${AGENT_LLM_MAX_TOKENS:-2000}
+      RTVOICE_API_KEY: ${RTVOICE_API_KEY:-}
+      METRICS_PORT: 9100
+      AGENT_BACKEND: ${AGENT_BACKEND:-}
+      AGENT_ROOM: ${AGENT_ROOM:-rtvoice-test}
+      AGENT_IDENTITY: ${AGENT_IDENTITY:-rtvoice-agent}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LLM_READ_TIMEOUT_S: ${LLM_READ_TIMEOUT_S:-120}
+      LLM_CONNECT_TIMEOUT_S: ${LLM_CONNECT_TIMEOUT_S:-15}
+    expose:
+      - "9100"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "30m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────
+  # Caddy（TLS 反向代理）
+  # ─────────────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: rtvoice-caddy
+    restart: unless-stopped
+    networks: [1panel-network]
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:80:80"
+      - "${BIND_HOST:-0.0.0.0}:443:443"
+    environment:
+      SERVER_IP: ${SERVER_IP}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /data/RTVoice/caddy/data:/data
+      - /data/RTVoice/caddy/config:/config
+    depends_on:
+      token-server:
+        condition: service_healthy
+      stt-server:
+        condition: service_healthy
+      tts-server:
+        condition: service_healthy
+      realtime-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-qO-", "https://127.0.0.1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────
+  # Prometheus
+  # ─────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: rtvoice-prometheus
+    restart: unless-stopped
+    networks: [1panel-network]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - /data/RTVoice/prometheus:/prometheus
+    ports:
+      - "127.0.0.1:9091:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────
+  # Grafana
+  # ─────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: rtvoice-grafana
+    restart: unless-stopped
+    networks: [1panel-network]
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/rtvoice.json
+    volumes:
+      - ./monitoring/grafana-provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/dashboards:/var/lib/grafana/dashboards:ro
+      - /data/RTVoice/grafana:/var/lib/grafana
+    ports:
+      - "127.0.0.1:13000:3000"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
