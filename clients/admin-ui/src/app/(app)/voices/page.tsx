@@ -108,6 +108,11 @@ export default function VoicesPage() {
       const blob = b64ToBlob(r.audio_b64);
       const url = URL.createObjectURL(blob);
       if (previewUrl) URL.revokeObjectURL(previewUrl);
+      // 清除旧 Audio 实例，确保试听始终播放最新处理的音频
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
       setPreviewUrl(url);
       setStep(2);
     },
