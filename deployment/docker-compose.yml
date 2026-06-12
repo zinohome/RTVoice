@@ -235,6 +235,8 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL_PROD:-http://host.docker.internal:11434/v1}
       LLM_MODEL: ${LLM_MODEL_PROD:-qwen2.5:7b}
       LLM_API_KEY: ${LLM_API_KEY_PROD:-ollama}
+      LLM_READ_TIMEOUT_S: ${LLM_READ_TIMEOUT_S:-120}
+      LLM_CONNECT_TIMEOUT_S: ${LLM_CONNECT_TIMEOUT_S:-15}
       TTS_BASE_URL: http://tts-server:9880
       PUBLIC_WS_BASE: ${PUBLIC_WS_BASE}
       AGENT_SYSTEM_PROMPT: ${AGENT_SYSTEM_PROMPT:-}
