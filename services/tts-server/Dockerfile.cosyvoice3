@@ -18,6 +18,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ \
     DEBIAN_FRONTEND=noninteractive \
     COSYVOICE_DIR=/opt/CosyVoice \
     MODEL_DIR=/opt/CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B-2512

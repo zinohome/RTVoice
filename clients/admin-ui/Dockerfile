@@ -5,7 +5,8 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --legacy-peer-deps
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm ci --legacy-peer-deps
 
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
