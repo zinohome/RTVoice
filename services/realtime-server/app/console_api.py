@@ -239,9 +239,6 @@ async def voices_preview(
             pcm_data = wf.readframes(wf.getnframes())
 
         # 从 ws://stt-server:9090/v1/asr 派生 http://stt-server:9090/v1/transcribe
-        stt_http_url = STT_WS_URL.replace("ws://", "http://", 1).replace("wss://", "https://", 1)
-        stt_transcribe_url = stt_http_url.rsplit("/", 1)[0] + "/../transcribe"
-        # 更健壮的方式：直接构造，忽略路径部分
         from urllib.parse import urlparse
         parsed = urlparse(STT_WS_URL)
         stt_base = f"{'https' if parsed.scheme == 'wss' else 'http'}://{parsed.netloc}"
