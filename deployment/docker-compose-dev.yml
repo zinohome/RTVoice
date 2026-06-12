@@ -1,16 +1,22 @@
 # RTVoice 本地/内网测试节点专用 Compose
 #
 # 目标机器：192.168.66.163（NVIDIA RTX 3060 12GB，1Panel 管理）
+#   代码目录：/data/RTVoice/（git clone 到此目录）
 #
 # 与生产 docker-compose.yml 的差异（仅这两处）：
 #   1. 数据卷挂载路径：/data/RTVoice/（非 EBS /mnt/extra/RTVoice/）
 #   2. TTS 镜像：本地构建 rtvoice/tts-server-cosyvoice3:v0.23.0
 #              （非 AWS ECR 镜像，ECR 仅 AWS 节点可拉取）
 #
+# 路径规范（重要）：
+#   - 所有宿主机路径统一使用绝对路径，禁止使用 ./（相对路径）
+#   - 配置文件（只读）挂载自：/data/RTVoice/deployment/...（git repo 内）
+#   - 数据卷（读写）挂载自：/data/RTVoice/...（持久化数据）
+#
 # 使用方式：
-#   cd deployment && cp .env.example .env && 编辑 .env
-#   docker compose -f docker-compose-dev.yml up -d --build
-#   或用 1Panel 编排界面，Compose 文件路径指向 deployment/docker-compose-dev.yml
+#   cd /data/RTVoice && cp deployment/.env.example deployment/.env && 编辑 .env
+#   docker compose -f /data/RTVoice/deployment/docker-compose-dev.yml up -d --build
+#   或用 1Panel 编排界面，Compose 文件路径指向 /data/RTVoice/deployment/docker-compose-dev.yml
 
 name: rtvoice
 
@@ -35,7 +41,7 @@ services:
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
     volumes:
-      - ./livekit/livekit.prod.yaml:/etc/livekit.yaml:ro
+      - /data/RTVoice/deployment/livekit/livekit.prod.yaml:/etc/livekit.yaml:ro
     command:
       - --config
       - /etc/livekit.yaml
@@ -63,7 +69,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   token-server:
     build:
-      context: ..
+      context: /data/RTVoice
       dockerfile: services/token-server/Dockerfile
     image: rtvoice/token-server:v0.23.0
     container_name: rtvoice-token
@@ -107,7 +113,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   stt-server:
     build:
-      context: ..
+      context: /data/RTVoice
       dockerfile: services/stt-server/Dockerfile
     image: rtvoice/stt-server:v0.23.0
     container_name: rtvoice-stt
@@ -152,7 +158,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   tts-server:
     build:
-      context: ..
+      context: /data/RTVoice
       dockerfile: services/tts-server/Dockerfile.cosyvoice3
     image: rtvoice/tts-server-cosyvoice3:v0.23.0
     container_name: rtvoice-tts
@@ -203,7 +209,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   realtime-server:
     build:
-      context: ..
+      context: /data/RTVoice
       dockerfile: services/realtime-server/Dockerfile
     image: rtvoice/realtime-server:v0.23.0
     container_name: rtvoice-realtime
@@ -279,7 +285,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   admin-ui:
     build:
-      context: ../clients/admin-ui
+      context: /data/RTVoice/clients/admin-ui
       dockerfile: Dockerfile
     image: rtvoice/admin-ui:v0.23.0
     container_name: rtvoice-admin-ui
@@ -311,7 +317,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   agent-worker:
     build:
-      context: ..
+      context: /data/RTVoice
       dockerfile: services/agent-worker/Dockerfile
     image: rtvoice/agent-worker:v0.23.0
     container_name: rtvoice-agent
@@ -375,7 +381,7 @@ services:
     environment:
       SERVER_IP: ${SERVER_IP}
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /data/RTVoice/deployment/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - /data/RTVoice/caddy/data:/data
       - /data/RTVoice/caddy/config:/config
     depends_on:
@@ -413,8 +419,8 @@ services:
     restart: unless-stopped
     networks: [1panel-network]
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - /data/RTVoice/deployment/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /data/RTVoice/deployment/monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - /data/RTVoice/prometheus:/prometheus
     ports:
       - "127.0.0.1:9091:9090"
@@ -450,8 +456,8 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/rtvoice.json
     volumes:
-      - ./monitoring/grafana-provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/dashboards:/var/lib/grafana/dashboards:ro
+      - /data/RTVoice/deployment/monitoring/grafana-provisioning:/etc/grafana/provisioning:ro
+      - /data/RTVoice/deployment/monitoring/dashboards:/var/lib/grafana/dashboards:ro
       - /data/RTVoice/grafana:/var/lib/grafana
     ports:
       - "127.0.0.1:13000:3000"
