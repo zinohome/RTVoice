@@ -2,10 +2,16 @@
 
 新增于 SP3：
   - 组 messages = [system(prompt), ...memory, {user:final}] 喂给 llm_client
-  - LLM delta 同时 ws.send_json(response.text) 和 tts_ws.send_text
+  - LLM delta 按句子边界缓冲后逐句发文本、合成 TTS、发音频
   - response.done 带 text=完整 assistant 回复
   - 成功 turn → memory.append_turn(user, assistant)
   - 全程 audit.write(event) 异步落 JSONL
+
+逐句交错模式（SP-TTS-SYNC）：
+  以标点符号（。！？!?；;…\\n）断句，对每个完整句子：
+    1. 先向前端发送句子文本（response.text）
+    2. 再通过 TTS HTTP 接口合成并流式发送 PCM 音频
+  消除"文字全部先出、音频再播"的感知延迟问题。
 """
 from __future__ import annotations
 import asyncio
@@ -21,6 +27,22 @@ if TYPE_CHECKING:
     from app.session_manager import Session
 
 log = logging.getLogger("rtvoice.realtime.pipeline")
+
+# 与 TTS server 保持一致的强终止标点集合
+_SENT_BOUNDARY = frozenset("。！？!?；;…\n")
+
+
+def _split_sentences(buf: str) -> tuple[list[str], str]:
+    """从累积缓冲中切出完整句子（以强标点结尾），返回 (完整句列表, 剩余片段)。"""
+    sentences: list[str] = []
+    start = 0
+    for i, ch in enumerate(buf):
+        if ch in _SENT_BOUNDARY:
+            seg = buf[start:i + 1].strip()
+            if seg:
+                sentences.append(seg)
+            start = i + 1
+    return sentences, buf[start:]
 
 
 def _classify_error(exc: Exception) -> str:
@@ -46,8 +68,20 @@ async def _audit(sess, event: dict) -> None:
         log.exception("audit.write failed (continuing)")
 
 
+async def _send_sentence(ws, tts_client, sentence: str) -> None:
+    """向前端发送一个完整句子的文本，然后合成并发送对应音频。"""
+    await ws.send_json({"type": "response.text", "text": sentence})
+    async for pcm in tts_client.stream(sentence):
+        if pcm:
+            await ws.send_bytes(pcm)
+
+
 async def run_turn(sess, ws):
-    """SP3 single turn with memory + streaming + audit."""
+    """SP3 single turn with memory + streaming + audit.
+
+    采用逐句交错模式：LLM 文本按标点断句，每句先发文本再发音频，
+    避免"文字全出完、音频才开始"的感知问题。
+    """
     sess.current_turn_task = asyncio.current_task()
 
     # SP4 K: voice/speed 热改 → pipeline 这里重建 TTS client
@@ -102,34 +136,19 @@ async def run_turn(sess, ws):
         messages.extend(list(sess.memory))
         messages.append({"role": "user", "content": user_text})
 
-        # 3. LLM stream + 并行 TTS feed + ws.response.text emit
-        tts_ws = await sess.tts_client.open_ws()
-        try:
-            async def feeder():
-                try:
-                    async for delta in sess.llm_client.stream(messages):
-                        if delta:
-                            assistant_chunks.append(delta)
-                            await ws.send_json({"type": "response.text", "text": delta})
-                            await tts_ws.send_text(delta)
-                finally:
-                    await tts_ws.eos()
+        # 3. LLM stream → 逐句交错：文本句 N → 音频句 N → 文本句 N+1 → 音频句 N+1
+        buf = ""
+        async for delta in sess.llm_client.stream(messages):
+            if delta:
+                assistant_chunks.append(delta)
+                buf += delta
+                sentences, buf = _split_sentences(buf)
+                for sentence in sentences:
+                    await _send_sentence(ws, sess.tts_client, sentence)
 
-            feed_task = asyncio.create_task(feeder())
-            try:
-                async for pcm in tts_ws.audio_chunks():
-                    if pcm:
-                        await ws.send_bytes(pcm)
-                await feed_task
-            finally:
-                if not feed_task.done():
-                    feed_task.cancel()
-                    try:
-                        await feed_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-        finally:
-            await tts_ws.aclose()
+        # 最后一段（无强终止标点的残余文本，如回复末尾没有句号）
+        if buf.strip():
+            await _send_sentence(ws, sess.tts_client, buf)
 
         # 4. response.done + memory + audit
         assistant_text = "".join(assistant_chunks)
