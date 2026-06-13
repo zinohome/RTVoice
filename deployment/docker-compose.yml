@@ -185,6 +185,7 @@ services:
     volumes:
       - /mnt/extra/RTVoice/keys:/data/keys:rw
       - /mnt/extra/RTVoice/cosyvoice-models:/opt/CosyVoice/pretrained_models
+      - /mnt/extra/RTVoice/modelscope-cache:/home/appuser/.cache/modelscope
     expose:
       - "9880"
     healthcheck:
