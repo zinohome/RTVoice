@@ -3,7 +3,7 @@
 # 适配目标：
 #   - 1Panel 编排（name 字段使其在编排界面可见）
 #   - 网络：1panel-network（1Panel 预创建的外部网络）
-#   - 数据：全部挂载到 /data/RTVoice/
+#   - 数据：全部挂载到 /mnt/extra/RTVoice/
 #   - GPU：NVIDIA RTX 3060 12GB（TTS 使用 GPU，STT 使用 CPU）
 #
 # 使用方式：
@@ -41,7 +41,7 @@ services:
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
     volumes:
-      - ./livekit/livekit.prod.yaml:/etc/livekit.yaml:ro
+      - /home/ubuntu/repos/RTVoice/deployment/livekit/livekit.prod.yaml:/etc/livekit.yaml:ro
     command:
       - --config
       - /etc/livekit.yaml
@@ -69,7 +69,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   token-server:
     build:
-      context: ..
+      context: /home/ubuntu/repos/RTVoice
       dockerfile: services/token-server/Dockerfile
     image: rtvoice/token-server:v0.22.0
     container_name: rtvoice-token
@@ -90,7 +90,7 @@ services:
       RTVOICE_KEYS_FILE: /data/keys/keys.yaml
       RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
     volumes:
-      - /data/RTVoice/keys:/data/keys:rw
+      - /mnt/extra/RTVoice/keys:/data/keys:rw
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2).status==200 else 1)"]
       interval: 10s
@@ -113,7 +113,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   stt-server:
     build:
-      context: ..
+      context: /home/ubuntu/repos/RTVoice
       dockerfile: services/stt-server/Dockerfile
     image: rtvoice/stt-server:v0.22.0
     container_name: rtvoice-stt
@@ -134,7 +134,7 @@ services:
       RTVOICE_KEYS_FILE: /data/keys/keys.yaml
       RTVOICE_REDIS_URL: ${RTVOICE_REDIS_URL:-redis://redis:6379/0}
     volumes:
-      - /data/RTVoice/keys:/data/keys:rw
+      - /mnt/extra/RTVoice/keys:/data/keys:rw
     expose:
       - "9090"
     healthcheck:
@@ -160,7 +160,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   tts-server:
     build:
-      context: ..
+      context: /home/ubuntu/repos/RTVoice
       dockerfile: services/tts-server/Dockerfile.cosyvoice3
     image: 345182146241.dkr.ecr.ap-east-1.amazonaws.com/rtvoice/tts-server-cosyvoice3:v0.22.0
     container_name: rtvoice-tts
@@ -183,8 +183,8 @@ services:
       # STT 内部转写接口（供参考音频文本验证）
       STT_TRANSCRIBE_URL: http://stt-server:9090/v1/transcribe
     volumes:
-      - /data/RTVoice/keys:/data/keys:rw
-      - /data/RTVoice/cosyvoice-models:/opt/CosyVoice/pretrained_models
+      - /mnt/extra/RTVoice/keys:/data/keys:rw
+      - /mnt/extra/RTVoice/cosyvoice-models:/opt/CosyVoice/pretrained_models
     expose:
       - "9880"
     healthcheck:
@@ -214,7 +214,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   realtime-server:
     build:
-      context: ..
+      context: /home/ubuntu/repos/RTVoice
       dockerfile: services/realtime-server/Dockerfile
     image: rtvoice/realtime-server:v0.22.0
     container_name: rtvoice-realtime
@@ -264,8 +264,8 @@ services:
       TTS_ADMIN_API_KEY: ${TTS_ADMIN_API_KEY:-}
       TOKEN_BASE_URL: http://token-server:8000
     volumes:
-      - /data/RTVoice/transcripts:/data/transcripts:rw
-      - /data/RTVoice/keys:/data/keys:rw
+      - /mnt/extra/RTVoice/transcripts:/data/transcripts:rw
+      - /mnt/extra/RTVoice/keys:/data/keys:rw
     expose:
       - "9000"
     healthcheck:
@@ -290,7 +290,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   admin-ui:
     build:
-      context: ../clients/admin-ui
+      context: /home/ubuntu/repos/RTVoice/clients/admin-ui
       dockerfile: Dockerfile
     image: rtvoice/admin-ui:v0.22.0
     container_name: rtvoice-admin-ui
@@ -322,7 +322,7 @@ services:
   # ─────────────────────────────────────────────────────────────
   agent-worker:
     build:
-      context: ..
+      context: /home/ubuntu/repos/RTVoice
       dockerfile: services/agent-worker/Dockerfile
     image: rtvoice/agent-worker:v0.22.0
     container_name: rtvoice-agent
@@ -387,9 +387,9 @@ services:
     environment:
       SERVER_IP: ${SERVER_IP}
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - /data/RTVoice/caddy/data:/data
-      - /data/RTVoice/caddy/config:/config
+      - /home/ubuntu/repos/RTVoice/deployment/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /mnt/extra/RTVoice/caddy/data:/data
+      - /mnt/extra/RTVoice/caddy/config:/config
     depends_on:
       token-server:
         condition: service_healthy
@@ -425,9 +425,9 @@ services:
     restart: unless-stopped
     networks: [1panel-network]
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
-      - /data/RTVoice/prometheus:/prometheus
+      - /home/ubuntu/repos/RTVoice/deployment/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /home/ubuntu/repos/RTVoice/deployment/monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - /mnt/extra/RTVoice/prometheus:/prometheus
     ports:
       - "127.0.0.1:9091:9090"
     command:
@@ -462,9 +462,9 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/rtvoice.json
     volumes:
-      - ./monitoring/grafana-provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/dashboards:/var/lib/grafana/dashboards:ro
-      - /data/RTVoice/grafana:/var/lib/grafana
+      - /home/ubuntu/repos/RTVoice/deployment/monitoring/grafana-provisioning:/etc/grafana/provisioning:ro
+      - /home/ubuntu/repos/RTVoice/deployment/monitoring/dashboards:/var/lib/grafana/dashboards:ro
+      - /mnt/extra/RTVoice/grafana:/var/lib/grafana
     ports:
       - "127.0.0.1:13000:3000"
     deploy:
