@@ -149,3 +149,44 @@
         }
     }
 }
+
+# ─── 公网域名：Let's Encrypt 自动证书 ───────────────────────────────
+http://voice.yanyi-ai.com {
+    redir https://{host}{uri} permanent
+}
+
+voice.yanyi-ai.com {
+    handle /admin* {
+        reverse_proxy admin-ui:3000
+    }
+    handle /v1/admin/* {
+        reverse_proxy realtime-server:9000
+    }
+    handle /auth/* {
+        reverse_proxy realtime-server:9000
+    }
+    handle /v1/sessions* {
+        reverse_proxy realtime-server:9000
+    }
+    handle /v1/realtime/* {
+        reverse_proxy realtime-server:9000
+    }
+    handle /v1/console/* {
+        reverse_proxy realtime-server:9000
+    }
+    handle /v1/tokens {
+        reverse_proxy token-server:8000
+    }
+    handle /v1/asr {
+        reverse_proxy stt-server:9090
+    }
+    handle /v1/tts/* {
+        reverse_proxy tts-server:9880
+    }
+    handle /v1/voices* {
+        reverse_proxy tts-server:9880
+    }
+    handle / {
+        redir * /admin/ permanent
+    }
+}
